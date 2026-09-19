@@ -165,6 +165,10 @@ function volClass(v: number) {
   if (v >= 250) return 'Excellent'; if (v >= 100) return 'Very Good'; if (v >= 50) return 'Good'; if (v >= 25) return 'Meaningful'; if (v >= 10) return 'Thin'; return 'Very Thin';
 }
 
+function isSectionOff(profile: Profile, key: keyof Profile): boolean {
+  return profile[key] === false;
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
 
@@ -194,22 +198,39 @@ serve(async (req) => {
     const symbols = scanUniverse;
     console.log(`Scan universe (${symbols.length} symbols): ${symbols.join(', ')}`);
 
+    // Determine if NO FILTER MODE is active: all strategy sections OFF + exclude existing positions OFF
+    const noFilterMode =
+      isSectionOff(profile, 'order_strike_enabled') &&
+      isSectionOff(profile, 'expiration_enabled') &&
+      isSectionOff(profile, 'croi_pc_enabled') &&
+      isSectionOff(profile, 'cycle_liquidity_enabled') &&
+      isSectionOff(profile, 'spread_enabled') &&
+      isSectionOff(profile, 'short_interest_enabled') &&
+      isSectionOff(profile, 'technical_rules_enabled') &&
+      profile.exclude_existing_positions === false;
+
+    console.log(`NO FILTER MODE: ${noFilterMode}`);
+    console.log(`Profile toggles: order_strike=${profile.order_strike_enabled}, expiration=${profile.expiration_enabled}, croi_pc=${profile.croi_pc_enabled}, cycle_liq=${profile.cycle_liquidity_enabled}, spread=${profile.spread_enabled}, short_int=${profile.short_interest_enabled}, technical=${profile.technical_rules_enabled}, exclude_existing=${profile.exclude_existing_positions}`);
+
     if (symbols.length === 0) {
       return json({
         success: true,
         candidates: [],
         source: 'massive',
         scanned_at: new Date().toISOString(),
+        no_filter_mode: noFilterMode,
         scan_counts: {
+          symbols_in_universe: 0,
           symbols_requested: 0,
-          symbols_scanned: 0,
+          symbols_returned: 0,
           symbols_failed: 0,
           puts_returned: 0,
-          puts_usable_quote: 0,
-          puts_missing_quote: 0,
+          contracts_valid_quote: 0,
+          contracts_skipped_invalid: 0,
           contracts_evaluated: 0,
           qualified: 0,
           rejected: 0,
+          pages_fetched: 0,
         },
       });
     }
@@ -222,11 +243,12 @@ serve(async (req) => {
     let symbolsScanned = 0;
     let symbolsFailed = 0;
     let totalPutsReturned = 0;
-    let totalUsableQuote = 0;
-    let totalMissingQuote = 0;
+    let totalValidQuote = 0;
+    let totalSkippedInvalid = 0;
     let totalEvaluated = 0;
     let totalQualified = 0;
     let totalRejected = 0;
+    let totalPagesFetched = 0;
 
     for (const symbol of symbols) {
       // ── Step 1: Stock aggregates ──
@@ -265,6 +287,7 @@ serve(async (req) => {
 
       while (chainPath && pageCount < MAX_CHAIN_PAGES) {
         pageCount++;
+        totalPagesFetched++;
         const pageResult = await massiveFetch(chainPath, apiKey, symbol, `options_snapshot_p${pageCount}`);
 
         if (!pageResult.ok) {
@@ -278,7 +301,6 @@ serve(async (req) => {
 
         const nextUrl = pageResult.data?.next_url;
         if (nextUrl && typeof nextUrl === 'string' && nextUrl.length > 0) {
-          // next_url is a full URL — extract the path for our fetch wrapper
           try {
             const parsed = new URL(nextUrl);
             chainPath = parsed.pathname + parsed.search;
@@ -296,100 +318,124 @@ serve(async (req) => {
       totalPutsReturned += contracts.length;
       console.log(`[Massive] ${symbol} — ${contracts.length} put contracts from ${pageCount} page(s)`);
 
-      // ── Expiration filtering ──
-      const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
-      let chosenExpirations: string[];
+      // ── Pre-filtering: expiration and strike ──
+      // In NO FILTER MODE, skip ALL pre-filtering
+      let filteredContracts = contracts;
 
-      if (profile.expiration_enabled === false) {
-        chosenExpirations = allExpirations;
-        console.log(`[Massive] ${symbol} — expiration section OFF, using all ${chosenExpirations.length} expirations`);
-      } else if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
-        chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
-        console.log(`[Massive] ${symbol} — filtering to preferred expirations: ${chosenExpirations.join(', ')}`);
-      } else {
-        chosenExpirations = allExpirations.filter((e) => {
-          const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
-          return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
-        });
-        console.log(`[Massive] ${symbol} — filtering to DTE ${profile.min_dte}-${profile.max_dte}: ${chosenExpirations.length} expirations`);
-      }
+      if (!noFilterMode) {
+        // Expiration filtering
+        const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
+        let chosenExpirations: string[];
 
-      let filteredContracts = contracts.filter((c: any) =>
-        chosenExpirations.includes(c.details.expiration_date),
-      );
-
-      // ── Strike filtering ──
-      if (profile.order_strike_enabled === false) {
-        console.log(`[Massive] ${symbol} — order/strike section OFF, not filtering by strike`);
-      } else {
-        const preferredStrikes = profile.preferred_strikes || [];
-        if (preferredStrikes.length > 0) {
-          filteredContracts = filteredContracts.filter((c: any) =>
-            preferredStrikes.includes(Number(c.details.strike_price)),
-          );
+        if (isSectionOff(profile, 'expiration_enabled')) {
+          chosenExpirations = allExpirations;
+          console.log(`[Massive] ${symbol} — expiration section OFF, using all ${chosenExpirations.length} expirations`);
+        } else if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
+          chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
+          console.log(`[Massive] ${symbol} — filtering to preferred expirations: ${chosenExpirations.join(', ')}`);
         } else {
-          filteredContracts = filteredContracts.filter((c: any) => {
-            const s = Number(c.details.strike_price);
-            if (s > profile.max_strike) return false;
-            if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
-            return true;
+          chosenExpirations = allExpirations.filter((e) => {
+            const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
+            return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
           });
+          console.log(`[Massive] ${symbol} — filtering to DTE ${profile.min_dte}-${profile.max_dte}: ${chosenExpirations.length} expirations`);
         }
+
+        filteredContracts = contracts.filter((c: any) =>
+          chosenExpirations.includes(c.details.expiration_date),
+        );
+
+        // Strike filtering
+        if (!isSectionOff(profile, 'order_strike_enabled')) {
+          const preferredStrikes = profile.preferred_strikes || [];
+          if (preferredStrikes.length > 0) {
+            filteredContracts = filteredContracts.filter((c: any) =>
+              preferredStrikes.includes(Number(c.details.strike_price)),
+            );
+          } else {
+            filteredContracts = filteredContracts.filter((c: any) => {
+              const s = Number(c.details.strike_price);
+              if (s > profile.max_strike) return false;
+              if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
+              return true;
+            });
+          }
+        } else {
+          console.log(`[Massive] ${symbol} — order/strike section OFF, not filtering by strike`);
+        }
+      } else {
+        console.log(`[Massive] ${symbol} — NO FILTER MODE: skipping all pre-filtering`);
       }
 
-      console.log(`[Massive] ${symbol} — ${filteredContracts.length} contracts after all filtering`);
+      console.log(`[Massive] ${symbol} — ${filteredContracts.length} contracts after pre-filtering (no_filter=${noFilterMode})`);
 
+      // ── Contract evaluation loop ──
       for (const c of filteredContracts) {
         const strike = Number(c.details.strike_price || 0);
         const bid = Number(c.last_quote?.bid || 0);
         const ask = Number(c.last_quote?.ask || 0);
+        const expiration = c.details.expiration_date as string;
 
-        // Track contracts with missing/zero bid or ask — don't silently skip
-        if (!strike || !bid || !ask) {
-          totalMissingQuote++;
+        // ── DATA VALIDATION (always applied, regardless of filter mode) ──
+        // Only reject if essential data is unusable
+        const invalidReasons: string[] = [];
+        if (!strike || strike <= 0) invalidReasons.push('Missing strike');
+        if (!expiration) invalidReasons.push('Missing expiration');
+        if (bid <= 0) invalidReasons.push('Bid <= 0');
+        if (ask <= 0) invalidReasons.push('Ask <= 0');
+        if (bid > 0 && ask > 0 && ask < bid) invalidReasons.push('Ask < bid');
+
+        if (invalidReasons.length > 0) {
+          totalSkippedInvalid++;
+          console.log(`[Massive] ${symbol} — skipped contract: ${invalidReasons.join(', ')} (strike=${strike}, bid=${bid}, ask=${ask})`);
           continue;
         }
 
-        totalUsableQuote++;
+        // ── Passed data validation ──
+        totalValidQuote++;
         totalEvaluated++;
 
-        const expiration = c.details.expiration_date as string;
         const dte = Math.max(0, Math.ceil((new Date(expiration).getTime() - today.getTime()) / 86400000));
         const mid = (bid + ask) / 2;
         const sp = spreadPct(bid, ask);
         const volume = Number(c.volume || 0), oi = Number(c.open_interest || 0);
         const iv = Number(c.implied_volatility || 0) * 100;
         const delta = Number(c.greeks?.delta || 0);
+
+        // Calculate BTC optimization (for display only — not used for rejection in no-filter mode)
         const best = optimize(mid, strike, profile, true);
-        const reasons: string[] = [];
 
-        // Exclude Existing Positions — independent of section toggles
-        if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-
-        if (profile.order_strike_enabled !== false && strike > profile.max_strike) reasons.push('Strike too high');
-
-        if (profile.croi_pc_enabled !== false) {
-          if (!best) reasons.push('CROI too low');
-          const pc = best?.pc ?? (mid - 0.01) / mid * 100;
-          if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
-        }
-
-        if (profile.spread_enabled !== false && sp > profile.max_spread_pct) reasons.push('Spread too wide');
-
-        if (profile.cycle_liquidity_enabled !== false) {
-          if (oi < profile.min_target_oi) reasons.push('OI too low');
-          if (volume < 10) reasons.push('Insufficient liquidity');
-        }
-
-        // Technical rules — gated by technical_rules_enabled
-        if (profile.technical_rules_enabled !== false) {
-          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
-        }
-
+        // Fallback values when no optimal BTC found
         const btc = best?.btc || 0.01;
         const netProfit = best?.netProfit ?? ((mid - btc) * 100 - profile.round_trip_commission);
         const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
         const pc = best?.pc ?? (mid - btc) / mid * 100;
+
+        // ── STRATEGY FILTERING (skipped entirely in NO FILTER MODE) ──
+        const reasons: string[] = [];
+
+        if (!noFilterMode) {
+          // Exclude Existing Positions — independent of section toggles
+          if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
+
+          if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
+
+          if (!isSectionOff(profile, 'croi_pc_enabled')) {
+            if (!best) reasons.push('CROI too low');
+            if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+          }
+
+          if (!isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) reasons.push('Spread too wide');
+
+          if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
+            if (oi < profile.min_target_oi) reasons.push('OI too low');
+            if (volume < 10) reasons.push('Insufficient liquidity');
+          }
+
+          if (!isSectionOff(profile, 'technical_rules_enabled')) {
+            if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
+          }
+        }
 
         const qualified = reasons.length === 0;
         if (qualified) totalQualified++; else totalRejected++;
@@ -412,19 +458,21 @@ serve(async (req) => {
     candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
 
     const scan_counts = {
+      symbols_in_universe: symbols.length,
       symbols_requested: symbols.length,
-      symbols_scanned: symbolsScanned,
+      symbols_returned: symbolsScanned,
       symbols_failed: symbolsFailed,
       puts_returned: totalPutsReturned,
-      puts_usable_quote: totalUsableQuote,
-      puts_missing_quote: totalMissingQuote,
+      contracts_valid_quote: totalValidQuote,
+      contracts_skipped_invalid: totalSkippedInvalid,
       contracts_evaluated: totalEvaluated,
       qualified: totalQualified,
       rejected: totalRejected,
+      pages_fetched: totalPagesFetched,
     };
 
-    console.log(`market-scan complete — ${candidates.length} candidates`, JSON.stringify(scan_counts));
-    return json({ success: true, candidates, source: 'massive', scanned_at: new Date().toISOString(), scan_counts });
+    console.log(`market-scan complete — ${candidates.length} candidates, no_filter_mode=${noFilterMode}`, JSON.stringify(scan_counts));
+    return json({ success: true, candidates, source: 'massive', scanned_at: new Date().toISOString(), no_filter_mode: noFilterMode, scan_counts });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Market scan failed';
     console.error(`market-scan fatal error: ${msg}`);

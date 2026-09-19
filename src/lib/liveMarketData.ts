@@ -7,15 +7,17 @@ import { supabase } from '@/lib/supabase';
 import type { CandidateScan, StrategyProfile } from '@/types';
 
 export interface ScanCounts {
+  symbols_in_universe: number;
   symbols_requested: number;
-  symbols_scanned: number;
+  symbols_returned: number;
   symbols_failed: number;
   puts_returned: number;
-  puts_usable_quote: number;
-  puts_missing_quote: number;
+  contracts_valid_quote: number;
+  contracts_skipped_invalid: number;
   contracts_evaluated: number;
   qualified: number;
   rejected: number;
+  pages_fetched: number;
 }
 
 export interface LiveScanResponse {
@@ -23,6 +25,7 @@ export interface LiveScanResponse {
   candidates: CandidateScan[];
   source: 'massive';
   scanned_at: string;
+  no_filter_mode: boolean;
   scan_counts: ScanCounts;
 }
 

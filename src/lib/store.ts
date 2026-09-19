@@ -68,6 +68,7 @@ export function useAppState() {
   const [positionsLoaded, setPositionsLoaded] = useState(false);
   const [scanUniverse, setScanUniverse] = useState<string[]>([]);
   const [scanCounts, setScanCounts] = useState<ScanCounts | null>(null);
+  const [noFilterMode, setNoFilterMode] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeTickerResponse | null>(null);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
@@ -198,6 +199,7 @@ export function useAppState() {
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
         setScanCounts(live.scan_counts || null);
+        setNoFilterMode(live.no_filter_mode || false);
       } catch (liveError) {
         const message = liveError instanceof Error
           ? `Massive API error: ${liveError.message}`
@@ -465,6 +467,7 @@ export function useAppState() {
     addToScanUniverse,
     removeFromScanUniverse,
     scanCounts,
+    noFilterMode,
     analyzing,
     analyzeResult,
     analyzeError,

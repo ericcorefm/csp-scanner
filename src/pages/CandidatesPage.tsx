@@ -89,18 +89,26 @@ export function CandidatesPage({
         </div>
       )}
 
+      {state.noFilterMode && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-medium text-amber-300">
+          NO FILTER MODE — All strategy sections and Exclude Existing Positions are OFF. Every put contract with valid bid/ask is qualified.
+        </div>
+      )}
+
       {state.scanCounts && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-3">
-            <ScanCountItem label="Symbols Requested" value={state.scanCounts.symbols_requested} />
-            <ScanCountItem label="Symbols Scanned" value={state.scanCounts.symbols_scanned} />
-            <ScanCountItem label="Symbols Failed" value={state.scanCounts.symbols_failed} color={state.scanCounts.symbols_failed > 0 ? 'text-amber-400' : 'text-slate-200'} />
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-11 gap-3">
+            <ScanCountItem label="In Universe" value={state.scanCounts.symbols_in_universe} />
+            <ScanCountItem label="Requested" value={state.scanCounts.symbols_requested} />
+            <ScanCountItem label="Returned" value={state.scanCounts.symbols_returned} color={state.scanCounts.symbols_failed > 0 ? 'text-amber-400' : 'text-slate-200'} />
+            <ScanCountItem label="Failed" value={state.scanCounts.symbols_failed} color={state.scanCounts.symbols_failed > 0 ? 'text-red-400' : 'text-slate-200'} />
             <ScanCountItem label="Puts Returned" value={state.scanCounts.puts_returned} />
-            <ScanCountItem label="Usable Quote" value={state.scanCounts.puts_usable_quote} />
-            <ScanCountItem label="Missing Quote" value={state.scanCounts.puts_missing_quote} color={state.scanCounts.puts_missing_quote > 0 ? 'text-amber-400' : 'text-slate-200'} />
+            <ScanCountItem label="Valid Quote" value={state.scanCounts.contracts_valid_quote} color="text-emerald-400" />
+            <ScanCountItem label="Skipped Invalid" value={state.scanCounts.contracts_skipped_invalid} color={state.scanCounts.contracts_skipped_invalid > 0 ? 'text-amber-400' : 'text-slate-200'} />
             <ScanCountItem label="Evaluated" value={state.scanCounts.contracts_evaluated} />
             <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
             <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color={state.scanCounts.rejected > 0 ? 'text-red-400' : 'text-slate-200'} />
+            <ScanCountItem label="Pages Fetched" value={state.scanCounts.pages_fetched} />
           </div>
         </div>
       )}
