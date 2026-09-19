@@ -47,6 +47,9 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
+// Chain status categories
+type ChainStatus = 'success' | 'no_options' | 'api_error' | 'unauthorized' | 'rate_limited' | 'network_error';
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -248,8 +251,10 @@ async function scanSymbol(
   noFilterMode: boolean,
   today: Date,
   fmt: (d: Date) => string,
+  verbose: boolean,
 ): Promise<{
   candidates: any[];
+  chainStatus: ChainStatus;
   putsReturned: number;
   missingBid: number;
   missingAsk: number;
@@ -262,14 +267,14 @@ async function scanSymbol(
   qualified: number;
   rejected: number;
   pagesFetched: number;
-  hadChain: boolean;
   rawSample?: any;
 }> {
   const counts = {
     candidates: [] as any[],
+    chainStatus: 'no_options' as ChainStatus,
     putsReturned: 0, missingBid: 0, missingAsk: 0, zeroBid: 0, zeroAsk: 0,
     missingStrike: 0, missingExpiration: 0, validQuotes: 0, evaluated: 0,
-    qualified: 0, rejected: 0, pagesFetched: 0, hadChain: false, rawSample: undefined as any,
+    qualified: 0, rejected: 0, pagesFetched: 0, rawSample: undefined as any,
   };
 
   const start = new Date(today); start.setDate(start.getDate() - 420);
@@ -290,37 +295,79 @@ async function scanSymbol(
   const primarySupport = support(bars, stockPrice);
   const trendClass = trend(bars);
 
-  // Step 2: Options chain (with pagination)
-  let chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put&limit=250`;
+  // Step 2: Options chain — match the analyze-ticker endpoint exactly
+  // No limit param: analyze-ticker uses ?contract_type=put only
+  const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
   const allRawContracts: any[] = [];
   let pageCount = 0;
+  let currentPath = chainPath;
+  let chainError: { status: number; body: string } | null = null;
 
-  while (chainPath && pageCount < MAX_CHAIN_PAGES) {
+  while (currentPath && pageCount < MAX_CHAIN_PAGES) {
     pageCount++;
     counts.pagesFetched++;
-    const pageResult = await massiveFetch(chainPath, apiKey, symbol, `options_snapshot_p${pageCount}`);
-    if (!pageResult.ok) break;
+    const pageResult = await massiveFetch(currentPath, apiKey, symbol, `options_snapshot_p${pageCount}`);
+
+    if (!pageResult.ok) {
+      chainError = { status: pageResult.status, body: pageResult.body };
+      if (verbose) {
+        console.log(`[VERBOSE] ${symbol} | options_snapshot FAILED | HTTP ${pageResult.status} | body: ${pageResult.body.slice(0, 200)}`);
+      }
+      break;
+    }
 
     const pageResults = pageResult.data?.results || [];
     allRawContracts.push(...pageResults);
+
+    if (verbose && pageCount === 1) {
+      console.log(`[VERBOSE] ${symbol} | options_snapshot OK | HTTP 200 | result_count=${pageResults.length}`);
+      console.log(`[VERBOSE] ${symbol} | response keys: ${Object.keys(pageResult.data || {}).join(', ')}`);
+    }
 
     if (!counts.rawSample && pageResults.length > 0) {
       counts.rawSample = pageResults[0];
       logRawContract(symbol, pageResults[0]);
     }
 
+    // Follow pagination via next_url
     const nextUrl = pageResult.data?.next_url;
     if (nextUrl && typeof nextUrl === 'string' && nextUrl.length > 0) {
       try {
         const parsed = new URL(nextUrl);
-        chainPath = parsed.pathname + parsed.search;
-      } catch { chainPath = ''; }
-    } else { chainPath = ''; }
+        currentPath = parsed.pathname + parsed.search;
+      } catch { currentPath = ''; }
+    } else { currentPath = ''; }
   }
 
+  // Determine chain status
   const contracts = allRawContracts.filter((c: any) => c?.details?.contract_type === 'put');
   counts.putsReturned = contracts.length;
-  counts.hadChain = contracts.length > 0;
+
+  if (chainError) {
+    if (chainError.status === 401 || chainError.status === 403) {
+      counts.chainStatus = 'unauthorized';
+    } else if (chainError.status === 429) {
+      counts.chainStatus = 'rate_limited';
+    } else if (chainError.status === 0) {
+      counts.chainStatus = 'network_error';
+    } else {
+      counts.chainStatus = 'api_error';
+    }
+    if (verbose) {
+      console.log(`[VERBOSE] ${symbol} | chain_status=${counts.chainStatus} | HTTP ${chainError.status} | puts=${contracts.length}`);
+    }
+    return counts;
+  }
+
+  if (contracts.length > 0) {
+    counts.chainStatus = 'success';
+  } else {
+    counts.chainStatus = 'no_options';
+  }
+
+  if (verbose) {
+    console.log(`[VERBOSE] ${symbol} | chain_status=${counts.chainStatus} | total_contracts=${allRawContracts.length} | puts=${contracts.length} | pages=${pageCount}`);
+  }
 
   // Pre-filtering
   let filteredContracts = contracts;
@@ -475,6 +522,7 @@ serve(async (req) => {
     const emptyCounts = {
       symbols_in_universe: symbolList.length, symbols_requested: symbolList.length,
       symbols_returned: 0, symbols_failed: 0, symbols_with_chains: 0,
+      chain_success: 0, chain_no_options: 0, chain_api_error: 0, chain_unauthorized: 0, chain_rate_limited: 0,
       puts_returned: 0, missing_bid: 0, missing_ask: 0, zero_bid: 0, zero_ask: 0,
       missing_strike: 0, missing_expiration: 0,
       valid_quotes: 0, contracts_evaluated: 0, qualified: 0, rejected: 0, pages_fetched: 0,
@@ -494,28 +542,34 @@ serve(async (req) => {
     const candidates: any[] = [];
 
     let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
+    let chainSuccess = 0, chainNoOptions = 0, chainApiError = 0, chainUnauthorized = 0, chainRateLimited = 0;
     let totalPutsReturned = 0, totalMissingBid = 0, totalMissingAsk = 0;
     let totalZeroBid = 0, totalZeroAsk = 0, totalMissingStrike = 0, totalMissingExpiration = 0;
     let totalValidQuotes = 0, totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPagesFetched = 0;
     let rawSample: any = null;
+    let verboseCount = 0;
 
-    // Process symbols in batches of 10 to avoid overwhelming the API
-    const BATCH_SIZE = 10;
+    // Process symbols in batches of 5 to reduce rate-limit risk
+    const BATCH_SIZE = 5;
     for (let i = 0; i < symbolList.length; i += BATCH_SIZE) {
       const batch = symbolList.slice(i, i + BATCH_SIZE);
-      console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}: ${batch.map((b) => b.ticker).join(', ')}`);
+      console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(symbolList.length / BATCH_SIZE)}: ${batch.map((b) => b.ticker).join(', ')}`);
 
       const batchResults = await Promise.all(
-        batch.map((sym) =>
-          scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt)
+        batch.map((sym) => {
+          // Verbose logging for first 3 symbols total
+          const isVerbose = verboseCount < 3;
+          if (isVerbose) verboseCount++;
+          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose)
             .catch((err) => {
               console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
               return null;
-            })
-        )
+            });
+        })
       );
 
-      for (const result of batchResults) {
+      for (let j = 0; j < batchResults.length; j++) {
+        const result = batchResults[j];
         if (!result) { symbolsFailed++; continue; }
         symbolsScanned++;
         totalPutsReturned += result.putsReturned;
@@ -530,7 +584,17 @@ serve(async (req) => {
         totalQualified += result.qualified;
         totalRejected += result.rejected;
         totalPagesFetched += result.pagesFetched;
-        if (result.hadChain) symbolsWithChains++;
+
+        // Track chain status separately
+        switch (result.chainStatus) {
+          case 'success': chainSuccess++; symbolsWithChains++; break;
+          case 'no_options': chainNoOptions++; break;
+          case 'api_error': chainApiError++; symbolsFailed++; break;
+          case 'unauthorized': chainUnauthorized++; symbolsFailed++; break;
+          case 'rate_limited': chainRateLimited++; symbolsFailed++; break;
+          case 'network_error': symbolsFailed++; break;
+        }
+
         if (!rawSample && result.rawSample) rawSample = result.rawSample;
         candidates.push(...result.candidates);
       }
@@ -554,6 +618,11 @@ serve(async (req) => {
       symbols_returned: symbolsScanned,
       symbols_failed: symbolsFailed,
       symbols_with_chains: symbolsWithChains,
+      chain_success: chainSuccess,
+      chain_no_options: chainNoOptions,
+      chain_api_error: chainApiError,
+      chain_unauthorized: chainUnauthorized,
+      chain_rate_limited: chainRateLimited,
       puts_returned: totalPutsReturned,
       missing_bid: totalMissingBid,
       missing_ask: totalMissingAsk,

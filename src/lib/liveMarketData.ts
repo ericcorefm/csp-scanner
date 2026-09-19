@@ -14,6 +14,11 @@ export interface ScanCounts {
   symbols_returned: number;
   symbols_failed: number;
   symbols_with_chains: number;
+  chain_success: number;
+  chain_no_options: number;
+  chain_api_error: number;
+  chain_unauthorized: number;
+  chain_rate_limited: number;
   puts_returned: number;
   missing_bid: number;
   missing_ask: number;

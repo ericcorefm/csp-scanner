@@ -107,11 +107,15 @@ export function CandidatesPage({
 
       {state.scanCounts && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-14 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-20 gap-3">
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
-            <ScanCountItem label="Requested" value={state.scanCounts.symbols_requested} />
             <ScanCountItem label="Returned" value={state.scanCounts.symbols_returned} color={state.scanCounts.symbols_failed > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            {isDiscovery && <ScanCountItem label="With Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />}
+            <ScanCountItem label="With Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
+            <ScanCountItem label="Chain Success" value={state.scanCounts.chain_success} color="text-emerald-400" />
+            <ScanCountItem label="No Options" value={state.scanCounts.chain_no_options} color={state.scanCounts.chain_no_options > 0 ? 'text-amber-400' : 'text-slate-200'} />
+            <ScanCountItem label="Chain Errors" value={state.scanCounts.chain_api_error} color={state.scanCounts.chain_api_error > 0 ? 'text-red-400' : 'text-slate-200'} />
+            <ScanCountItem label="Unauthorized" value={state.scanCounts.chain_unauthorized} color={state.scanCounts.chain_unauthorized > 0 ? 'text-red-400' : 'text-slate-200'} />
+            <ScanCountItem label="Rate Limited" value={state.scanCounts.chain_rate_limited} color={state.scanCounts.chain_rate_limited > 0 ? 'text-red-400' : 'text-slate-200'} />
             <ScanCountItem label="Failed" value={state.scanCounts.symbols_failed} color={state.scanCounts.symbols_failed > 0 ? 'text-red-400' : 'text-slate-200'} />
             <ScanCountItem label="Puts Returned" value={state.scanCounts.puts_returned} />
             <ScanCountItem label="Missing Bid" value={state.scanCounts.missing_bid} color={state.scanCounts.missing_bid > 0 ? 'text-red-400' : 'text-slate-200'} />
@@ -119,6 +123,7 @@ export function CandidatesPage({
             <ScanCountItem label="Missing Strike" value={state.scanCounts.missing_strike} color={state.scanCounts.missing_strike > 0 ? 'text-amber-400' : 'text-slate-200'} />
             <ScanCountItem label="Missing Exp" value={state.scanCounts.missing_expiration} color={state.scanCounts.missing_expiration > 0 ? 'text-amber-400' : 'text-slate-200'} />
             <ScanCountItem label="Valid Quotes" value={state.scanCounts.valid_quotes} color="text-emerald-400" />
+            <ScanCountItem label="Evaluated" value={state.scanCounts.contracts_evaluated} color="text-slate-200" />
             <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
             <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color={state.scanCounts.rejected > 0 ? 'text-red-400' : 'text-slate-200'} />
             <ScanCountItem label="Pages Fetched" value={state.scanCounts.pages_fetched} />
