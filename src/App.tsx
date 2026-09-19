@@ -7,6 +7,7 @@ import { OpenPositionsPage } from '@/pages/OpenPositionsPage';
 import { ClosedPositionsPage } from '@/pages/ClosedPositionsPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { DailySummaryPage } from '@/pages/DailySummaryPage';
+import { ScanUniversePage } from '@/pages/ScanUniversePage';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('candidates');
@@ -55,6 +56,7 @@ function App() {
       {currentPage === 'closed' && <ClosedPositionsPage state={state} />}
       {currentPage === 'settings' && <SettingsPage state={state} />}
       {currentPage === 'summary' && <DailySummaryPage state={state} />}
+      {currentPage === 'universe' && <ScanUniversePage state={state} />}
     </Layout>
   );
 }

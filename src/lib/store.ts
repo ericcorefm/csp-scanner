@@ -11,6 +11,7 @@ import type {
   Alert,
 } from '@/types';
 import type { AnalyzeTickerResponse, ScanCounts } from '@/lib/liveMarketData';
+import type { ScanUniverseEntry } from '@/types';
 
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
   name: 'My CSP Default',
@@ -67,6 +68,7 @@ export function useAppState() {
   const [scanSource, setScanSource] = useState<'live' | null>(null);
   const [positionsLoaded, setPositionsLoaded] = useState(false);
   const [scanUniverse, setScanUniverse] = useState<string[]>([]);
+  const [scanUniverseEntries, setScanUniverseEntries] = useState<ScanUniverseEntry[]>([]);
   const [scanCounts, setScanCounts] = useState<ScanCounts | null>(null);
   const [noFilterMode, setNoFilterMode] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -142,10 +144,12 @@ export function useAppState() {
   const loadScanUniverse = useCallback(async () => {
     const { data, error } = await supabase
       .from('scan_universe')
-      .select('symbol')
+      .select('*')
       .order('symbol');
     if (error) throw error;
-    setScanUniverse((data || []).map((r: any) => r.symbol as string));
+    const entries = (data || []) as ScanUniverseEntry[];
+    setScanUniverseEntries(entries);
+    setScanUniverse(entries.filter((e) => e.enabled).map((e) => e.symbol));
   }, []);
 
   const addToScanUniverse = useCallback(async (symbol: string) => {
@@ -153,16 +157,37 @@ export function useAppState() {
     if (!sym) return;
     const { error } = await supabase
       .from('scan_universe')
-      .insert({ symbol: sym });
+      .insert({ symbol: sym, source: 'manual', enabled: true });
     if (error && error.code !== '23505') throw error;
-    setScanUniverse((prev) => prev.includes(sym) ? prev : [...prev, sym].sort());
-  }, []);
+    await loadScanUniverse();
+  }, [loadScanUniverse]);
 
   const removeFromScanUniverse = useCallback(async (symbol: string) => {
     const sym = symbol.toUpperCase().trim();
     await supabase.from('scan_universe').delete().eq('symbol', sym);
-    setScanUniverse((prev) => prev.filter((s) => s !== sym));
-  }, []);
+    await loadScanUniverse();
+  }, [loadScanUniverse]);
+
+  const toggleScanUniverseEnabled = useCallback(async (symbol: string, enabled: boolean) => {
+    const sym = symbol.toUpperCase().trim();
+    await supabase.from('scan_universe').update({ enabled }).eq('symbol', sym);
+    await loadScanUniverse();
+  }, [loadScanUniverse]);
+
+  const clearScanUniverse = useCallback(async () => {
+    await supabase.from('scan_universe').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    await loadScanUniverse();
+  }, [loadScanUniverse]);
+
+  const restoreDefaultUniverse = useCallback(async () => {
+    const defaults = ['SOFI','CIFR','WULF','RIOT','RGTI','QBTS','RIVN','IREN','APLD'];
+    for (const sym of defaults) {
+      await supabase
+        .from('scan_universe')
+        .upsert({ symbol: sym, source: 'default', enabled: true }, { onConflict: 'symbol' });
+    }
+    await loadScanUniverse();
+  }, [loadScanUniverse]);
 
   const runAnalyzeTicker = useCallback(async (ticker: string) => {
     if (!activeProfile || analyzing) return;
@@ -464,8 +489,13 @@ export function useAppState() {
     closePosition,
     resetProfile,
     scanUniverse,
+    scanUniverseEntries,
     addToScanUniverse,
     removeFromScanUniverse,
+    toggleScanUniverseEnabled,
+    clearScanUniverse,
+    restoreDefaultUniverse,
+    reloadScanUniverse: loadScanUniverse,
     scanCounts,
     noFilterMode,
     analyzing,

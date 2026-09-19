@@ -20,7 +20,7 @@ export function AnalyzeTickerSection({ state }: { state: AppState }) {
     state.runAnalyzeTicker(sym);
   };
 
-  const isInUniverse = (sym: string) => state.scanUniverse.includes(sym.toUpperCase());
+  const isInUniverse = (sym: string) => state.scanUniverseEntries.some((e) => e.symbol === sym.toUpperCase());
 
   // Get unique expirations and strikes from all qualifying contracts for filter dropdowns
   const expirations = useMemo(() => {

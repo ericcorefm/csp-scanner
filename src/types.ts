@@ -230,6 +230,15 @@ export interface Alert {
   created_at?: string;
 }
 
+export interface ScanUniverseEntry {
+  id: string;
+  symbol: string;
+  company_name: string | null;
+  source: string;
+  enabled: boolean;
+  created_at: string;
+}
+
 export interface BtcTarget {
   btc_price: number;
   net_profit: number;
