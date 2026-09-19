@@ -24,6 +24,11 @@ export interface StrategyProfile {
   allow_penny_increments: boolean;
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
+  min_dte: number;
+  max_dte: number;
+  preferred_expirations: string[];
+  min_strike: number | null;
+  preferred_strikes: number[];
   created_at?: string;
   updated_at?: string;
 }

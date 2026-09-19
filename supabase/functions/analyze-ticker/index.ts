@@ -14,6 +14,11 @@ const MASSIVE_API = 'https://api.massive.com';
 type Profile = {
   id: string;
   max_strike: number;
+  min_strike: number | null;
+  preferred_strikes: number[];
+  min_dte: number;
+  max_dte: number;
+  preferred_expirations: string[];
   min_net_croi: number;
   max_premium_capture: number;
   max_spread_pct: number;
@@ -253,11 +258,39 @@ Deno.serve(async (req) => {
       (c: any) => c?.details?.contract_type === 'put',
     );
 
-    const expirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
-    const chosenExpirations = expirations.slice(-3);
-    const filteredContracts = contracts.filter((c: any) =>
+    // ── Expiration filtering ──
+    const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
+    let chosenExpirations: string[];
+
+    if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
+      chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
+      console.log(`[Massive] ${ticker} — filtering to preferred expirations: ${chosenExpirations.join(', ')}`);
+    } else {
+      chosenExpirations = allExpirations.filter((e) => {
+        const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
+        return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
+      });
+      console.log(`[Massive] ${ticker} — filtering to DTE ${profile.min_dte}-${profile.max_dte}: ${chosenExpirations.length} expirations`);
+    }
+
+    let filteredContracts = contracts.filter((c: any) =>
       chosenExpirations.includes(c.details.expiration_date),
     );
+
+    // ── Strike filtering ──
+    const preferredStrikes = profile.preferred_strikes || [];
+    if (preferredStrikes.length > 0) {
+      filteredContracts = filteredContracts.filter((c: any) =>
+        preferredStrikes.includes(Number(c.details.strike_price)),
+      );
+    } else {
+      filteredContracts = filteredContracts.filter((c: any) => {
+        const s = Number(c.details.strike_price);
+        if (s > profile.max_strike) return false;
+        if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
+        return true;
+      });
+    }
 
     console.log(`[Massive] ${ticker} — ${contracts.length} put contracts, ${filteredContracts.length} in chosen expirations`);
 
@@ -331,6 +364,9 @@ Deno.serve(async (req) => {
     const otherContracts = qualifying.slice(1);
     const anyQualified = qualifying.length > 0;
 
+    // Return all qualifying contracts for frontend grouping by expiration
+    const allQualifyingContracts = qualifying;
+
     console.log(`analyze-ticker complete — ${analyses.length} contracts analyzed, ${qualifying.length} qualified`);
 
     return json({
@@ -344,6 +380,7 @@ Deno.serve(async (req) => {
       qualifies: anyQualified,
       best_contract: bestContract,
       other_qualifying_contracts: otherContracts,
+      all_qualifying_contracts: allQualifyingContracts,
       all_contracts_count: analyses.length,
       qualifying_count: qualifying.length,
     });

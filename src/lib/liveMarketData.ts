@@ -50,6 +50,7 @@ export interface AnalyzeTickerResponse {
   qualifies: boolean;
   best_contract: ContractAnalysis | null;
   other_qualifying_contracts: ContractAnalysis[];
+  all_qualifying_contracts: ContractAnalysis[];
   all_contracts_count: number;
   qualifying_count: number;
 }

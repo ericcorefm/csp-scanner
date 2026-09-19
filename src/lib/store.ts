@@ -37,6 +37,11 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   allow_penny_increments: true,
   exclude_existing_positions: true,
   exclude_downtrend_no_support: true,
+  min_dte: 365,
+  max_dte: 550,
+  preferred_expirations: [],
+  min_strike: null,
+  preferred_strikes: [],
 };
 
 export function useAppState() {

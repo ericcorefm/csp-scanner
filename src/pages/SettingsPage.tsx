@@ -7,11 +7,12 @@ import { Card } from '@/components/ui';
 interface FieldDef {
   key: keyof StrategyProfile;
   label: string;
-  type: 'number' | 'text' | 'boolean' | 'integer';
+  type: 'number' | 'text' | 'boolean' | 'integer' | 'date_array' | 'number_array';
   unit?: string;
   step?: string;
   min?: number;
   help?: string;
+  placeholder?: string;
 }
 
 const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
@@ -21,6 +22,17 @@ const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
     fields: [
       { key: 'order_type', label: 'Order Type', type: 'text', help: 'Limit orders recommended for options.' },
       { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5' },
+      { key: 'min_strike', label: 'Minimum Put Strike', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no minimum.' },
+      { key: 'preferred_strikes', label: 'Preferred Strike Prices', type: 'number_array', help: 'Comma-separated (e.g. 10,12,13,15,20,25). If empty, scan all within min/max range.', placeholder: '10,12,13,15,20,25' },
+    ],
+  },
+  {
+    title: 'Expiration',
+    icon: 'expiration',
+    fields: [
+      { key: 'min_dte', label: 'Minimum DTE', type: 'integer', unit: 'days', help: 'Minimum days to expiration.' },
+      { key: 'max_dte', label: 'Maximum DTE', type: 'integer', unit: 'days', help: 'Maximum days to expiration.' },
+      { key: 'preferred_expirations', label: 'Preferred Expiration Dates', type: 'date_array', help: 'Specific dates (YYYY-MM-DD). If empty, use DTE range.', placeholder: '2028-01-21' },
     ],
   },
   {
@@ -95,7 +107,7 @@ export function SettingsPage({ state }: { state: AppState }) {
 
   if (!profile) return <div className="text-slate-400">Loading...</div>;
 
-  const updateField = (key: keyof StrategyProfile, value: string | number | boolean) => {
+  const updateField = (key: keyof StrategyProfile, value: string | number | boolean | string[] | number[]) => {
     setProfile({ ...profile, [key]: value });
     setSaved(false);
   };
@@ -230,7 +242,7 @@ export function SettingsPage({ state }: { state: AppState }) {
             <div className="p-5 space-y-4">
               {section.fields.map((field) => (
                 <div key={field.key} className="flex items-center justify-between gap-4">
-                  <div>
+                  <div className="min-w-0">
                     <label className="text-sm text-slate-300">{field.label}</label>
                     {field.help && <p className="text-xs text-slate-500 mt-0.5">{field.help}</p>}
                   </div>
@@ -243,6 +255,52 @@ export function SettingsPage({ state }: { state: AppState }) {
                       >
                         <option value="LIMIT">LIMIT</option>
                       </select>
+                    ) : field.type === 'date_array' ? (
+                      <div className="flex flex-col items-end gap-1">
+                        <input
+                          type="text"
+                          value={(profile[field.key] as string[]).join(', ')}
+                          onChange={(e) => {
+                            const vals = e.target.value.split(',').map((v) => v.trim()).filter(Boolean);
+                            updateField(field.key, vals);
+                          }}
+                          placeholder={field.placeholder || 'YYYY-MM-DD, ...'}
+                          className="w-48 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600"
+                        />
+                        {(profile[field.key] as string[]).length > 0 && (
+                          <div className="flex flex-wrap gap-1 justify-end max-w-48">
+                            {(profile[field.key] as string[]).map((d) => (
+                              <span key={d} className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300">
+                                {d}
+                                <button onClick={() => updateField(field.key, (profile[field.key] as string[]).filter((x) => x !== d))} className="text-slate-500 hover:text-red-400">&times;</button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : field.type === 'number_array' ? (
+                      <div className="flex flex-col items-end gap-1">
+                        <input
+                          type="text"
+                          value={(profile[field.key] as number[]).join(', ')}
+                          onChange={(e) => {
+                            const vals = e.target.value.split(',').map((v) => parseFloat(v.trim())).filter((v) => !isNaN(v));
+                            updateField(field.key, vals);
+                          }}
+                          placeholder={field.placeholder || 'e.g. 10,12,15,25'}
+                          className="w-48 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600"
+                        />
+                        {(profile[field.key] as number[]).length > 0 && (
+                          <div className="flex flex-wrap gap-1 justify-end max-w-48">
+                            {(profile[field.key] as number[]).map((s, i) => (
+                              <span key={i} className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300">
+                                ${s}
+                                <button onClick={() => updateField(field.key, (profile[field.key] as number[]).filter((_, idx) => idx !== i))} className="text-slate-500 hover:text-red-400">&times;</button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     ) : field.type === 'boolean' ? (
                       <button
                         onClick={() => updateField(field.key, !profile[field.key])}
@@ -254,13 +312,29 @@ export function SettingsPage({ state }: { state: AppState }) {
                           profile[field.key] ? 'left-4' : 'left-0.5'
                         }`} />
                       </button>
+                    ) : field.key === 'min_strike' ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-500">$</span>
+                        <input
+                          type="number"
+                          step={field.step}
+                          min={field.min}
+                          value={profile[field.key] === null ? '' : String(profile[field.key])}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            updateField(field.key, isNaN(val) ? null : val);
+                          }}
+                          placeholder="—"
+                          className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums placeholder:text-slate-600"
+                        />
+                      </div>
                     ) : (
                       <div className="flex items-center gap-1">
                         {field.unit && field.unit !== '$' && (
                           <span className="text-xs text-slate-500">{field.unit}</span>
                         )}
                         <input
-                          type={field.type === 'boolean' ? 'checkbox' : field.type === 'integer' ? 'number' : 'number'}
+                          type={field.type === 'integer' ? 'number' : 'number'}
                           step={field.step}
                           min={field.min}
                           value={String(profile[field.key])}

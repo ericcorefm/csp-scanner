@@ -1,11 +1,13 @@
-import { useState } from 'react';
-import { Search, Plus, Trash2, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { Search, Plus, Trash2, CheckCircle2, XCircle, Loader2, Filter } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 
 export function AnalyzeTickerSection({ state }: { state: AppState }) {
   const [ticker, setTicker] = useState('');
+  const [filterExpiration, setFilterExpiration] = useState<string>('all');
+  const [filterStrike, setFilterStrike] = useState<string>('all');
   const result = state.analyzeResult;
   const error = state.analyzeError;
   const analyzing = state.analyzing;
@@ -13,10 +15,41 @@ export function AnalyzeTickerSection({ state }: { state: AppState }) {
   const handleAnalyze = () => {
     const sym = ticker.toUpperCase().trim();
     if (!sym) return;
+    setFilterExpiration('all');
+    setFilterStrike('all');
     state.runAnalyzeTicker(sym);
   };
 
   const isInUniverse = (sym: string) => state.scanUniverse.includes(sym.toUpperCase());
+
+  // Get unique expirations and strikes from all qualifying contracts for filter dropdowns
+  const expirations = useMemo(() => {
+    if (!result?.all_qualifying_contracts) return [];
+    return [...new Set(result.all_qualifying_contracts.map((c) => c.expiration))].sort();
+  }, [result]);
+
+  const strikes = useMemo(() => {
+    if (!result?.all_qualifying_contracts) return [];
+    return [...new Set(result.all_qualifying_contracts.map((c) => c.strike))].sort((a, b) => a - b);
+  }, [result]);
+
+  // Filtered contracts grouped by expiration
+  const groupedByExpiration = useMemo(() => {
+    if (!result?.all_qualifying_contracts) return [];
+    let contracts = result.all_qualifying_contracts;
+    if (filterExpiration !== 'all') {
+      contracts = contracts.filter((c) => c.expiration === filterExpiration);
+    }
+    if (filterStrike !== 'all') {
+      contracts = contracts.filter((c) => c.strike === Number(filterStrike));
+    }
+    const groups: Record<string, ContractAnalysis[]> = {};
+    for (const c of contracts) {
+      if (!groups[c.expiration]) groups[c.expiration] = [];
+      groups[c.expiration].push(c);
+    }
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
+  }, [result, filterExpiration, filterStrike]);
 
   return (
     <Card title="Analyze Ticker">
@@ -50,13 +83,43 @@ export function AnalyzeTickerSection({ state }: { state: AppState }) {
           </div>
         )}
 
-        {result && <AnalyzeResult result={result} state={state} isInUniverse={isInUniverse(result.ticker)} />}
+        {result && (
+          <AnalyzeResult
+            result={result}
+            state={state}
+            isInUniverse={isInUniverse(result.ticker)}
+            expirations={expirations}
+            strikes={strikes}
+            filterExpiration={filterExpiration}
+            filterStrike={filterStrike}
+            setFilterExpiration={setFilterExpiration}
+            setFilterStrike={setFilterStrike}
+            groupedByExpiration={groupedByExpiration}
+          />
+        )}
       </div>
     </Card>
   );
 }
 
-function AnalyzeResult({ result, state, isInUniverse }: { result: AnalyzeTickerResponse; state: AppState; isInUniverse: boolean }) {
+function AnalyzeResult({
+  result, state, isInUniverse,
+  expirations, strikes,
+  filterExpiration, filterStrike,
+  setFilterExpiration, setFilterStrike,
+  groupedByExpiration,
+}: {
+  result: AnalyzeTickerResponse;
+  state: AppState;
+  isInUniverse: boolean;
+  expirations: string[];
+  strikes: number[];
+  filterExpiration: string;
+  filterStrike: string;
+  setFilterExpiration: (v: string) => void;
+  setFilterStrike: (v: string) => void;
+  groupedByExpiration: [string, ContractAnalysis[]][];
+}) {
   return (
     <div className="space-y-4 pt-2">
       {/* Qualifies / Does Not Qualify */}
@@ -86,7 +149,7 @@ function AnalyzeResult({ result, state, isInUniverse }: { result: AnalyzeTickerR
         <StatBox label="Resistance" value={`$${formatNum(result.resistance)}`} />
       </div>
 
-      {/* Pass/Fail reasons for best contract or all contracts */}
+      {/* Pass/Fail reasons for best contract */}
       {result.best_contract && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
           <h4 className="text-sm font-semibold text-slate-200 mb-3">Rule Check (Best Contract)</h4>
@@ -113,46 +176,88 @@ function AnalyzeResult({ result, state, isInUniverse }: { result: AnalyzeTickerR
         </div>
       )}
 
-      {/* Other qualifying contracts */}
-      {result.other_qualifying_contracts.length > 0 && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
-          <div className="px-4 py-2 border-b border-slate-800">
-            <h4 className="text-sm font-semibold text-slate-200">Other Qualifying Contracts</h4>
+      {/* Filters for qualifying contracts */}
+      {result.all_qualifying_contracts.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <Filter className="h-4 w-4" />
+            <span>Filter:</span>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="border-b border-slate-800 bg-slate-900/80">
-                <tr>
-                  {['Strike', 'Exp', 'Bid', 'Ask', 'Spread %', 'STO', 'BTC', 'CROI %', 'PC %', 'Delta', 'IV %', 'Vol', 'OI'].map((h) => (
-                    <th key={h} className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {result.other_qualifying_contracts.map((c, i) => (
-                  <tr key={i} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-200">${formatNum(c.strike)}</td>
-                    <td className="px-3 py-2 text-slate-400 text-xs whitespace-nowrap">{c.expiration}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-400">${formatNum(c.bid)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-400">${formatNum(c.ask)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">
-                      <span className={c.spread_pct <= 5 ? 'text-emerald-400' : c.spread_pct <= 10 ? 'text-amber-400' : 'text-red-400'}>
-                        {formatPct(c.spread_pct)}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-sky-400">${formatNum(c.suggested_sto)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-sky-300">${formatNum(c.suggested_btc)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-emerald-400">{formatPct(c.net_croi)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatPct(c.premium_capture)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-400">{formatNum(c.delta)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-400">{formatNum(c.iv, 0)}%</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.volume}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.open_interest.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <select
+            value={filterExpiration}
+            onChange={(e) => setFilterExpiration(e.target.value)}
+            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-slate-100"
+          >
+            <option value="all">All Expirations</option>
+            {expirations.map((e) => (
+              <option key={e} value={e}>{e}</option>
+            ))}
+          </select>
+          <select
+            value={filterStrike}
+            onChange={(e) => setFilterStrike(e.target.value)}
+            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-slate-100"
+          >
+            <option value="all">All Strikes</option>
+            {strikes.map((s) => (
+              <option key={s} value={String(s)}>${formatNum(s)}</option>
+            ))}
+          </select>
+          <span className="text-xs text-slate-500 ml-auto">
+            {groupedByExpiration.reduce((sum, [, contracts]) => sum + contracts.length, 0)} contracts
+          </span>
+        </div>
+      )}
+
+      {/* Qualifying contracts grouped by expiration */}
+      {groupedByExpiration.length > 0 && (
+        <div className="space-y-3">
+          {groupedByExpiration.map(([expiration, contracts]) => (
+            <div key={expiration} className="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+              <div className="px-4 py-2 border-b border-slate-800 bg-slate-900/80">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-slate-200">
+                    {expiration}
+                    <span className="text-slate-500 font-normal ml-2">DTE {contracts[0].dte}</span>
+                  </h4>
+                  <span className="text-xs text-slate-500">{contracts.length} contract{contracts.length !== 1 ? 's' : ''}</span>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-slate-800 bg-slate-900/40">
+                    <tr>
+                      {['Strike', 'Bid', 'Ask', 'Spread %', 'STO', 'BTC', 'CROI %', 'PC %', 'Delta', 'IV %', 'Vol', 'OI'].map((h) => (
+                        <th key={h} className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {contracts.map((c, i) => (
+                      <tr key={i} className="hover:bg-slate-800/40 transition-colors">
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-200">${formatNum(c.strike)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">${formatNum(c.bid)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">${formatNum(c.ask)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className={c.spread_pct <= 5 ? 'text-emerald-400' : c.spread_pct <= 10 ? 'text-amber-400' : 'text-red-400'}>
+                            {formatPct(c.spread_pct)}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-sky-400">${formatNum(c.suggested_sto)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-sky-300">${formatNum(c.suggested_btc)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-emerald-400">{formatPct(c.net_croi)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatPct(c.premium_capture)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{formatNum(c.delta)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{formatNum(c.iv, 0)}%</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.volume}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.open_interest.toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

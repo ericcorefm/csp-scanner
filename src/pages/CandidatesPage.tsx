@@ -124,7 +124,7 @@ export function CandidatesPage({
                 <SortHeader key="strike" label="Strike" align="right" />
                 <SortHeader key="strike_distance_from_stock" label="Dist %" align="right" />
                 <SortHeader key="strike_distance_from_support" label="Supp Dist %" align="right" />
-                <SortHeader key="expiration" label="Exp" />
+                <SortHeader key="expiration" label="Expiration" />
                 <SortHeader key="dte" label="DTE" align="right" />
                 <SortHeader key="bid" label="Bid" align="right" />
                 <SortHeader key="ask" label="Ask" align="right" />
