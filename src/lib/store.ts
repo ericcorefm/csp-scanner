@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
-import { scanCandidates } from '@/lib/marketData';
 import { scanCandidatesLive } from '@/lib/liveMarketData';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
@@ -52,7 +51,7 @@ export function useAppState() {
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [lastScanAt, setLastScanAt] = useState<string | null>(null);
-  const [scanSource, setScanSource] = useState<'live' | 'demo' | null>(null);
+  const [scanSource, setScanSource] = useState<'live' | null>(null);
   const [positionsLoaded, setPositionsLoaded] = useState(false);
 
   const loadProfiles = useCallback(async () => {
@@ -130,7 +129,6 @@ export function useAppState() {
     try {
       const openTickers = openPositions.map((p) => p.ticker.toUpperCase());
       let results: CandidateScan[];
-      let source: 'live' | 'demo' = 'live';
       let scannedAt = new Date().toISOString();
 
       try {
@@ -138,20 +136,16 @@ export function useAppState() {
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
       } catch (liveError) {
-        // Keep the app usable before a Tradier token / Edge Function is configured.
-        // The UI clearly labels this fallback as DEMO data so it cannot be mistaken for live quotes.
-        console.warn('Live scan unavailable; using demo data:', liveError);
-        results = scanCandidates(activeProfile, openTickers);
-        source = 'demo';
-        setScanError(
-          liveError instanceof Error
-            ? `Live data unavailable (${liveError.message}). Showing DEMO scan data.`
-            : 'Live data unavailable. Showing DEMO scan data.',
-        );
+        const message = liveError instanceof Error
+          ? `Massive API error: ${liveError.message}`
+          : 'Massive API error: scan failed.';
+        setScanError(message);
+        setScanning(false);
+        return;
       }
 
       setCandidates(results);
-      setScanSource(source);
+      setScanSource('live');
       setLastScanAt(scannedAt);
 
       const today = new Date().toISOString().split('T')[0];

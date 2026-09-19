@@ -1,13 +1,18 @@
 // Supabase Edge Function: market-scan
-// Configure secret: TRADIER_TOKEN
-// Optional: CSP_SCAN_SYMBOLS="SOFI,CIFR,WULF,RIVN,RIOT,RGTI,QBTS,IREN,APLD"
+// Requires secret: MASSIVE_API_KEY (https://massive.com dashboard)
+// Optional env var (NOT a secret): CSP_SCAN_SYMBOLS — override the default scan universe.
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
+
+const MASSIVE_API = 'https://api.massive.com';
+
+const DEFAULT_SCAN_SYMBOLS = 'SOFI,CIFR,WULF,RIOT,RGTI,QBTS,RIVN,IREN,APLD';
 
 type Profile = {
   id: string;
@@ -27,8 +32,6 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
-const API = 'https://api.tradier.com/v1';
-
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -36,20 +39,16 @@ function json(body: unknown, status = 200) {
   });
 }
 
-async function tradier(path: string, token: string) {
-  const response = await fetch(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+async function massiveFetch(path: string, apiKey: string) {
+  const sep = path.includes('?') ? '&' : '?';
+  const response = await fetch(`${MASSIVE_API}${path}${sep}apiKey=${encodeURIComponent(apiKey)}`, {
+    headers: { Accept: 'application/json' },
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Tradier ${response.status}: ${text.slice(0, 250)}`);
+    throw new Error(`Massive API ${response.status}: ${text.slice(0, 500)}`);
   }
   return response.json();
-}
-
-function arr<T>(value: T | T[] | null | undefined): T[] {
-  if (!value) return [];
-  return Array.isArray(value) ? value : [value];
 }
 
 function sma(values: number[], n: number) {
@@ -121,17 +120,17 @@ function volClass(v: number) {
 }
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
   try {
-    const token = Deno.env.get('TRADIER_TOKEN');
-    if (!token) return json({ error: 'TRADIER_TOKEN is not configured' }, 503);
+    const apiKey = Deno.env.get('MASSIVE_API_KEY');
+    if (!apiKey) return json({ error: 'MASSIVE_API_KEY is not configured. Add it as an Edge Function secret in your Supabase dashboard.' }, 503);
 
     const body = await req.json();
     const profile = body.profile as Profile;
     const openTickers: string[] = (body.openTickers || []).map((x: string) => x.toUpperCase());
     if (!profile) return json({ error: 'Missing strategy profile' }, 400);
 
-    const symbols = (Deno.env.get('CSP_SCAN_SYMBOLS') || 'SOFI,CIFR,WULF,RIVN,RIOT,RGTI,QBTS,IREN,APLD')
+    const symbols = (Deno.env.get('CSP_SCAN_SYMBOLS') || DEFAULT_SCAN_SYMBOLS)
       .split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
 
     const today = new Date();
@@ -142,76 +141,89 @@ serve(async (req) => {
 
     for (const symbol of symbols) {
       try {
-        const [quoteJson, histJson, expJson] = await Promise.all([
-          tradier(`/markets/quotes?symbols=${encodeURIComponent(symbol)}&greeks=false`, token),
-          tradier(`/markets/history?symbol=${encodeURIComponent(symbol)}&interval=daily&start=${fmt(start)}&end=${fmt(today)}`, token),
-          tradier(`/markets/options/expirations?symbol=${encodeURIComponent(symbol)}&includeAllRoots=true&strikes=false`, token),
-        ]);
-
-        const q = quoteJson?.quotes?.quote;
-        const stockPrice = Number(q?.last || q?.close || 0);
-        if (!stockPrice) continue;
-        const bars: HistoryBar[] = arr(histJson?.history?.day).map((b: any) => ({
-          date: b.date, open: Number(b.open), high: Number(b.high), low: Number(b.low), close: Number(b.close), volume: Number(b.volume || 0),
+        // 1. Daily price history for trend/support calculation
+        const histJson = await massiveFetch(
+          `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${fmt(start)}/${fmt(today)}`,
+          apiKey,
+        );
+        const bars: HistoryBar[] = (histJson?.results || []).map((b: any) => ({
+          date: new Date(b.t).toISOString().slice(0, 10),
+          open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
         }));
+        if (!bars.length) continue;
+        const stockPrice = Number(bars.at(-1)!.close);
+        if (!stockPrice) continue;
+
         const primarySupport = support(bars, stockPrice);
         const trendClass = trend(bars);
 
-        const expirations = arr<string>(expJson?.expirations?.date);
-        // Favor longer-dated options for the user's 120-day recycle approach without limiting DTE to 120.
-        const chosen = expirations.slice(-3);
+        // 2. Option chain snapshot — all put contracts in one call
+        const chainJson = await massiveFetch(
+          `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`,
+          apiKey,
+        );
+        const contracts = (chainJson?.results || []).filter(
+          (c: any) => c?.details?.contract_type === 'put',
+        );
 
-        for (const expiration of chosen) {
-          const chainJson = await tradier(`/markets/options/chains?symbol=${encodeURIComponent(symbol)}&expiration=${expiration}&greeks=true`, token);
-          const options = arr<any>(chainJson?.options?.option).filter((o) => o.option_type === 'put');
-          for (const o of options) {
-            contractCount++;
-            const strike = Number(o.strike || 0), bid = Number(o.bid || 0), ask = Number(o.ask || 0);
-            if (!strike || !bid || !ask) continue;
-            const dte = Math.max(0, Math.ceil((new Date(expiration).getTime() - today.getTime()) / 86400000));
-            const mid = (bid + ask) / 2;
-            const sp = spreadPct(bid, ask);
-            const volume = Number(o.volume || 0), oi = Number(o.open_interest || 0);
-            const iv = Number(o.greeks?.mid_iv || o.greeks?.smv_vol || 0) * (Number(o.greeks?.mid_iv || o.greeks?.smv_vol || 0) <= 3 ? 100 : 1);
-            const delta = Number(o.greeks?.delta || 0);
-            const best = optimize(mid, strike, profile, true);
-            const reasons: string[] = [];
+        // Group by expiration, pick the 3 longest-dated
+        const expirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
+        const chosenExpirations = expirations.slice(-3);
+        const filteredContracts = contracts.filter((c: any) =>
+          chosenExpirations.includes(c.details.expiration_date),
+        );
 
-            if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-            if (strike > profile.max_strike) reasons.push('Strike too high');
-            if (!best) reasons.push('CROI too low');
-            if (sp > profile.max_spread_pct) reasons.push('Spread too wide');
-            if (oi < profile.min_target_oi) reasons.push('OI too low');
-            if (volume < 10) reasons.push('Insufficient liquidity');
-            if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
+        for (const c of filteredContracts) {
+          contractCount++;
+          const strike = Number(c.details.strike_price || 0);
+          const bid = Number(c.last_quote?.bid || 0);
+          const ask = Number(c.last_quote?.ask || 0);
+          if (!strike || !bid || !ask) continue;
+          const expiration = c.details.expiration_date as string;
+          const dte = Math.max(0, Math.ceil((new Date(expiration).getTime() - today.getTime()) / 86400000));
+          const mid = (bid + ask) / 2;
+          const sp = spreadPct(bid, ask);
+          const volume = Number(c.volume || 0), oi = Number(c.open_interest || 0);
+          const iv = Number(c.implied_volatility || 0) * 100;
+          const delta = Number(c.greeks?.delta || 0);
+          const best = optimize(mid, strike, profile, true);
+          const reasons: string[] = [];
 
-            const btc = best?.btc || 0.01;
-            const netProfit = best?.netProfit ?? ((mid-btc)*100-profile.round_trip_commission);
-            const netCroi = best?.netCroi ?? netProfit/(strike*100)*100;
-            const pc = best?.pc ?? (mid-btc)/mid*100;
-            if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+          if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
+          if (strike > profile.max_strike) reasons.push('Strike too high');
+          if (!best) reasons.push('CROI too low');
+          if (sp > profile.max_spread_pct) reasons.push('Spread too wide');
+          if (oi < profile.min_target_oi) reasons.push('OI too low');
+          if (volume < 10) reasons.push('Insufficient liquidity');
+          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
 
-            candidates.push({
-              scan_date: fmt(today), ticker: symbol, company_name: q?.description || symbol, stock_price: Number(stockPrice.toFixed(2)),
-              strike, expiration, dte, bid, ask, mid: Number(mid.toFixed(2)), spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
-              volume, open_interest: oi, volume_classification: volClass(volume), trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
-              suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)), net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
-              premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike-mid).toFixed(2)), qualified: reasons.length === 0, rejection_reasons: reasons,
-              strategy_profile_id: profile.id,
-              strike_distance_from_stock: Number(((stockPrice-strike)/stockPrice*100).toFixed(1)),
-              strike_distance_from_support: Number(((primarySupport-strike)/primarySupport*100).toFixed(1)),
-            });
-          }
+          const btc = best?.btc || 0.01;
+          const netProfit = best?.netProfit ?? ((mid - btc) * 100 - profile.round_trip_commission);
+          const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
+          const pc = best?.pc ?? (mid - btc) / mid * 100;
+          if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+
+          candidates.push({
+            scan_date: fmt(today), ticker: symbol, company_name: symbol, stock_price: Number(stockPrice.toFixed(2)),
+            strike, expiration, dte, bid, ask, mid: Number(mid.toFixed(2)), spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+            volume, open_interest: oi, volume_classification: volClass(volume), trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
+            suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)), net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
+            premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)), qualified: reasons.length === 0, rejection_reasons: reasons,
+            strategy_profile_id: profile.id,
+            strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
+            strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
+          });
         }
       } catch (e) {
-        console.error(`scan failed for ${symbol}`, e);
+        const msg = e instanceof Error ? e.message : String(e);
+        return json({ error: `Massive API failed for ${symbol}: ${msg}` }, 502);
       }
     }
 
     candidates.sort((a,b) => Number(b.qualified)-Number(a.qualified) || a.spread_pct-b.spread_pct || b.net_croi-a.net_croi);
-    return json({ candidates, source: 'tradier', scanned_at: new Date().toISOString(), symbols_scanned: symbols.length, contracts_scanned: contractCount });
+    return json({ candidates, source: 'massive', scanned_at: new Date().toISOString(), symbols_scanned: symbols.length, contracts_scanned: contractCount });
   } catch (e) {
-    console.error(e);
-    return json({ error: e instanceof Error ? e.message : 'Market scan failed' }, 500);
+    const msg = e instanceof Error ? e.message : 'Market scan failed';
+    return json({ error: msg }, 500);
   }
 });

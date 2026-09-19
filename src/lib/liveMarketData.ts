@@ -3,7 +3,7 @@ import type { CandidateScan, StrategyProfile } from '@/types';
 
 export interface LiveScanResponse {
   candidates: CandidateScan[];
-  source: 'tradier';
+  source: 'massive';
   scanned_at: string;
   symbols_scanned: number;
   contracts_scanned: number;

@@ -76,16 +76,15 @@ export function CandidatesPage({
 
   return (
     <div className="space-y-4">
-      {state.scanSource && (
-        <div className={`rounded-lg border px-3 py-2 text-xs ${
-          state.scanSource === 'live'
-            ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
-            : 'border-amber-500/30 bg-amber-500/5 text-amber-300'
-        }`}>
-          {state.scanSource === 'live'
-            ? `LIVE market scan${state.lastScanAt ? ` · ${new Date(state.lastScanAt).toLocaleString()}` : ''}`
-            : 'DEMO market data — configure the Supabase market-scan Edge Function and TRADIER_TOKEN for live quotes/options.'}
-          {state.scanError && <span className="ml-2 text-amber-400">{state.scanError}</span>}
+      {state.scanSource === 'live' && (
+        <div className="rounded-lg border px-3 py-2 text-xs border-emerald-500/30 bg-emerald-500/5 text-emerald-300">
+          {`LIVE market scan (Massive)${state.lastScanAt ? ` · ${new Date(state.lastScanAt).toLocaleString()}` : ''}`}
+          {state.scanError && <span className="ml-2 text-red-400">{state.scanError}</span>}
+        </div>
+      )}
+      {state.scanSource === null && state.scanError && (
+        <div className="rounded-lg border px-3 py-2 text-xs border-red-500/30 bg-red-500/5 text-red-400">
+          {state.scanError}
         </div>
       )}
 
