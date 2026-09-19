@@ -1,10 +1,11 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { AnalyzeTickerSection } from '@/components/AnalyzeTickerSection';
+import { EnterQuoteModal } from '@/components/EnterQuoteModal';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -27,6 +28,14 @@ const trendColors: Record<string, 'success' | 'warning' | 'error' | 'neutral'> =
   Downtrend: 'error',
 };
 
+function dashIfNoQuote(c: CandidateScan, value: string | number, formatter: (v: number) => string) {
+  if (c.has_quotes === false || (c.bid === 0 && c.ask === 0 && c.suggested_sto === 0)) {
+    return <span className="text-amber-500/60">—</span>;
+  }
+  const num = typeof value === 'number' ? value : parseFloat(String(value));
+  return <>{formatter(num)}</>;
+}
+
 export function CandidatesPage({
   state,
   onNavigate,
@@ -38,6 +47,7 @@ export function CandidatesPage({
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [quoteModalRow, setQuoteModalRow] = useState<string | null>(null);
 
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
@@ -56,6 +66,11 @@ export function CandidatesPage({
     return list;
   }, [state.candidates, showRejected, sortKey, sortDir]);
 
+  const quoteModalCandidate = useMemo(() => {
+    if (!quoteModalRow) return null;
+    return state.candidates.find((c) => `${c.ticker}-${c.strike}-${c.expiration}` === quoteModalRow) || null;
+  }, [quoteModalRow, state.candidates]);
+
   const handleSort = (key: keyof CandidateScan) => {
     if (sortKey === key) {
       setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
@@ -65,19 +80,25 @@ export function CandidatesPage({
     }
   };
 
-  const SortHeader = ({ key, label, align = 'left' }: { key: keyof CandidateScan; label: string; align?: 'left' | 'right' }) => (
+  const SortHeader = ({ k, label, align = 'left' }: { k: keyof CandidateScan; label: string; align?: 'left' | 'right' }) => (
     <th
-      onClick={() => handleSort(key)}
+      onClick={() => handleSort(k)}
       className={`px-3 py-2.5 text-xs font-medium text-slate-400 cursor-pointer hover:text-slate-200 select-none whitespace-nowrap ${
         align === 'right' ? 'text-right' : 'text-left'
       }`}
     >
       <span className="inline-flex items-center gap-1">
         {label}
-        {sortKey === key && <ChevronDown className={`h-3 w-3 transition-transform ${sortDir === 'asc' ? 'rotate-180' : ''}`} />}
+        {sortKey === k && <ChevronDown className={`h-3 w-3 transition-transform ${sortDir === 'asc' ? 'rotate-180' : ''}`} />}
       </span>
     </th>
   );
+
+  const handleQuoteSubmit = (rowKey: string, updates: Partial<CandidateScan>) => {
+    state.updateCandidateWithQuote(rowKey, updates);
+  };
+
+  const colCount = 24;
 
   return (
     <div className="space-y-4">
@@ -95,7 +116,7 @@ export function CandidatesPage({
 
       {state.noFilterMode && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-medium text-amber-300">
-          NO FILTER MODE — All strategy sections and Exclude Existing Positions are OFF. Every put contract with valid bid/ask is qualified.
+          NO FILTER MODE — All strategy sections and Exclude Existing Positions are OFF. Every discovered put contract is qualified.
         </div>
       )}
 
@@ -104,7 +125,7 @@ export function CandidatesPage({
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
-            <ScanCountItem label="Puts Analyzed" value={state.scanCounts.contracts_evaluated} />
+            <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
             <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
             <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
             <ScanCountItem
@@ -171,6 +192,7 @@ export function CandidatesPage({
           <p className="text-sm text-slate-500">
             {filtered.filter((c) => c.qualified).length} qualified
             {showRejected && ` · ${filtered.filter((c) => !c.qualified).length} rejected`}
+            {` · ${filtered.filter((c) => c.has_quotes === false).length} awaiting quotes`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -191,48 +213,50 @@ export function CandidatesPage({
           <table className="w-full text-sm">
             <thead className="border-b border-slate-800 bg-slate-900/80">
               <tr>
-                <SortHeader key="ticker" label="Ticker" />
-                <SortHeader key="stock_price" label="Price" align="right" />
-                <SortHeader key="trend_classification" label="Trend" />
-                <SortHeader key="primary_support" label="Support" align="right" />
-                <SortHeader key="strike" label="Strike" align="right" />
-                <SortHeader key="strike_distance_from_stock" label="Dist %" align="right" />
-                <SortHeader key="strike_distance_from_support" label="Supp Dist %" align="right" />
-                <SortHeader key="expiration" label="Expiration" />
-                <SortHeader key="dte" label="DTE" align="right" />
-                <SortHeader key="bid" label="Bid" align="right" />
-                <SortHeader key="ask" label="Ask" align="right" />
-                <SortHeader key="mid" label="Mid" align="right" />
-                <SortHeader key="spread_pct" label="Spread %" align="right" />
-                <SortHeader key="suggested_sto" label="STO" align="right" />
-                <SortHeader key="suggested_btc" label="BTC" align="right" />
-                <SortHeader key="net_profit" label="Net $" align="right" />
-                <SortHeader key="net_croi" label="CROI %" align="right" />
-                <SortHeader key="premium_capture" label="PC %" align="right" />
-                <SortHeader key="breakeven" label="BE" align="right" />
-                <SortHeader key="iv" label="IV %" align="right" />
-                <SortHeader key="delta" label="Delta" align="right" />
-                <SortHeader key="volume" label="Vol" align="right" />
-                <SortHeader key="open_interest" label="OI" align="right" />
+                <SortHeader k="ticker" label="Ticker" />
+                <SortHeader k="stock_price" label="Price" align="right" />
+                <SortHeader k="trend_classification" label="Trend" />
+                <SortHeader k="primary_support" label="Support" align="right" />
+                <SortHeader k="strike" label="Strike" align="right" />
+                <SortHeader k="strike_distance_from_stock" label="Dist %" align="right" />
+                <SortHeader k="strike_distance_from_support" label="Supp Dist %" align="right" />
+                <SortHeader k="expiration" label="Expiration" />
+                <SortHeader k="dte" label="DTE" align="right" />
+                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Quote Status</th>
+                <SortHeader k="bid" label="Bid" align="right" />
+                <SortHeader k="ask" label="Ask" align="right" />
+                <SortHeader k="mid" label="Mid" align="right" />
+                <SortHeader k="spread_pct" label="Spread %" align="right" />
+                <SortHeader k="suggested_sto" label="STO" align="right" />
+                <SortHeader k="suggested_btc" label="BTC" align="right" />
+                <SortHeader k="net_profit" label="Net $" align="right" />
+                <SortHeader k="net_croi" label="CROI %" align="right" />
+                <SortHeader k="premium_capture" label="PC %" align="right" />
+                <SortHeader k="breakeven" label="BE" align="right" />
+                <SortHeader k="iv" label="IV %" align="right" />
+                <SortHeader k="delta" label="Delta" align="right" />
+                <SortHeader k="volume" label="Vol" align="right" />
+                <SortHeader k="open_interest" label="OI" align="right" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {filtered.map((c) => {
                 const rowKey = `${c.ticker}-${c.strike}-${c.expiration}`;
                 const isExpanded = expandedRow === rowKey;
+                const hasNoQuote = c.has_quotes === false || (c.bid === 0 && c.ask === 0 && c.suggested_sto === 0);
                 return (
                   <Fragment key={rowKey}>
                     <tr
                       onClick={() => onNavigate('detail', c.ticker)}
                       className={`cursor-pointer transition-colors ${
-                        c.qualified ? 'hover:bg-slate-800/40' : c.has_quotes === false ? 'opacity-50 hover:bg-slate-800/40' : 'opacity-60 hover:bg-slate-800/40'
+                        c.qualified ? 'hover:bg-slate-800/40' : 'opacity-60 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
                           {c.qualified && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
-                          {!c.qualified && c.has_quotes === false && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
-                          {!c.qualified && c.has_quotes !== false && <XCircle className="h-3.5 w-3.5 text-red-400" />}
+                          {!c.qualified && hasNoQuote && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
+                          {!c.qualified && !hasNoQuote && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
@@ -248,36 +272,69 @@ export function CandidatesPage({
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support}%</td>
                       <td className="px-3 py-2.5 text-slate-400 text-xs whitespace-nowrap">{c.expiration}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.dte}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.bid)}`}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.ask)}`}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.mid)}`}</td>
+                      <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                        {hasNoQuote ? (
+                          <button
+                            onClick={() => setQuoteModalRow(rowKey)}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/20 transition-colors"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            Enter Quote
+                          </button>
+                        ) : (
+                          <Badge variant="success" dot>Quoted</Badge>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.bid)}`}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.ask)}`}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.mid)}`}
+                      </td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
-                        {c.has_quotes === false ? <span className="text-amber-500/60">—</span> : (
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : (
                           <span className={c.spread_pct <= 5 ? 'text-emerald-400' : c.spread_pct <= 10 ? 'text-amber-400' : 'text-red-400'}>
                             {formatPct(c.spread_pct)}
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.suggested_sto)}`}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.suggested_btc)}`}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.net_profit)}`}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.suggested_sto)}`}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.suggested_btc)}`}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.net_profit)}`}
+                      </td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
-                        {c.has_quotes === false ? <span className="text-amber-500/60">—</span> : (
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : (
                           <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
                             {formatPct(c.net_croi)}
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : formatPct(c.premium_capture)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.breakeven)}`}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.iv > 0 ? `${formatNum(c.iv, 0)}%` : '—'}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.delta !== 0 ? formatNum(c.delta) : '—'}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : formatPct(c.premium_capture)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.breakeven)}`}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                        {c.iv > 0 ? `${formatNum(c.iv, 0)}%` : '—'}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                        {c.delta !== 0 ? formatNum(c.delta) : '—'}
+                      </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.volume}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.open_interest.toLocaleString()}</td>
                     </tr>
                     {showRejected && !c.qualified && isExpanded && (
                       <tr key={rowKey + '-detail'}>
-                        <td colSpan={22} className="px-4 py-3 bg-slate-900/80">
+                        <td colSpan={colCount} className="px-4 py-3 bg-slate-900/80">
                           <div className="flex flex-wrap gap-2">
                             {c.rejection_reasons.map((r) => (
                               <Badge key={r} variant={rejectionColors[r] || 'warning'}>{r}</Badge>
@@ -292,7 +349,7 @@ export function CandidatesPage({
                         className="cursor-pointer hover:bg-slate-800/30"
                         onClick={(e) => { e.stopPropagation(); setExpandedRow(isExpanded ? null : rowKey); }}
                       >
-                        <td colSpan={22} className="px-4 py-1.5 bg-slate-900/40">
+                        <td colSpan={colCount} className="px-4 py-1.5 bg-slate-900/40">
                           <div className="flex items-center gap-2 text-xs text-slate-500">
                             <Info className="h-3 w-3" />
                             {c.rejection_reasons.length} rejection reason(s) — click to expand
@@ -312,7 +369,7 @@ export function CandidatesPage({
               <>
                 <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-amber-500" />
                 <p className="text-sm text-amber-400 mb-1">Contracts found, but bid/ask quotes are unavailable from the current market-data plan.</p>
-                <p className="text-xs text-slate-500">Strike, expiration, IV, OI, and Greeks are shown where available.</p>
+                <p className="text-xs text-slate-500">Strike, expiration, IV, OI, and Greeks are shown where available. Use Enter Quote to add prices manually.</p>
               </>
             ) : (
               <>
@@ -335,6 +392,15 @@ export function CandidatesPage({
           </div>
         </div>
       </div>
+
+      {quoteModalCandidate && state.activeProfile && (
+        <EnterQuoteModal
+          candidate={quoteModalCandidate}
+          profile={state.activeProfile}
+          onClose={() => setQuoteModalRow(null)}
+          onSubmit={(updates) => handleQuoteSubmit(quoteModalRow!, updates)}
+        />
+      )}
     </div>
   );
 }

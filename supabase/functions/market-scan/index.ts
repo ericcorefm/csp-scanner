@@ -523,7 +523,10 @@ async function scanSymbol(
     console.log(`[VERBOSE] ${symbol} | pipeline: puts=${contracts.length} | filtExp=${r.filteredByExpiration} | filtStrike=${r.filteredByStrike} | remaining=${filteredContracts.length}`);
   }
 
-  // ── Contract evaluation ──
+  // ── Contract evaluation — Massive is discovery-only, quotes are optional ──
+  // Qualification uses only non-quote rules (strike, DTE, trend, support, OI, existing position).
+  // Quote fields (bid/ask/mid/spread/STO/BTC/CROI/PC) are included when available but
+  // never required — contracts without quotes are still listed as candidates.
   const analyses: any[] = [];
 
   for (const c of filteredContracts) {
@@ -541,59 +544,58 @@ async function scanSymbol(
     const iv = Number(c?.implied_volatility || 0) * 100;
     const delta = Number(c?.greeks?.delta || 0);
 
-    // Quote extraction with precise categorization
+    // Extract quote data if available (never fabricated)
     const { hasLastQuote, bid, ask, mid } = extractQuote(c);
-
-    // Determine if quote is valid: bid > 0, ask > 0, ask >= bid
     const hasValidQuote = hasLastQuote && bid !== null && bid > 0 && ask !== null && ask > 0 && ask >= bid;
 
-    if (!hasValidQuote) {
-      // Contract exists but quotes are unavailable — track as awaiting quotes
-      r.contractsAwaitingQuotes++;
-
-      if (analyzeMode) {
-        analyses.push({
-          strike, expiration, dte,
-          bid: 0, ask: 0, mid: 0, spread_pct: 999,
-          iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
-          volume, open_interest: oi, volume_classification: volClass(volume),
-          suggested_sto: 0, suggested_btc: 0,
-          net_profit: 0, net_croi: 0, premium_capture: 0, breakeven: strike,
-          qualified: false, pass_fail: [{ rule: 'Bid/ask quotes unavailable', pass: false }],
-          has_quotes: false,
-        });
-      } else {
-        // Partial candidate — keep available data, no financial calcs
-        r.candidates.push({
-          scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol,
-          stock_price: Number(stockPrice.toFixed(2)),
-          strike, expiration, dte,
-          bid: 0, ask: 0, mid: 0, spread_pct: 0,
-          iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
-          volume, open_interest: oi, volume_classification: volClass(volume),
-          trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
-          suggested_sto: 0, suggested_btc: 0,
-          net_profit: 0, net_croi: 0, premium_capture: 0, breakeven: 0,
-          qualified: false, rejection_reasons: ['Awaiting quote data'],
-          strategy_profile_id: profile.id,
-          strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
-          strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
-          has_quotes: false,
-        });
+    // ── Non-quote qualification rules (applied regardless of quote availability) ──
+    const reasons: string[] = [];
+    if (!noFilterMode) {
+      if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
+      if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
+      if (!isSectionOff(profile, 'technical_rules_enabled')) {
+        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
       }
-      continue;
+      // OI and volume rules are non-quote — they come from the contract itself
+      if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
+        if (oi < profile.min_target_oi) reasons.push('OI too low');
+        if (volume < 10) reasons.push('Insufficient liquidity');
+      }
+    }
+    const qualified = reasons.length === 0;
+    r.evaluated++;
+    if (qualified) r.qualified++; else r.rejected++;
+
+    // Track quote availability
+    if (hasValidQuote) {
+      r.validQuotes++;
+    } else {
+      r.contractsAwaitingQuotes++;
     }
 
-    // At this point: bid > 0, ask > 0, ask >= bid — valid executable quote
-    r.validQuotes++;
-    r.evaluated++;
+    // Financial calculations only when real bid/ask exist
+    let sp = 0, stoPrice = 0, btcPrice = 0, netProfit = 0, netCroi = 0, pc = 0, breakeven = 0;
+    if (hasValidQuote) {
+      sp = spreadPct(bid!, ask!);
+      stoPrice = mid;
+      const best = optimize(mid, strike, profile, true);
+      if (best) {
+        btcPrice = best.btc;
+        netProfit = best.netProfit;
+        netCroi = best.netCroi;
+        pc = best.pc;
+      }
+      breakeven = strike - mid;
 
-    const sp = spreadPct(bid!, ask!);
-    const best = optimize(mid, strike, profile, true);
-    const btc = best?.btc || 0.01;
-    const netProfit = best?.netProfit ?? ((mid - btc) * 100 - profile.round_trip_commission);
-    const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
-    const pc = best?.pc ?? (mid - btc) / mid * 100;
+      // Spread rule only applies when a quote exists
+      if (!noFilterMode && !isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) {
+        if (!reasons.includes('Spread too wide')) {
+          reasons.push('Spread too wide');
+          // Re-evaluate qualified status
+          if (qualified) { r.qualified--; r.rejected++; }
+        }
+      }
+    }
 
     if (analyzeMode) {
       const passFail: { rule: string; pass: boolean }[] = [];
@@ -601,67 +603,65 @@ async function scanSymbol(
         passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike });
         passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: strike < primarySupport });
       }
-      if (!isSectionOff(profile, 'croi_pc_enabled')) {
-        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: netCroi >= profile.min_net_croi });
-        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pc <= profile.max_premium_capture });
-      }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi });
         passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10 });
       }
-      if (!isSectionOff(profile, 'spread_enabled')) {
-        passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct });
-      }
       if (!isSectionOff(profile, 'technical_rules_enabled')) {
         passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
       }
-      const qualified = passFail.every((pf) => pf.pass);
-      if (qualified) r.qualified++; else r.rejected++;
+      if (hasValidQuote && !isSectionOff(profile, 'spread_enabled')) {
+        passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct });
+      }
+      if (hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled')) {
+        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: netCroi >= profile.min_net_croi });
+        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pc <= profile.max_premium_capture });
+      }
+      if (!hasValidQuote) {
+        passFail.push({ rule: 'Quote data — enter manually', pass: false });
+      }
+      const finalQualified = passFail.every((pf) => pf.pass);
 
       analyses.push({
-        strike, expiration, dte, bid: Number(bid!.toFixed(2)), ask: Number(ask!.toFixed(2)), mid: Number(mid.toFixed(2)),
-        spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+        strike, expiration, dte,
+        bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
+        ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
+        mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
+        spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
+        iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
         volume, open_interest: oi, volume_classification: volClass(volume),
-        suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)),
-        net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
-        premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)),
-        qualified, pass_fail: passFail, has_quotes: true,
+        suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
+        suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
+        net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
+        net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
+        premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
+        breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
+        qualified: finalQualified, pass_fail: passFail,
+        has_quotes: hasValidQuote,
       });
     } else {
-      const reasons: string[] = [];
-      if (!noFilterMode) {
-        if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-        if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
-        if (!isSectionOff(profile, 'croi_pc_enabled')) {
-          if (!best) reasons.push('CROI too low');
-          if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
-        }
-        if (!isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) reasons.push('Spread too wide');
-        if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
-          if (oi < profile.min_target_oi) reasons.push('OI too low');
-          if (volume < 10) reasons.push('Insufficient liquidity');
-        }
-        if (!isSectionOff(profile, 'technical_rules_enabled')) {
-          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
-        }
-      }
-      const qualified = reasons.length === 0;
-      if (qualified) r.qualified++; else r.rejected++;
-
       r.candidates.push({
-        scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol, stock_price: Number(stockPrice.toFixed(2)),
-        strike, expiration, dte, bid: Number(bid!.toFixed(2)), ask: Number(ask!.toFixed(2)), mid: Number(mid.toFixed(2)),
-        spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+        scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol,
+        stock_price: Number(stockPrice.toFixed(2)),
+        strike, expiration, dte,
+        bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
+        ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
+        mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
+        spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
+        iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
         volume, open_interest: oi, volume_classification: volClass(volume),
         trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
-        suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)),
-        net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
-        premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)),
+        suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
+        suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
+        net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
+        net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
+        premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
+        breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
         strategy_profile_id: profile.id,
         strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
         strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
-        has_quotes: true,
+        has_quotes: hasValidQuote,
       });
     }
   }
@@ -762,16 +762,8 @@ serve(async (req) => {
           puts_returned: result.putsReturned,
           filtered_by_expiration: result.filteredByExpiration,
           filtered_by_strike: result.filteredByStrike,
-          missing_strike: result.missingStrike,
-          missing_expiration: result.missingExpiration,
-          missing_last_quote: result.missingLastQuote,
-          missing_bid: result.missingBid,
-          zero_bid: result.zeroBid,
-          missing_ask: result.missingAsk,
-          zero_ask: result.zeroAsk,
-          ask_lt_bid: result.askLtBid,
-          other_invalid: result.otherInvalid,
           valid_quotes: result.validQuotes,
+          contracts_awaiting_quotes: result.contractsAwaitingQuotes,
           contracts_evaluated: result.evaluated,
           qualified: result.qualified,
           rejected: result.rejected,

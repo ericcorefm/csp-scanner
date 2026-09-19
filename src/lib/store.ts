@@ -477,11 +477,19 @@ export function useAppState() {
     return updated;
   }, [activeProfile]);
 
+  const updateCandidateWithQuote = useCallback((rowKey: string, updates: Partial<CandidateScan>) => {
+    setCandidates((prev) => prev.map((c) => {
+      const key = `${c.ticker}-${c.strike}-${c.expiration}`;
+      return key === rowKey ? { ...c, ...updates } : c;
+    }));
+  }, []);
+
   return {
     profiles,
     activeProfile,
     setActiveProfile,
     candidates,
+    updateCandidateWithQuote,
     openPositions,
     closedPositions,
     dailyResults,
