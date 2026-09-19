@@ -1,3 +1,4 @@
+import { FunctionsHttpError } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import type { CandidateScan, StrategyProfile } from '@/types';
 
@@ -23,6 +24,11 @@ function isMassiveApiError(data: unknown): data is MassiveApiError {
   return typeof data === 'object' && data !== null && (data as any).success === false && (data as any).provider === 'Massive';
 }
 
+function formatMassiveError(err: MassiveApiError): string {
+  const symbol = err.symbol || 'unknown';
+  return `Massive ${symbol} HTTP ${err.status}:\n${err.error}`;
+}
+
 export async function scanCandidatesLive(
   profile: StrategyProfile,
   openTickers: string[],
@@ -34,15 +40,37 @@ export async function scanCandidatesLive(
     },
   });
 
+  if (error instanceof FunctionsHttpError) {
+    const ctx = (error as any).context as Response | undefined;
+    if (ctx) {
+      try {
+        const body = await ctx.json();
+        if (isMassiveApiError(body)) {
+          throw new Error(formatMassiveError(body));
+        }
+        const msg = (body as any)?.error || (body as any)?.message || JSON.stringify(body);
+        throw new Error(`Massive HTTP ${ctx.status}:\n${msg}`);
+      } catch (parseErr) {
+        if (parseErr instanceof Error && parseErr.message.startsWith('Massive ')) {
+          throw parseErr;
+        }
+        try {
+          const text = await ctx.text();
+          throw new Error(`Massive HTTP ${ctx.status}:\n${text}`);
+        } catch {
+          throw new Error(`Massive HTTP ${ctx.status}:\n${error.message}`);
+        }
+      }
+    }
+    throw new Error(`Massive HTTP error: ${error.message}`);
+  }
+
   if (error) {
     throw new Error(error.message || 'Live market scan failed');
   }
 
   if (isMassiveApiError(data)) {
-    const detail = data.symbol
-      ? `Massive API error for ${data.symbol} (HTTP ${data.status}): ${data.error}`
-      : `Massive API error (HTTP ${data.status}): ${data.error}`;
-    throw new Error(detail);
+    throw new Error(formatMassiveError(data));
   }
 
   if (!data || !Array.isArray(data.candidates)) {
