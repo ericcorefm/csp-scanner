@@ -1,7 +1,7 @@
 import { useState, useMemo, Fragment } from 'react';
 import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
-import type { ScanMode, SymbolTest } from '@/lib/liveMarketData';
+import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { AnalyzeTickerSection } from '@/components/AnalyzeTickerSection';
@@ -81,14 +81,8 @@ export function CandidatesPage({
 
   return (
     <div className="space-y-4">
-      {state.scanSource === 'live' && (
-        <div className="rounded-lg border px-3 py-2 text-xs border-emerald-500/30 bg-emerald-500/5 text-emerald-300">
-          {`LIVE market scan (Massive)${state.lastScanAt ? ` · ${new Date(state.lastScanAt).toLocaleString()}` : ''}`}
-          {state.scanError && <span className="ml-2 text-red-400">{state.scanError}</span>}
-        </div>
-      )}
-      {state.scanSource === null && state.scanError && (
-        <div className="rounded-lg border px-3 py-2 text-xs border-red-500/30 bg-red-500/5 text-red-400">
+      {state.scanError && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm text-red-400">
           {state.scanError}
         </div>
       )}
@@ -107,72 +101,22 @@ export function CandidatesPage({
 
       {state.scanCounts && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-22 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
-            <ScanCountItem label="Returned" value={state.scanCounts.symbols_returned} color={state.scanCounts.symbols_failed > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="With Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
-            <ScanCountItem label="Chain OK" value={state.scanCounts.chain_success} color="text-emerald-400" />
-            <ScanCountItem label="No Options" value={state.scanCounts.chain_no_options} color={state.scanCounts.chain_no_options > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="Chain Err" value={state.scanCounts.chain_api_error} color={state.scanCounts.chain_api_error > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Unauth" value={state.scanCounts.chain_unauthorized} color={state.scanCounts.chain_unauthorized > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Rate Ltd" value={state.scanCounts.chain_rate_limited} color={state.scanCounts.chain_rate_limited > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Failed" value={state.scanCounts.symbols_failed} color={state.scanCounts.symbols_failed > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Puts" value={state.scanCounts.puts_returned} />
-            <ScanCountItem label="Filt Exp" value={state.scanCounts.filtered_by_expiration} color={state.scanCounts.filtered_by_expiration > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="Filt Strike" value={state.scanCounts.filtered_by_strike} color={state.scanCounts.filtered_by_strike > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="No LastQ" value={state.scanCounts.missing_last_quote} color={state.scanCounts.missing_last_quote > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Miss Bid" value={state.scanCounts.missing_bid} color={state.scanCounts.missing_bid > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Zero Bid" value={state.scanCounts.zero_bid} color={state.scanCounts.zero_bid > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="Miss Ask" value={state.scanCounts.missing_ask} color={state.scanCounts.missing_ask > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Zero Ask" value={state.scanCounts.zero_ask} color={state.scanCounts.zero_ask > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="Ask<Bid" value={state.scanCounts.ask_lt_bid} color={state.scanCounts.ask_lt_bid > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Miss Strike" value={state.scanCounts.missing_strike} color={state.scanCounts.missing_strike > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="Miss Exp" value={state.scanCounts.missing_expiration} color={state.scanCounts.missing_expiration > 0 ? 'text-amber-400' : 'text-slate-200'} />
-            <ScanCountItem label="Valid Quotes" value={state.scanCounts.valid_quotes} color="text-emerald-400" />
-            <ScanCountItem label="Evaluated" value={state.scanCounts.contracts_evaluated} color="text-slate-200" />
-          </div>
-          <div className="mt-3 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 border-t border-slate-800 pt-3">
+            <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
+            <ScanCountItem label="Puts Analyzed" value={state.scanCounts.contracts_evaluated} />
             <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
-            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color={state.scanCounts.rejected > 0 ? 'text-red-400' : 'text-slate-200'} />
-            <ScanCountItem label="Pages" value={state.scanCounts.pages_fetched} />
+            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
+            <ScanCountItem
+              label="Last Scan"
+              value={state.lastScanAt ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '--'}
+              isText
+            />
           </div>
-          {state.symbolTests && state.symbolTests.length > 0 && (
-            <div className="mt-3 border-t border-slate-800 pt-3">
-              <div className="text-xs text-slate-500 mb-2">Symbol Tests (SOFI, RIOT, CIFR)</div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {state.symbolTests.map((t: SymbolTest) => (
-                  <div key={t.ticker} className={`rounded-lg border px-3 py-2 ${t.error ? 'border-red-500/30 bg-red-500/5' : t.put_contracts > 0 ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-slate-700 bg-slate-800/30'}`}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm font-semibold text-slate-200">{t.ticker}</span>
-                      <span className={`text-xs ${t.error ? 'text-red-400' : 'text-emerald-400'}`}>HTTP {t.http_status}</span>
-                    </div>
-                    {t.error ? (
-                      <div className="text-xs text-red-400">{t.error}</div>
-                    ) : (
-                      <div className="grid grid-cols-2 gap-1 text-xs text-slate-400">
-                        <span>Puts: <span className="text-slate-200 tabular-nums">{t.put_contracts}</span></span>
-                        <span>With LQ: <span className="text-slate-200 tabular-nums">{t.contracts_with_last_quote}</span></span>
-                        <span>Bid&gt;0: <span className="text-slate-200 tabular-nums">{t.bid_gt_zero}</span></span>
-                        <span>Ask&gt;0: <span className="text-slate-200 tabular-nums">{t.ask_gt_zero}</span></span>
-                        <span>Valid B/A: <span className="text-emerald-400 tabular-nums">{t.valid_bid_ask}</span></span>
-                        <span>Strike: <span className="text-slate-200 tabular-nums">{t.has_strike}</span></span>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {state.rawSample && (
-            <details className="mt-3 border-t border-slate-800 pt-3">
-              <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-300">
-                Raw Massive sample contract (for debugging)
-              </summary>
-              <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-950 p-3 text-[11px] text-slate-400 max-h-64 overflow-y-auto">
-                {JSON.stringify(state.rawSample, null, 2)}
-              </pre>
-            </details>
-          )}
+          <div className="mt-3 flex items-center gap-2 border-t border-slate-800 pt-3">
+            <span className="text-xs text-slate-500">Market Data:</span>
+            <span className="text-xs font-medium text-emerald-400">MASSIVE DELAYED</span>
+          </div>
         </div>
       )}
 
@@ -371,11 +315,11 @@ export function CandidatesPage({
   );
 }
 
-function ScanCountItem({ label, value, color = 'text-slate-200' }: { label: string; value: number; color?: string }) {
+function ScanCountItem({ label, value, color = 'text-slate-200', isText = false }: { label: string; value: number | string; color?: string; isText?: boolean }) {
   return (
     <div className="text-center">
       <div className="text-xs text-slate-500">{label}</div>
-      <div className={`text-sm font-semibold tabular-nums ${color}`}>{value}</div>
+      <div className={`text-sm font-semibold ${isText ? '' : 'tabular-nums'} ${color}`}>{value}</div>
     </div>
   );
 }
