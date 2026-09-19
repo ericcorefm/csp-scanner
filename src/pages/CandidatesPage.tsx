@@ -3,6 +3,7 @@ import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle } from 'lucide-
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
+import { AnalyzeTickerSection } from '@/components/AnalyzeTickerSection';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -87,6 +88,8 @@ export function CandidatesPage({
           {state.scanError}
         </div>
       )}
+
+      <AnalyzeTickerSection state={state} />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>

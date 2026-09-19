@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
-import { scanCandidatesLive } from '@/lib/liveMarketData';
+import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
   StrategyProfile,
@@ -10,6 +10,7 @@ import type {
   DailyScanResult,
   Alert,
 } from '@/types';
+import type { AnalyzeTickerResponse } from '@/lib/liveMarketData';
 
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
   name: 'My CSP Default',
@@ -53,6 +54,10 @@ export function useAppState() {
   const [lastScanAt, setLastScanAt] = useState<string | null>(null);
   const [scanSource, setScanSource] = useState<'live' | null>(null);
   const [positionsLoaded, setPositionsLoaded] = useState(false);
+  const [scanUniverse, setScanUniverse] = useState<string[]>([]);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeResult, setAnalyzeResult] = useState<AnalyzeTickerResponse | null>(null);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   const loadProfiles = useCallback(async () => {
     const { data, error } = await supabase
@@ -119,6 +124,50 @@ export function useAppState() {
     if (error) throw error;
     setAlerts((data || []) as Alert[]);
   }, []);
+
+  const loadScanUniverse = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('scan_universe')
+      .select('symbol')
+      .order('symbol');
+    if (error) throw error;
+    setScanUniverse((data || []).map((r: any) => r.symbol as string));
+  }, []);
+
+  const addToScanUniverse = useCallback(async (symbol: string) => {
+    const sym = symbol.toUpperCase().trim();
+    if (!sym) return;
+    const { error } = await supabase
+      .from('scan_universe')
+      .insert({ symbol: sym });
+    if (error && error.code !== '23505') throw error;
+    setScanUniverse((prev) => prev.includes(sym) ? prev : [...prev, sym].sort());
+  }, []);
+
+  const removeFromScanUniverse = useCallback(async (symbol: string) => {
+    const sym = symbol.toUpperCase().trim();
+    await supabase.from('scan_universe').delete().eq('symbol', sym);
+    setScanUniverse((prev) => prev.filter((s) => s !== sym));
+  }, []);
+
+  const runAnalyzeTicker = useCallback(async (ticker: string) => {
+    if (!activeProfile || analyzing) return;
+    const sym = ticker.toUpperCase().trim();
+    if (!sym) return;
+    setAnalyzing(true);
+    setAnalyzeError(null);
+    setAnalyzeResult(null);
+    try {
+      const result = await analyzeTicker(sym, activeProfile);
+      setAnalyzeResult(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Analyze ticker failed';
+      setAnalyzeError(msg);
+      console.error('Analyze ticker failed:', err);
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [activeProfile, analyzing]);
 
   const runScan = useCallback(async () => {
     if (!activeProfile || scanning) return;
@@ -223,8 +272,9 @@ export function useAppState() {
       loadClosedPositions();
       loadDailyResults();
       loadAlerts();
+      loadScanUniverse();
     }
-  }, [activeProfile, loadOpenPositions, loadClosedPositions, loadDailyResults, loadAlerts]);
+  }, [activeProfile, loadOpenPositions, loadClosedPositions, loadDailyResults, loadAlerts, loadScanUniverse]);
 
   useEffect(() => {
     if (activeProfile && positionsLoaded && candidates.length === 0 && !scanning) {
@@ -388,6 +438,13 @@ export function useAppState() {
     deleteOpenPosition,
     closePosition,
     resetProfile,
+    scanUniverse,
+    addToScanUniverse,
+    removeFromScanUniverse,
+    analyzing,
+    analyzeResult,
+    analyzeError,
+    runAnalyzeTicker,
   };
 }
 

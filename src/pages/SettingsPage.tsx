@@ -19,7 +19,7 @@ const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
     title: 'Order & Strike',
     icon: 'order',
     fields: [
-      { key: 'order_type', label: 'Order Type', type: 'text', help: 'LIMIT only recommended' },
+      { key: 'order_type', label: 'Order Type', type: 'text', help: 'Limit orders recommended for options.' },
       { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5' },
     ],
   },
@@ -235,7 +235,15 @@ export function SettingsPage({ state }: { state: AppState }) {
                     {field.help && <p className="text-xs text-slate-500 mt-0.5">{field.help}</p>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {field.type === 'boolean' ? (
+                    {field.key === 'order_type' ? (
+                      <select
+                        value={String(profile[field.key]) || 'LIMIT'}
+                        onChange={(e) => updateField(field.key, e.target.value)}
+                        className="w-28 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100"
+                      >
+                        <option value="LIMIT">LIMIT</option>
+                      </select>
+                    ) : field.type === 'boolean' ? (
                       <button
                         onClick={() => updateField(field.key, !profile[field.key])}
                         className={`relative h-5 w-9 rounded-full transition-colors ${

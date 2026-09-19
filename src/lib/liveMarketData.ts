@@ -39,6 +39,99 @@ function formatMassiveError(d: MassiveApiError): string {
   return `Massive ${symbol}${stage} HTTP ${status}:\n${body}`;
 }
 
+export interface AnalyzeTickerResponse {
+  success: true;
+  ticker: string;
+  stock_price: number;
+  trend: string;
+  primary_support: number;
+  secondary_support: number;
+  resistance: number;
+  qualifies: boolean;
+  best_contract: ContractAnalysis | null;
+  other_qualifying_contracts: ContractAnalysis[];
+  all_contracts_count: number;
+  qualifying_count: number;
+}
+
+export interface ContractAnalysis {
+  strike: number;
+  expiration: string;
+  dte: number;
+  bid: number;
+  ask: number;
+  mid: number;
+  spread_pct: number;
+  iv: number;
+  delta: number;
+  volume: number;
+  open_interest: number;
+  volume_classification: string;
+  suggested_sto: number;
+  suggested_btc: number;
+  net_profit: number;
+  net_croi: number;
+  premium_capture: number;
+  breakeven: number;
+  qualified: boolean;
+  pass_fail: { rule: string; pass: boolean }[];
+}
+
+export async function analyzeTicker(
+  ticker: string,
+  profile: StrategyProfile,
+): Promise<AnalyzeTickerResponse> {
+  const { data, error } = await supabase.functions.invoke('analyze-ticker', {
+    body: { ticker, profile },
+  });
+
+  if (error instanceof FunctionsHttpError) {
+    const ctx = (error as any).context as Response | undefined;
+    if (ctx) {
+      try {
+        const body = await ctx.json();
+        if (body && body.success === false) {
+          const symbol = body.symbol || ticker;
+          const stage = body.stage ? ` [${body.stage}]` : '';
+          const status = body.massiveStatus || body.status || 0;
+          const msg = body.massiveBody || body.error || 'Unknown error';
+          throw new Error(`Massive ${symbol}${stage} HTTP ${status}:\n${msg}`);
+        }
+        const msg = (body as any)?.error || (body as any)?.message || JSON.stringify(body);
+        throw new Error(`Massive HTTP ${ctx.status}:\n${msg}`);
+      } catch (parseErr) {
+        if (parseErr instanceof Error && parseErr.message.startsWith('Massive ')) throw parseErr;
+        try {
+          const text = await ctx.text();
+          throw new Error(`Massive HTTP ${ctx.status}:\n${text}`);
+        } catch {
+          throw new Error(`Massive HTTP ${ctx.status}:\n${error.message}`);
+        }
+      }
+    }
+    throw new Error(`Massive HTTP error: ${error.message}`);
+  }
+
+  if (error instanceof FunctionsRelayError) {
+    throw new Error(`Massive relay error: ${error.message}`);
+  }
+
+  if (error instanceof FunctionsFetchError) {
+    throw new Error(`Massive fetch error: ${error.message}`);
+  }
+
+  if (error) {
+    throw new Error(error.message || 'Analyze ticker failed');
+  }
+
+  if (!data || data.success === false) {
+    const msg = (data as any)?.error || 'Analyze ticker returned an error';
+    throw new Error(msg);
+  }
+
+  return data as AnalyzeTickerResponse;
+}
+
 export async function scanCandidatesLive(
   profile: StrategyProfile,
   openTickers: string[],
