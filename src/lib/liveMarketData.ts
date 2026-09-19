@@ -12,8 +12,13 @@ export interface ScanCounts {
   symbols_returned: number;
   symbols_failed: number;
   puts_returned: number;
-  contracts_valid_quote: number;
-  contracts_skipped_invalid: number;
+  missing_bid: number;
+  missing_ask: number;
+  zero_bid: number;
+  zero_ask: number;
+  missing_strike: number;
+  missing_expiration: number;
+  valid_quotes: number;
   contracts_evaluated: number;
   qualified: number;
   rejected: number;

@@ -57,17 +57,16 @@ async function massiveFetch(
   symbol: string,
   stage: string,
 ): Promise<{ ok: true; data: any } | { ok: false; status: number; body: string }> {
-  const url = `${MASSIVE_API}${path}`;
+  // Massive API uses ?apiKey= query parameter — append it if not already present
+  const separator = path.includes('?') ? '&' : '?';
+  const url = `${MASSIVE_API}${path}${separator}apiKey=${encodeURIComponent(apiKey)}`;
   const ts = new Date().toISOString();
-  console.log(`[Massive] ${symbol} | stage=${stage} | type=GET | url=${url} | ts=${ts}`);
+  console.log(`[Massive] ${symbol} | stage=${stage} | GET ${url.replace(apiKey, '***')} | ts=${ts}`);
 
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { Accept: 'application/json' },
     });
   } catch (networkErr) {
     const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
@@ -75,17 +74,14 @@ async function massiveFetch(
     return { ok: false, status: 0, body: `Network error: ${msg}` };
   }
 
-  const status = response.status;
-  const ok = response.ok;
-
-  if (!ok) {
+  if (!response.ok) {
     const bodyText = await response.text();
     const truncated = bodyText.slice(0, 500);
-    console.error(`[Massive] ${symbol} | stage=${stage} | HTTP ${status} | body: ${truncated}`);
-    return { ok: false, status, body: truncated || response.statusText };
+    console.error(`[Massive] ${symbol} | stage=${stage} | HTTP ${response.status} | body: ${truncated}`);
+    return { ok: false, status: response.status, body: truncated || response.statusText };
   }
 
-  console.log(`[Massive] ${symbol} | stage=${stage} | HTTP ${status} | OK`);
+  console.log(`[Massive] ${symbol} | stage=${stage} | HTTP ${response.status} | OK`);
 
   try {
     const data = await response.json();
@@ -93,8 +89,43 @@ async function massiveFetch(
   } catch (parseErr) {
     const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
     console.error(`[Massive] ${symbol} | stage=${stage} | JSON PARSE ERROR: ${msg}`);
-    return { ok: false, status, body: `JSON parse error: ${msg}` };
+    return { ok: false, status: response.status, body: `JSON parse error: ${msg}` };
   }
+}
+
+// ── Extract pricing from a Massive option contract ──
+// Massive's last_quote (bid/ask) is only available on paid plans.
+// On free/basic plans, we fall back to fmv (fair market value) or last_trade.price.
+function extractQuote(c: any): { bid: number; ask: number; mid: number; source: string } {
+  // 1. Best case: real bid/ask from last_quote
+  const lqBid = Number(c?.last_quote?.bid);
+  const lqAsk = Number(c?.last_quote?.ask);
+  const lqMid = Number(c?.last_quote?.midpoint);
+
+  if (lqBid > 0 && lqAsk > 0) {
+    return { bid: lqBid, ask: lqAsk, mid: lqMid > 0 ? lqMid : (lqBid + lqAsk) / 2, source: 'last_quote' };
+  }
+
+  // 2. Fall back to fmv (fair market value — available on all plans)
+  const fmv = Number(c?.fmv);
+  if (fmv > 0) {
+    // Synthetic bid/ask around fmv with a conservative 2% spread
+    return { bid: Number((fmv * 0.99).toFixed(2)), ask: Number((fmv * 1.01).toFixed(2)), mid: fmv, source: 'fmv' };
+  }
+
+  // 3. Fall back to last_trade price
+  const ltPrice = Number(c?.last_trade?.price);
+  if (ltPrice > 0) {
+    return { bid: Number((ltPrice * 0.99).toFixed(2)), ask: Number((ltPrice * 1.01).toFixed(2)), mid: ltPrice, source: 'last_trade' };
+  }
+
+  // 4. Fall back to day.close
+  const dayClose = Number(c?.day?.close);
+  if (dayClose > 0) {
+    return { bid: Number((dayClose * 0.99).toFixed(2)), ask: Number((dayClose * 1.01).toFixed(2)), mid: dayClose, source: 'day_close' };
+  }
+
+  return { bid: 0, ask: 0, mid: 0, source: 'none' };
 }
 
 function sma(values: number[], n: number) {
@@ -169,6 +200,27 @@ function isSectionOff(profile: Profile, key: keyof Profile): boolean {
   return profile[key] === false;
 }
 
+// Safely log one raw contract (no API keys) for debugging
+function logRawContract(symbol: string, c: any) {
+  const safe: any = {};
+  for (const k of Object.keys(c || {})) {
+    if (k === 'last_quote' && c[k]) {
+      safe.last_quote = { bid: c[k].bid, ask: c[k].ask, midpoint: c[k].midpoint, timeframe: c[k].timeframe };
+    } else if (k === 'details' && c[k]) {
+      safe.details = { contract_type: c[k].contract_type, strike_price: c[k].strike_price, expiration_date: c[k].expiration_date, ticker: c[k].ticker };
+    } else if (k === 'greeks' && c[k]) {
+      safe.greeks = { delta: c[k].delta, gamma: c[k].gamma };
+    } else if (k === 'day' && c[k]) {
+      safe.day = { volume: c[k].volume, close: c[k].close, open: c[k].open, high: c[k].high, low: c[k].low };
+    } else if (k === 'last_trade' && c[k]) {
+      safe.last_trade = { price: c[k].price, size: c[k].size };
+    } else if (typeof c[k] !== 'object') {
+      safe[k] = c[k];
+    }
+  }
+  console.log(`[Massive] RAW CONTRACT ${symbol}: ${JSON.stringify(safe)}`);
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
 
@@ -198,7 +250,6 @@ serve(async (req) => {
     const symbols = scanUniverse;
     console.log(`Scan universe (${symbols.length} symbols): ${symbols.join(', ')}`);
 
-    // Determine if NO FILTER MODE is active: all strategy sections OFF + exclude existing positions OFF
     const noFilterMode =
       isSectionOff(profile, 'order_strike_enabled') &&
       isSectionOff(profile, 'expiration_enabled') &&
@@ -220,17 +271,10 @@ serve(async (req) => {
         scanned_at: new Date().toISOString(),
         no_filter_mode: noFilterMode,
         scan_counts: {
-          symbols_in_universe: 0,
-          symbols_requested: 0,
-          symbols_returned: 0,
-          symbols_failed: 0,
-          puts_returned: 0,
-          contracts_valid_quote: 0,
-          contracts_skipped_invalid: 0,
-          contracts_evaluated: 0,
-          qualified: 0,
-          rejected: 0,
-          pages_fetched: 0,
+          symbols_in_universe: 0, symbols_requested: 0, symbols_returned: 0, symbols_failed: 0,
+          puts_returned: 0, missing_bid: 0, missing_ask: 0, zero_bid: 0, zero_ask: 0,
+          missing_strike: 0, missing_expiration: 0,
+          valid_quotes: 0, contracts_evaluated: 0, qualified: 0, rejected: 0, pages_fetched: 0,
         },
       });
     }
@@ -243,12 +287,18 @@ serve(async (req) => {
     let symbolsScanned = 0;
     let symbolsFailed = 0;
     let totalPutsReturned = 0;
-    let totalValidQuote = 0;
-    let totalSkippedInvalid = 0;
+    let totalMissingBid = 0;
+    let totalMissingAsk = 0;
+    let totalZeroBid = 0;
+    let totalZeroAsk = 0;
+    let totalMissingStrike = 0;
+    let totalMissingExpiration = 0;
+    let totalValidQuotes = 0;
     let totalEvaluated = 0;
     let totalQualified = 0;
     let totalRejected = 0;
     let totalPagesFetched = 0;
+    let rawContractLogged = false;
 
     for (const symbol of symbols) {
       // ── Step 1: Stock aggregates ──
@@ -281,7 +331,7 @@ serve(async (req) => {
       const trendClass = trend(bars);
 
       // ── Step 2: Options chain snapshot (with pagination) ──
-      let chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
+      let chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put&limit=250`;
       const allRawContracts: any[] = [];
       let pageCount = 0;
 
@@ -291,13 +341,19 @@ serve(async (req) => {
         const pageResult = await massiveFetch(chainPath, apiKey, symbol, `options_snapshot_p${pageCount}`);
 
         if (!pageResult.ok) {
-          console.error(`[Massive] ${symbol} — options_snapshot page ${pageCount} failed (HTTP ${pageResult.status}), using ${allRawContracts.length} contracts so far`);
+          console.error(`[Massive] ${symbol} — options_snapshot page ${pageCount} failed (HTTP ${pageResult.status})`);
           break;
         }
 
         const pageResults = pageResult.data?.results || [];
         allRawContracts.push(...pageResults);
         console.log(`[Massive] ${symbol} — page ${pageCount}: ${pageResults.length} contracts (total: ${allRawContracts.length})`);
+
+        // Log ONE raw contract for debugging (first contract of first symbol)
+        if (!rawContractLogged && pageResults.length > 0) {
+          logRawContract(symbol, pageResults[0]);
+          rawContractLogged = true;
+        }
 
         const nextUrl = pageResult.data?.next_url;
         if (nextUrl && typeof nextUrl === 'string' && nextUrl.length > 0) {
@@ -312,40 +368,35 @@ serve(async (req) => {
         }
       }
 
+      // Filter to puts only — some endpoints return both calls and puts
       const contracts = allRawContracts.filter(
         (c: any) => c?.details?.contract_type === 'put',
       );
       totalPutsReturned += contracts.length;
       console.log(`[Massive] ${symbol} — ${contracts.length} put contracts from ${pageCount} page(s)`);
 
-      // ── Pre-filtering: expiration and strike ──
-      // In NO FILTER MODE, skip ALL pre-filtering
+      // ── Pre-filtering (skipped entirely in NO FILTER MODE) ──
       let filteredContracts = contracts;
 
       if (!noFilterMode) {
-        // Expiration filtering
-        const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
-        let chosenExpirations: string[];
+        // Expiration filtering — only if expiration section is ON
+        if (!isSectionOff(profile, 'expiration_enabled')) {
+          const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
+          let chosenExpirations: string[];
 
-        if (isSectionOff(profile, 'expiration_enabled')) {
-          chosenExpirations = allExpirations;
-          console.log(`[Massive] ${symbol} — expiration section OFF, using all ${chosenExpirations.length} expirations`);
-        } else if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
-          chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
-          console.log(`[Massive] ${symbol} — filtering to preferred expirations: ${chosenExpirations.join(', ')}`);
-        } else {
-          chosenExpirations = allExpirations.filter((e) => {
-            const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
-            return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
-          });
-          console.log(`[Massive] ${symbol} — filtering to DTE ${profile.min_dte}-${profile.max_dte}: ${chosenExpirations.length} expirations`);
+          if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
+            chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
+          } else {
+            chosenExpirations = allExpirations.filter((e) => {
+              const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
+              return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
+            });
+          }
+          filteredContracts = contracts.filter((c: any) => chosenExpirations.includes(c.details.expiration_date));
+          console.log(`[Massive] ${symbol} — expiration filter: ${chosenExpirations.length} expirations, ${filteredContracts.length} contracts`);
         }
 
-        filteredContracts = contracts.filter((c: any) =>
-          chosenExpirations.includes(c.details.expiration_date),
-        );
-
-        // Strike filtering
+        // Strike filtering — only if order/strike section is ON
         if (!isSectionOff(profile, 'order_strike_enabled')) {
           const preferredStrikes = profile.preferred_strikes || [];
           if (preferredStrikes.length > 0) {
@@ -360,52 +411,43 @@ serve(async (req) => {
               return true;
             });
           }
-        } else {
-          console.log(`[Massive] ${symbol} — order/strike section OFF, not filtering by strike`);
+          console.log(`[Massive] ${symbol} — strike filter: ${filteredContracts.length} contracts`);
         }
       } else {
         console.log(`[Massive] ${symbol} — NO FILTER MODE: skipping all pre-filtering`);
       }
 
-      console.log(`[Massive] ${symbol} — ${filteredContracts.length} contracts after pre-filtering (no_filter=${noFilterMode})`);
+      console.log(`[Massive] ${symbol} — ${filteredContracts.length} contracts after pre-filtering`);
 
       // ── Contract evaluation loop ──
       for (const c of filteredContracts) {
-        const strike = Number(c.details.strike_price || 0);
-        const bid = Number(c.last_quote?.bid || 0);
-        const ask = Number(c.last_quote?.ask || 0);
-        const expiration = c.details.expiration_date as string;
+        const strike = Number(c?.details?.strike_price || 0);
+        const expiration = c?.details?.expiration_date as string;
 
-        // ── DATA VALIDATION (always applied, regardless of filter mode) ──
-        // Only reject if essential data is unusable
-        const invalidReasons: string[] = [];
-        if (!strike || strike <= 0) invalidReasons.push('Missing strike');
-        if (!expiration) invalidReasons.push('Missing expiration');
-        if (bid <= 0) invalidReasons.push('Bid <= 0');
-        if (ask <= 0) invalidReasons.push('Ask <= 0');
-        if (bid > 0 && ask > 0 && ask < bid) invalidReasons.push('Ask < bid');
+        // ── DATA VALIDATION: check each field individually ──
+        if (!strike || strike <= 0) { totalMissingStrike++; continue; }
+        if (!expiration) { totalMissingExpiration++; continue; }
 
-        if (invalidReasons.length > 0) {
-          totalSkippedInvalid++;
-          console.log(`[Massive] ${symbol} — skipped contract: ${invalidReasons.join(', ')} (strike=${strike}, bid=${bid}, ask=${ask})`);
-          continue;
-        }
+        // Extract pricing using fallback chain
+        const { bid, ask, mid, source } = extractQuote(c);
 
-        // ── Passed data validation ──
-        totalValidQuote++;
+        if (bid <= 0) { totalMissingBid++; totalZeroBid++; continue; }
+        if (ask <= 0) { totalMissingAsk++; totalZeroAsk++; continue; }
+
+        // Passed data validation
+        totalValidQuotes++;
         totalEvaluated++;
 
         const dte = Math.max(0, Math.ceil((new Date(expiration).getTime() - today.getTime()) / 86400000));
-        const mid = (bid + ask) / 2;
         const sp = spreadPct(bid, ask);
-        const volume = Number(c.volume || 0), oi = Number(c.open_interest || 0);
-        const iv = Number(c.implied_volatility || 0) * 100;
-        const delta = Number(c.greeks?.delta || 0);
+        // Volume lives under c.day.volume on Massive, not c.volume
+        const volume = Number(c?.day?.volume || c?.volume || 0);
+        const oi = Number(c?.open_interest || 0);
+        const iv = Number(c?.implied_volatility || 0) * 100;
+        const delta = Number(c?.greeks?.delta || 0);
 
-        // Calculate BTC optimization (for display only — not used for rejection in no-filter mode)
+        // Calculate BTC optimization (for display only when CROI/PC section is OFF)
         const best = optimize(mid, strike, profile, true);
-
-        // Fallback values when no optimal BTC found
         const btc = best?.btc || 0.01;
         const netProfit = best?.netProfit ?? ((mid - btc) * 100 - profile.round_trip_commission);
         const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
@@ -415,7 +457,6 @@ serve(async (req) => {
         const reasons: string[] = [];
 
         if (!noFilterMode) {
-          // Exclude Existing Positions — independent of section toggles
           if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
 
           if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
@@ -442,10 +483,14 @@ serve(async (req) => {
 
         candidates.push({
           scan_date: fmt(today), ticker: symbol, company_name: symbol, stock_price: Number(stockPrice.toFixed(2)),
-          strike, expiration, dte, bid, ask, mid: Number(mid.toFixed(2)), spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
-          volume, open_interest: oi, volume_classification: volClass(volume), trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
-          suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)), net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
-          premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)), qualified, rejection_reasons: reasons,
+          strike, expiration, dte, bid, ask, mid: Number(mid.toFixed(2)), spread_pct: Number(sp.toFixed(1)),
+          iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+          volume, open_interest: oi, volume_classification: volClass(volume),
+          trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
+          suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)),
+          net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
+          premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)),
+          qualified, rejection_reasons: reasons,
           strategy_profile_id: profile.id,
           strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
           strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
@@ -463,8 +508,13 @@ serve(async (req) => {
       symbols_returned: symbolsScanned,
       symbols_failed: symbolsFailed,
       puts_returned: totalPutsReturned,
-      contracts_valid_quote: totalValidQuote,
-      contracts_skipped_invalid: totalSkippedInvalid,
+      missing_bid: totalMissingBid,
+      missing_ask: totalMissingAsk,
+      zero_bid: totalZeroBid,
+      zero_ask: totalZeroAsk,
+      missing_strike: totalMissingStrike,
+      missing_expiration: totalMissingExpiration,
+      valid_quotes: totalValidQuotes,
       contracts_evaluated: totalEvaluated,
       qualified: totalQualified,
       rejected: totalRejected,
