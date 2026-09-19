@@ -113,6 +113,19 @@ export function CandidatesPage({
               isText
             />
           </div>
+          {state.scanCounts.contracts_awaiting_quotes > 0 && (
+            <div className="mt-3 border-t border-slate-800 pt-3 space-y-2">
+              <div className="flex items-center gap-2 text-sm text-amber-400">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>Contracts found, but bid/ask quotes are unavailable from the current market-data plan.</span>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
+                <ScanCountItem label="With Quotes" value={state.scanCounts.valid_quotes} color="text-emerald-400" />
+                <ScanCountItem label="Awaiting Quote Data" value={state.scanCounts.contracts_awaiting_quotes} color="text-amber-400" />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -212,13 +225,14 @@ export function CandidatesPage({
                     <tr
                       onClick={() => onNavigate('detail', c.ticker)}
                       className={`cursor-pointer transition-colors ${
-                        c.qualified ? 'hover:bg-slate-800/40' : 'opacity-60 hover:bg-slate-800/40'
+                        c.qualified ? 'hover:bg-slate-800/40' : c.has_quotes === false ? 'opacity-50 hover:bg-slate-800/40' : 'opacity-60 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
-                          {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           {c.qualified && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
+                          {!c.qualified && c.has_quotes === false && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
+                          {!c.qualified && c.has_quotes !== false && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
@@ -234,26 +248,30 @@ export function CandidatesPage({
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support}%</td>
                       <td className="px-3 py-2.5 text-slate-400 text-xs whitespace-nowrap">{c.expiration}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.dte}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">${formatNum(c.bid)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">${formatNum(c.ask)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">${formatNum(c.mid)}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.bid)}`}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.ask)}`}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.mid)}`}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
-                        <span className={c.spread_pct <= 5 ? 'text-emerald-400' : c.spread_pct <= 10 ? 'text-amber-400' : 'text-red-400'}>
-                          {formatPct(c.spread_pct)}
-                        </span>
+                        {c.has_quotes === false ? <span className="text-amber-500/60">—</span> : (
+                          <span className={c.spread_pct <= 5 ? 'text-emerald-400' : c.spread_pct <= 10 ? 'text-amber-400' : 'text-red-400'}>
+                            {formatPct(c.spread_pct)}
+                          </span>
+                        )}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">${formatNum(c.suggested_sto)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">${formatNum(c.suggested_btc)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">${formatNum(c.net_profit)}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.suggested_sto)}`}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.suggested_btc)}`}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.net_profit)}`}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
-                        <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
-                          {formatPct(c.net_croi)}
-                        </span>
+                        {c.has_quotes === false ? <span className="text-amber-500/60">—</span> : (
+                          <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
+                            {formatPct(c.net_croi)}
+                          </span>
+                        )}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{formatPct(c.premium_capture)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">${formatNum(c.breakeven)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{formatNum(c.iv, 0)}%</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{formatNum(c.delta)}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : formatPct(c.premium_capture)}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.has_quotes === false ? <span className="text-amber-500/60">—</span> : `${formatNum(c.breakeven)}`}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.iv > 0 ? `${formatNum(c.iv, 0)}%` : '—'}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.delta !== 0 ? formatNum(c.delta) : '—'}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.volume}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.open_interest.toLocaleString()}</td>
                     </tr>
@@ -290,8 +308,18 @@ export function CandidatesPage({
         </div>
         {filtered.length === 0 && (
           <div className="py-12 text-center text-slate-500">
-            <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
-            <p className="text-sm">No candidates found. Try adjusting your strategy rules in Settings.</p>
+            {state.scanCounts && state.scanCounts.contracts_awaiting_quotes > 0 ? (
+              <>
+                <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-amber-500" />
+                <p className="text-sm text-amber-400 mb-1">Contracts found, but bid/ask quotes are unavailable from the current market-data plan.</p>
+                <p className="text-xs text-slate-500">Strike, expiration, IV, OI, and Greeks are shown where available.</p>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
+                <p className="text-sm">No candidates found. Try adjusting your strategy rules in Settings.</p>
+              </>
+            )}
           </div>
         )}
       </div>

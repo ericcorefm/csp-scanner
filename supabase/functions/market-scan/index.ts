@@ -17,13 +17,11 @@ const MASSIVE_API = 'https://api.massive.com';
 const MAX_CHAIN_PAGES = 10;
 const MAX_DISCOVERY_SYMBOLS = 250;
 const MAX_CANDIDATES = 50;
-const TEST_SYMBOLS = ['SOFI', 'RIOT', 'CIFR'];
 
 type Profile = {
   id: string;
   max_strike: number;
   min_strike: number | null;
-  preferred_strikes: number[];
   min_dte: number;
   max_dte: number;
   preferred_expirations: string[];
@@ -295,59 +293,6 @@ function logRawContract(label: string, symbol: string, c: any) {
   console.log(`[RAW ${label}] ${symbol}: ${JSON.stringify(safe)}`);
 }
 
-// ── Symbol test: fetch chain for a single ticker and return diagnostic counts ──
-async function testSymbol(symbol: string, apiKey: string): Promise<{
-  ticker: string;
-  http_status: number;
-  total_contracts: number;
-  put_contracts: number;
-  contracts_with_last_quote: number;
-  bid_gt_zero: number;
-  ask_gt_zero: number;
-  valid_bid_ask: number;
-  has_expiration: number;
-  has_strike: number;
-  error?: string;
-}> {
-  const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
-  const result = await massiveFetch(chainPath, apiKey, symbol, 'test_options');
-
-  if (!result.ok) {
-    return {
-      ticker: symbol, http_status: result.status,
-      total_contracts: 0, put_contracts: 0, contracts_with_last_quote: 0,
-      bid_gt_zero: 0, ask_gt_zero: 0, valid_bid_ask: 0,
-      has_expiration: 0, has_strike: 0,
-      error: result.body.slice(0, 200),
-    };
-  }
-
-  const contracts = (result.data?.results || []).filter((c: any) => c?.details?.contract_type === 'put');
-  let withLQ = 0, bidGt0 = 0, askGt0 = 0, validBA = 0, hasExp = 0, hasStrike = 0;
-
-  for (const c of contracts) {
-    if (c?.last_quote && typeof c.last_quote === 'object') {
-      withLQ++;
-      const b = Number(c.last_quote.bid || 0);
-      const a = Number(c.last_quote.ask || 0);
-      if (b > 0) bidGt0++;
-      if (a > 0) askGt0++;
-      if (b > 0 && a > 0 && a >= b) validBA++;
-    }
-    if (c?.details?.expiration_date) hasExp++;
-    if (c?.details?.strike_price && Number(c.details.strike_price) > 0) hasStrike++;
-  }
-
-  return {
-    ticker: symbol, http_status: 200,
-    total_contracts: result.data?.results?.length || 0,
-    put_contracts: contracts.length,
-    contracts_with_last_quote: withLQ,
-    bid_gt_zero: bidGt0, ask_gt_zero: askGt0, valid_bid_ask: validBA,
-    has_expiration: hasExp, has_strike: hasStrike,
-  };
-}
-
 // ── Per-symbol scan result ──
 type ScanSymbolResult = {
   candidates: any[];
@@ -367,6 +312,7 @@ type ScanSymbolResult = {
   otherInvalid: number;
   // Valid contracts
   validQuotes: number;
+  contractsAwaitingQuotes: number;
   evaluated: number;
   qualified: number;
   rejected: number;
@@ -399,7 +345,7 @@ async function scanSymbol(
     putsReturned: 0, filteredByExpiration: 0, filteredByStrike: 0,
     missingStrike: 0, missingExpiration: 0, missingLastQuote: 0,
     missingBid: 0, zeroBid: 0, missingAsk: 0, zeroAsk: 0, askLtBid: 0, otherInvalid: 0,
-    validQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pagesFetched: 0,
+    validQuotes: 0, contractsAwaitingQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pagesFetched: 0,
   };
 
   const start = new Date(today); start.setDate(start.getDate() - 420);
@@ -428,8 +374,31 @@ async function scanSymbol(
   r.resistance = resistance;
   r.trendClass = trendClass;
 
-  // Step 2: Options chain — no limit param, matching analyze-ticker
-  const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
+  // Step 2: Options chain — build URL with server-side filters to reduce pages
+  const chainParams = new URLSearchParams();
+  chainParams.set('contract_type', 'put');
+
+  // Server-side strike filter (if Order & Strike enabled)
+  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    chainParams.set('strike_price.lte', String(profile.max_strike));
+    if (profile.min_strike !== null && profile.min_strike !== undefined) {
+      chainParams.set('strike_price.gte', String(profile.min_strike));
+    }
+  }
+
+  // Server-side expiration filter (if Expiration enabled)
+  if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
+    const minDte = profile.min_dte ?? 0;
+    const maxDte = profile.max_dte ?? 9999;
+    const minDate = new Date(today);
+    minDate.setDate(minDate.getDate() + minDte);
+    const maxDate = new Date(today);
+    maxDate.setDate(maxDate.getDate() + maxDte);
+    chainParams.set('expiration_date.gte', fmt(minDate));
+    chainParams.set('expiration_date.lte', fmt(maxDate));
+  }
+
+  const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?${chainParams.toString()}`;
   const allRawContracts: any[] = [];
   let pageCount = 0;
   let currentPath = chainPath;
@@ -536,20 +505,15 @@ async function scanSymbol(
     }
   }
 
-  // ── Pre-filtering: strike ──
+  // ── Pre-filtering: strike (client-side safety net, server already filtered) ──
   if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-    const preferredStrikes = profile.preferred_strikes || [];
     const before = filteredContracts.length;
-    if (preferredStrikes.length > 0) {
-      filteredContracts = filteredContracts.filter((c: any) => preferredStrikes.includes(Number(c.details.strike_price)));
-    } else {
-      filteredContracts = filteredContracts.filter((c: any) => {
-        const s = Number(c.details.strike_price);
-        if (s > profile.max_strike) return false;
-        if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
-        return true;
-      });
-    }
+    filteredContracts = filteredContracts.filter((c: any) => {
+      const s = Number(c.details.strike_price);
+      if (s > profile.max_strike) return false;
+      if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
+      return true;
+    });
     r.filteredByStrike = before - filteredContracts.length;
     if (verbose) console.log(`[VERBOSE] ${symbol} | strike filter (max ${profile.max_strike}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByStrike})`);
   }
@@ -559,7 +523,7 @@ async function scanSymbol(
     console.log(`[VERBOSE] ${symbol} | pipeline: puts=${contracts.length} | filtExp=${r.filteredByExpiration} | filtStrike=${r.filteredByStrike} | remaining=${filteredContracts.length}`);
   }
 
-  // ── Contract evaluation with granular skip tracking ──
+  // ── Contract evaluation ──
   const analyses: any[] = [];
 
   for (const c of filteredContracts) {
@@ -571,27 +535,60 @@ async function scanSymbol(
     // Skip counting: expiration
     if (!expiration) { r.missingExpiration++; continue; }
 
-    // Quote extraction with precise categorization
-    const { hasLastQuote, bid, ask, mid } = extractQuote(c);
-
-    if (!hasLastQuote) { r.missingLastQuote++; continue; }
-    if (bid === null) { r.missingBid++; continue; }
-    if (bid === 0) { r.zeroBid++; continue; }  // illiquid but not missing
-    if (ask === null) { r.missingAsk++; continue; }
-    if (ask === 0) { r.zeroAsk++; continue; }
-    if (ask < bid) { r.askLtBid++; continue; }
-
-    // At this point: bid > 0, ask > 0, ask >= bid — valid executable quote
-    r.validQuotes++;
-    r.evaluated++;
-
     const dte = Math.max(0, calcDTE(expiration, today));
-    const sp = spreadPct(bid, ask);
     const volume = Number(c?.day?.volume || c?.volume || 0);
     const oi = Number(c?.open_interest || 0);
     const iv = Number(c?.implied_volatility || 0) * 100;
     const delta = Number(c?.greeks?.delta || 0);
 
+    // Quote extraction with precise categorization
+    const { hasLastQuote, bid, ask, mid } = extractQuote(c);
+
+    // Determine if quote is valid: bid > 0, ask > 0, ask >= bid
+    const hasValidQuote = hasLastQuote && bid !== null && bid > 0 && ask !== null && ask > 0 && ask >= bid;
+
+    if (!hasValidQuote) {
+      // Contract exists but quotes are unavailable — track as awaiting quotes
+      r.contractsAwaitingQuotes++;
+
+      if (analyzeMode) {
+        analyses.push({
+          strike, expiration, dte,
+          bid: 0, ask: 0, mid: 0, spread_pct: 999,
+          iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+          volume, open_interest: oi, volume_classification: volClass(volume),
+          suggested_sto: 0, suggested_btc: 0,
+          net_profit: 0, net_croi: 0, premium_capture: 0, breakeven: strike,
+          qualified: false, pass_fail: [{ rule: 'Bid/ask quotes unavailable', pass: false }],
+          has_quotes: false,
+        });
+      } else {
+        // Partial candidate — keep available data, no financial calcs
+        r.candidates.push({
+          scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol,
+          stock_price: Number(stockPrice.toFixed(2)),
+          strike, expiration, dte,
+          bid: 0, ask: 0, mid: 0, spread_pct: 0,
+          iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+          volume, open_interest: oi, volume_classification: volClass(volume),
+          trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
+          suggested_sto: 0, suggested_btc: 0,
+          net_profit: 0, net_croi: 0, premium_capture: 0, breakeven: 0,
+          qualified: false, rejection_reasons: ['Awaiting quote data'],
+          strategy_profile_id: profile.id,
+          strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
+          strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
+          has_quotes: false,
+        });
+      }
+      continue;
+    }
+
+    // At this point: bid > 0, ask > 0, ask >= bid — valid executable quote
+    r.validQuotes++;
+    r.evaluated++;
+
+    const sp = spreadPct(bid!, ask!);
     const best = optimize(mid, strike, profile, true);
     const btc = best?.btc || 0.01;
     const netProfit = best?.netProfit ?? ((mid - btc) * 100 - profile.round_trip_commission);
@@ -599,7 +596,6 @@ async function scanSymbol(
     const pc = best?.pc ?? (mid - btc) / mid * 100;
 
     if (analyzeMode) {
-      // Build pass/fail list for analyze mode
       const passFail: { rule: string; pass: boolean }[] = [];
       if (!isSectionOff(profile, 'order_strike_enabled')) {
         passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike });
@@ -623,16 +619,15 @@ async function scanSymbol(
       if (qualified) r.qualified++; else r.rejected++;
 
       analyses.push({
-        strike, expiration, dte, bid: Number(bid.toFixed(2)), ask: Number(ask.toFixed(2)), mid: Number(mid.toFixed(2)),
+        strike, expiration, dte, bid: Number(bid!.toFixed(2)), ask: Number(ask!.toFixed(2)), mid: Number(mid.toFixed(2)),
         spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
         volume, open_interest: oi, volume_classification: volClass(volume),
         suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)),
         net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
         premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)),
-        qualified, pass_fail: passFail,
+        qualified, pass_fail: passFail, has_quotes: true,
       });
     } else {
-      // Scan mode: flat candidate with rejection_reasons
       const reasons: string[] = [];
       if (!noFilterMode) {
         if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
@@ -655,7 +650,7 @@ async function scanSymbol(
 
       r.candidates.push({
         scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol, stock_price: Number(stockPrice.toFixed(2)),
-        strike, expiration, dte, bid: Number(bid.toFixed(2)), ask: Number(ask.toFixed(2)), mid: Number(mid.toFixed(2)),
+        strike, expiration, dte, bid: Number(bid!.toFixed(2)), ask: Number(ask!.toFixed(2)), mid: Number(mid.toFixed(2)),
         spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
         volume, open_interest: oi, volume_classification: volClass(volume),
         trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
@@ -666,6 +661,7 @@ async function scanSymbol(
         strategy_profile_id: profile.id,
         strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
         strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
+        has_quotes: true,
       });
     }
   }
@@ -796,39 +792,23 @@ serve(async (req) => {
     const emptyCounts = {
       symbols_in_universe: symbolList.length, symbols_requested: symbolList.length,
       symbols_returned: 0, symbols_failed: 0, symbols_with_chains: 0,
-      chain_success: 0, chain_no_options: 0, chain_api_error: 0, chain_unauthorized: 0, chain_rate_limited: 0,
       puts_returned: 0, filtered_by_expiration: 0, filtered_by_strike: 0,
-      missing_strike: 0, missing_expiration: 0, missing_last_quote: 0,
-      missing_bid: 0, zero_bid: 0, missing_ask: 0, zero_ask: 0, ask_lt_bid: 0, other_invalid: 0,
-      valid_quotes: 0, contracts_evaluated: 0, qualified: 0, rejected: 0, pages_fetched: 0,
+      valid_quotes: 0, contracts_awaiting_quotes: 0,
+      contracts_evaluated: 0, qualified: 0, rejected: 0, pages_fetched: 0,
+      contracts_found: 0,
     };
 
     if (symbolList.length === 0) {
       return json({ success: true, candidates: [], source: 'massive', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts });
     }
 
-    // ── Run SOFI/RIOT/CIFR tests first ──
-    console.log(`Running symbol tests: ${TEST_SYMBOLS.join(', ')}`);
-    const symbolTests = await Promise.all(
-      TEST_SYMBOLS.map((sym) => testSymbol(sym, apiKey).catch((err) => ({
-        ticker: sym, http_status: 0, total_contracts: 0, put_contracts: 0,
-        contracts_with_last_quote: 0, bid_gt_zero: 0, ask_gt_zero: 0, valid_bid_ask: 0,
-        has_expiration: 0, has_strike: 0,
-        error: err instanceof Error ? err.message : String(err),
-      })))
-    );
-    for (const t of symbolTests) {
-      console.log(`[TEST] ${t.ticker} | HTTP ${t.http_status} | total=${t.total_contracts} | puts=${t.put_contracts} | with_lq=${t.contracts_with_last_quote} | bid>0=${t.bid_gt_zero} | ask>0=${t.ask_gt_zero} | valid=${t.valid_bid_ask} | ${t.error ? 'ERROR: ' + t.error : 'OK'}`);
-    }
-
     // ── Main scan ──
     const candidates: any[] = [];
     let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
-    let chainSuccess = 0, chainNoOptions = 0, chainApiError = 0, chainUnauthorized = 0, chainRateLimited = 0;
     let totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
-    let totalMissingStrike = 0, totalMissingExpiration = 0, totalMissingLastQuote = 0;
-    let totalMissingBid = 0, totalZeroBid = 0, totalMissingAsk = 0, totalZeroAsk = 0, totalAskLtBid = 0, totalOtherInvalid = 0;
-    let totalValidQuotes = 0, totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPagesFetched = 0;
+    let totalValidQuotes = 0, totalAwaitingQuotes = 0;
+    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPagesFetched = 0;
+    let totalContractsFound = 0;
     let rawSample: any = null;
     let verboseCount = 0;
 
@@ -855,29 +835,16 @@ serve(async (req) => {
         totalPutsReturned += result.putsReturned;
         totalFilteredByExp += result.filteredByExpiration;
         totalFilteredByStrike += result.filteredByStrike;
-        totalMissingStrike += result.missingStrike;
-        totalMissingExpiration += result.missingExpiration;
-        totalMissingLastQuote += result.missingLastQuote;
-        totalMissingBid += result.missingBid;
-        totalZeroBid += result.zeroBid;
-        totalMissingAsk += result.missingAsk;
-        totalZeroAsk += result.zeroAsk;
-        totalAskLtBid += result.askLtBid;
-        totalOtherInvalid += result.otherInvalid;
         totalValidQuotes += result.validQuotes;
+        totalAwaitingQuotes += result.contractsAwaitingQuotes;
         totalEvaluated += result.evaluated;
         totalQualified += result.qualified;
         totalRejected += result.rejected;
         totalPagesFetched += result.pagesFetched;
+        totalContractsFound += result.putsReturned;
 
-        switch (result.chainStatus) {
-          case 'success': chainSuccess++; symbolsWithChains++; break;
-          case 'no_options': chainNoOptions++; break;
-          case 'api_error': chainApiError++; symbolsFailed++; break;
-          case 'unauthorized': chainUnauthorized++; symbolsFailed++; break;
-          case 'rate_limited': chainRateLimited++; symbolsFailed++; break;
-          case 'network_error': symbolsFailed++; break;
-        }
+        if (result.chainStatus === 'success') symbolsWithChains++;
+        if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') symbolsFailed++;
 
         if (!rawSample && result.rawSample) rawSample = result.rawSample;
         candidates.push(...result.candidates);
@@ -895,32 +862,19 @@ serve(async (req) => {
 
     const scan_counts = {
       symbols_in_universe: symbolList.length,
-      symbols_requested: symbolList.length,
       symbols_returned: symbolsScanned,
       symbols_failed: symbolsFailed,
       symbols_with_chains: symbolsWithChains,
-      chain_success: chainSuccess,
-      chain_no_options: chainNoOptions,
-      chain_api_error: chainApiError,
-      chain_unauthorized: chainUnauthorized,
-      chain_rate_limited: chainRateLimited,
       puts_returned: totalPutsReturned,
       filtered_by_expiration: totalFilteredByExp,
       filtered_by_strike: totalFilteredByStrike,
-      missing_strike: totalMissingStrike,
-      missing_expiration: totalMissingExpiration,
-      missing_last_quote: totalMissingLastQuote,
-      missing_bid: totalMissingBid,
-      zero_bid: totalZeroBid,
-      missing_ask: totalMissingAsk,
-      zero_ask: totalZeroAsk,
-      ask_lt_bid: totalAskLtBid,
-      other_invalid: totalOtherInvalid,
       valid_quotes: totalValidQuotes,
+      contracts_awaiting_quotes: totalAwaitingQuotes,
       contracts_evaluated: totalEvaluated,
       qualified: totalQualified,
       rejected: totalRejected,
       pages_fetched: totalPagesFetched,
+      contracts_found: totalContractsFound,
     };
 
     console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));

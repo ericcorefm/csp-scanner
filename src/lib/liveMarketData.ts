@@ -10,32 +10,19 @@ export type ScanMode = 'discovery' | 'universe';
 
 export interface ScanCounts {
   symbols_in_universe: number;
-  symbols_requested: number;
   symbols_returned: number;
   symbols_failed: number;
   symbols_with_chains: number;
-  chain_success: number;
-  chain_no_options: number;
-  chain_api_error: number;
-  chain_unauthorized: number;
-  chain_rate_limited: number;
   puts_returned: number;
   filtered_by_expiration: number;
   filtered_by_strike: number;
-  missing_strike: number;
-  missing_expiration: number;
-  missing_last_quote: number;
-  missing_bid: number;
-  zero_bid: number;
-  missing_ask: number;
-  zero_ask: number;
-  ask_lt_bid: number;
-  other_invalid: number;
   valid_quotes: number;
+  contracts_awaiting_quotes: number;
   contracts_evaluated: number;
   qualified: number;
   rejected: number;
   pages_fetched: number;
+  contracts_found: number;
 }
 
 export interface LiveScanResponse {

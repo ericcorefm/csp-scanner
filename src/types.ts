@@ -152,6 +152,7 @@ export interface CandidateScan {
   strategy_profile_id?: string;
   strike_distance_from_stock: number;
   strike_distance_from_support: number;
+  has_quotes: boolean;
 }
 
 export interface OpenPosition {
