@@ -32,6 +32,16 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
+/** Structured error returned to the frontend when a Massive API call fails. */
+type MassiveError = {
+  success: false;
+  provider: 'Massive';
+  symbol: string;
+  endpoint: string;
+  status: number;
+  error: string;
+};
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -39,16 +49,50 @@ function json(body: unknown, status = 200) {
   });
 }
 
-async function massiveFetch(path: string, apiKey: string) {
+function massiveError(symbol: string, endpoint: string, status: number, error: string, httpStatus = 502): MassiveError & { _httpStatus: number } {
+  const payload: MassiveError = { success: false, provider: 'Massive', symbol, endpoint, status, error };
+  return { ...payload, _httpStatus: httpStatus };
+}
+
+/**
+ * Fetch from Massive API with full diagnostics.
+ * - Logs the symbol, endpoint URL (without API key), HTTP status, and response body on failure.
+ * - Never logs the API key.
+ * - On non-2xx, throws a structured MassiveError so the caller can return it directly.
+ */
+async function massiveFetch(path: string, apiKey: string, symbol: string): Promise<any> {
   const sep = path.includes('?') ? '&' : '?';
-  const response = await fetch(`${MASSIVE_API}${path}${sep}apiKey=${encodeURIComponent(apiKey)}`, {
-    headers: { Accept: 'application/json' },
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Massive API ${response.status}: ${text.slice(0, 500)}`);
+  const url = `${MASSIVE_API}${path}${sep}apiKey=***`;
+
+  console.log(`[Massive] ${symbol} → GET ${url}`);
+
+  let response: Response;
+  try {
+    response = await fetch(`${MASSIVE_API}${path}${sep}apiKey=${encodeURIComponent(apiKey)}`, {
+      headers: { Accept: 'application/json' },
+    });
+  } catch (networkErr) {
+    const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+    console.error(`[Massive] ${symbol} NETWORK ERROR → ${url} → ${msg}`);
+    throw massiveError(symbol, url, 0, `Network error: ${msg}`);
   }
-  return response.json();
+
+  console.log(`[Massive] ${symbol} ← ${response.status} ${response.statusText} from ${url}`);
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    const truncated = bodyText.slice(0, 500);
+    console.error(`[Massive] ${symbol} HTTP ${response.status} from ${url} — body: ${truncated}`);
+    throw massiveError(symbol, url, response.status, truncated || response.statusText);
+  }
+
+  try {
+    return await response.json();
+  } catch (parseErr) {
+    const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    console.error(`[Massive] ${symbol} JSON PARSE ERROR from ${url} — ${msg}`);
+    throw massiveError(symbol, url, response.status, `JSON parse error: ${msg}`);
+  }
 }
 
 function sma(values: number[], n: number) {
@@ -121,17 +165,32 @@ function volClass(v: number) {
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
+
+  console.log('market-scan started');
+
+  const hasApiKey = !!Deno.env.get('MASSIVE_API_KEY');
+  console.log(`MASSIVE_API_KEY exists: ${hasApiKey}`);
+
   try {
     const apiKey = Deno.env.get('MASSIVE_API_KEY');
-    if (!apiKey) return json({ error: 'MASSIVE_API_KEY is not configured. Add it as an Edge Function secret in your Supabase dashboard.' }, 503);
+    if (!apiKey) {
+      console.error('MASSIVE_API_KEY is not configured');
+      return json({
+        success: false,
+        provider: 'Massive',
+        error: 'MASSIVE_API_KEY is not configured. Add it as an Edge Function secret in your Supabase dashboard.',
+      }, 503);
+    }
 
     const body = await req.json();
     const profile = body.profile as Profile;
     const openTickers: string[] = (body.openTickers || []).map((x: string) => x.toUpperCase());
-    if (!profile) return json({ error: 'Missing strategy profile' }, 400);
+    if (!profile) return json({ success: false, error: 'Missing strategy profile' }, 400);
 
     const symbols = (Deno.env.get('CSP_SCAN_SYMBOLS') || DEFAULT_SCAN_SYMBOLS)
       .split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+
+    console.log(`CSP_SCAN_SYMBOLS: ${symbols.join(', ')}`);
 
     const today = new Date();
     const start = new Date(today); start.setDate(start.getDate() - 420);
@@ -141,37 +200,38 @@ serve(async (req) => {
 
     for (const symbol of symbols) {
       try {
-        // 1. Daily price history for trend/support calculation
-        const histJson = await massiveFetch(
-          `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${fmt(start)}/${fmt(today)}`,
-          apiKey,
-        );
+        const histPath = `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${fmt(start)}/${fmt(today)}`;
+        const histJson = await massiveFetch(histPath, apiKey, symbol);
         const bars: HistoryBar[] = (histJson?.results || []).map((b: any) => ({
           date: new Date(b.t).toISOString().slice(0, 10),
           open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
         }));
-        if (!bars.length) continue;
+        if (!bars.length) {
+          console.warn(`[Massive] ${symbol} — no history bars returned, skipping`);
+          continue;
+        }
         const stockPrice = Number(bars.at(-1)!.close);
-        if (!stockPrice) continue;
+        if (!stockPrice) {
+          console.warn(`[Massive] ${symbol} — stock price is 0, skipping`);
+          continue;
+        }
 
         const primarySupport = support(bars, stockPrice);
         const trendClass = trend(bars);
 
-        // 2. Option chain snapshot — all put contracts in one call
-        const chainJson = await massiveFetch(
-          `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`,
-          apiKey,
-        );
+        const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
+        const chainJson = await massiveFetch(chainPath, apiKey, symbol);
         const contracts = (chainJson?.results || []).filter(
           (c: any) => c?.details?.contract_type === 'put',
         );
 
-        // Group by expiration, pick the 3 longest-dated
         const expirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
         const chosenExpirations = expirations.slice(-3);
         const filteredContracts = contracts.filter((c: any) =>
           chosenExpirations.includes(c.details.expiration_date),
         );
+
+        console.log(`[Massive] ${symbol} — ${contracts.length} put contracts, ${filteredContracts.length} in chosen expirations`);
 
         for (const c of filteredContracts) {
           contractCount++;
@@ -215,15 +275,38 @@ serve(async (req) => {
           });
         }
       } catch (e) {
+        // Structured error from massiveFetch — return directly to the frontend.
+        // No silent fallback to demo data.
+        if (e && typeof e === 'object' && 'success' in e && e.success === false) {
+          const err = e as MassiveError & { _httpStatus: number };
+          console.error(`[Massive] SCAN ABORTED for ${err.symbol} — status ${err.status}: ${err.error}`);
+          return json({
+            success: false,
+            provider: 'Massive',
+            symbol: err.symbol,
+            endpoint: err.endpoint,
+            status: err.status,
+            error: err.error,
+          }, err._httpStatus || 502);
+        }
         const msg = e instanceof Error ? e.message : String(e);
-        return json({ error: `Massive API failed for ${symbol}: ${msg}` }, 502);
+        console.error(`scan failed for ${symbol}: ${msg}`);
+        return json({
+          success: false,
+          provider: 'Massive',
+          symbol,
+          status: 0,
+          error: msg,
+        }, 502);
       }
     }
 
     candidates.sort((a,b) => Number(b.qualified)-Number(a.qualified) || a.spread_pct-b.spread_pct || b.net_croi-a.net_croi);
-    return json({ candidates, source: 'massive', scanned_at: new Date().toISOString(), symbols_scanned: symbols.length, contracts_scanned: contractCount });
+    console.log(`market-scan complete — ${candidates.length} candidates from ${contractCount} contracts`);
+    return json({ success: true, candidates, source: 'massive', scanned_at: new Date().toISOString(), symbols_scanned: symbols.length, contracts_scanned: contractCount });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Market scan failed';
-    return json({ error: msg }, 500);
+    console.error(`market-scan fatal error: ${msg}`);
+    return json({ success: false, provider: 'Massive', error: msg }, 500);
   }
 });
