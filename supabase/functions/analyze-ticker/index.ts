@@ -36,6 +36,7 @@ type Profile = {
   cycle_liquidity_enabled: boolean;
   spread_enabled: boolean;
   short_interest_enabled: boolean;
+  technical_rules_enabled: boolean;
 };
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
@@ -352,8 +353,10 @@ Deno.serve(async (req) => {
         passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct });
       }
 
-      // Trend rule is always present (it's in Technical Rules, not a toggleable section)
-      passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
+      // Trend rule — gated by technical_rules_enabled
+      if (profile.technical_rules_enabled !== false) {
+        passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
+      }
 
       const qualified = passFail.every((r) => r.pass);
 

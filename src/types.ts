@@ -35,6 +35,7 @@ export interface StrategyProfile {
   cycle_liquidity_enabled: boolean;
   spread_enabled: boolean;
   short_interest_enabled: boolean;
+  technical_rules_enabled: boolean;
   created_at?: string;
   updated_at?: string;
 }

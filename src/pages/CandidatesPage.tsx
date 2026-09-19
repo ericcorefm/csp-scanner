@@ -89,6 +89,22 @@ export function CandidatesPage({
         </div>
       )}
 
+      {state.scanCounts && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-3">
+            <ScanCountItem label="Symbols Requested" value={state.scanCounts.symbols_requested} />
+            <ScanCountItem label="Symbols Scanned" value={state.scanCounts.symbols_scanned} />
+            <ScanCountItem label="Symbols Failed" value={state.scanCounts.symbols_failed} color={state.scanCounts.symbols_failed > 0 ? 'text-amber-400' : 'text-slate-200'} />
+            <ScanCountItem label="Puts Returned" value={state.scanCounts.puts_returned} />
+            <ScanCountItem label="Usable Quote" value={state.scanCounts.puts_usable_quote} />
+            <ScanCountItem label="Missing Quote" value={state.scanCounts.puts_missing_quote} color={state.scanCounts.puts_missing_quote > 0 ? 'text-amber-400' : 'text-slate-200'} />
+            <ScanCountItem label="Evaluated" value={state.scanCounts.contracts_evaluated} />
+            <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
+            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color={state.scanCounts.rejected > 0 ? 'text-red-400' : 'text-slate-200'} />
+          </div>
+        </div>
+      )}
+
       <AnalyzeTickerSection state={state} />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -246,6 +262,15 @@ export function CandidatesPage({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ScanCountItem({ label, value, color = 'text-slate-200' }: { label: string; value: number; color?: string }) {
+  return (
+    <div className="text-center">
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className={`text-sm font-semibold tabular-nums ${color}`}>{value}</div>
     </div>
   );
 }

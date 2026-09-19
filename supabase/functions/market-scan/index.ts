@@ -1,10 +1,7 @@
 // Supabase Edge Function: market-scan
 // Requires secret: MASSIVE_API_KEY (https://massive.com dashboard)
-// Optional env var (NOT a secret): CSP_SCAN_SYMBOLS — override the default scan universe.
-//
-// TEMPORARY DIAGNOSTIC MODE: scans SOFI only and always returns HTTP 200
-// with diagnostic JSON so the frontend can display the exact Massive error.
-// Full ticker list will be re-enabled once SOFI succeeds.
+// Scans all tickers in the scan_universe table (passed from the frontend)
+// and returns CSP candidates filtered by the active strategy profile.
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
@@ -15,8 +12,7 @@ const corsHeaders = {
 };
 
 const MASSIVE_API = 'https://api.massive.com';
-
-const DIAGNOSTIC_SYMBOL = 'SOFI';
+const MAX_CHAIN_PAGES = 10;
 
 type Profile = {
   id: string;
@@ -43,6 +39,7 @@ type Profile = {
   cycle_liquidity_enabled: boolean;
   spread_enabled: boolean;
   short_interest_enabled: boolean;
+  technical_rules_enabled: boolean;
 };
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
@@ -54,14 +51,6 @@ function json(body: unknown, status = 200) {
   });
 }
 
-/**
- * Fetch from Massive API with full diagnostics.
- * - Uses Authorization: Bearer header (NOT query param).
- * - Logs symbol, URL (without key), request type, timestamp before each request.
- * - Logs HTTP status and response body after each request.
- * - Never logs the API key.
- * - On failure, returns a diagnostic object (does not throw).
- */
 async function massiveFetch(
   path: string,
   apiKey: string,
@@ -70,7 +59,6 @@ async function massiveFetch(
 ): Promise<{ ok: true; data: any } | { ok: false; status: number; body: string }> {
   const url = `${MASSIVE_API}${path}`;
   const ts = new Date().toISOString();
-
   console.log(`[Massive] ${symbol} | stage=${stage} | type=GET | url=${url} | ts=${ts}`);
 
   let response: Response;
@@ -197,20 +185,48 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const profile = body.profile as Profile | undefined;
     const openTickers: string[] = (body.openTickers || []).map((x: string) => x.toUpperCase());
-
-    // TEMPORARY: scan SOFI only until the diagnostic confirms both endpoints work.
-    const symbols = [DIAGNOSTIC_SYMBOL];
-    console.log(`CSP_SCAN_SYMBOLS (diagnostic): ${symbols.join(', ')}`);
+    const scanUniverse: string[] = (body.scanUniverse || []).map((x: string) => x.toUpperCase());
 
     if (!profile) {
       return json({ success: false, error: 'Missing strategy profile' });
+    }
+
+    const symbols = scanUniverse;
+    console.log(`Scan universe (${symbols.length} symbols): ${symbols.join(', ')}`);
+
+    if (symbols.length === 0) {
+      return json({
+        success: true,
+        candidates: [],
+        source: 'massive',
+        scanned_at: new Date().toISOString(),
+        scan_counts: {
+          symbols_requested: 0,
+          symbols_scanned: 0,
+          symbols_failed: 0,
+          puts_returned: 0,
+          puts_usable_quote: 0,
+          puts_missing_quote: 0,
+          contracts_evaluated: 0,
+          qualified: 0,
+          rejected: 0,
+        },
+      });
     }
 
     const today = new Date();
     const start = new Date(today); start.setDate(start.getDate() - 420);
     const fmt = (d: Date) => d.toISOString().slice(0, 10);
     const candidates: any[] = [];
-    let contractCount = 0;
+
+    let symbolsScanned = 0;
+    let symbolsFailed = 0;
+    let totalPutsReturned = 0;
+    let totalUsableQuote = 0;
+    let totalMissingQuote = 0;
+    let totalEvaluated = 0;
+    let totalQualified = 0;
+    let totalRejected = 0;
 
     for (const symbol of symbols) {
       // ── Step 1: Stock aggregates ──
@@ -218,14 +234,9 @@ serve(async (req) => {
       const histResult = await massiveFetch(histPath, apiKey, symbol, 'stock_aggregates');
 
       if (!histResult.ok) {
-        return json({
-          success: false,
-          stage: 'stock_aggregates',
-          provider: 'Massive',
-          symbol,
-          massiveStatus: histResult.status,
-          massiveBody: histResult.body,
-        });
+        console.error(`[Massive] ${symbol} — stock_aggregates failed, skipping. HTTP ${histResult.status}`);
+        symbolsFailed++;
+        continue;
       }
 
       const bars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
@@ -233,57 +244,63 @@ serve(async (req) => {
         open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
       }));
       if (!bars.length) {
-        console.warn(`[Massive] ${symbol} — no history bars returned`);
-        return json({
-          success: false,
-          stage: 'stock_aggregates',
-          provider: 'Massive',
-          symbol,
-          massiveStatus: 200,
-          massiveBody: 'Request succeeded but returned 0 results',
-        });
+        console.warn(`[Massive] ${symbol} — no history bars, skipping`);
+        symbolsFailed++;
+        continue;
       }
       const stockPrice = Number(bars.at(-1)!.close);
       if (!stockPrice) {
-        console.warn(`[Massive] ${symbol} — stock price is 0`);
-        return json({
-          success: false,
-          stage: 'stock_aggregates',
-          provider: 'Massive',
-          symbol,
-          massiveStatus: 200,
-          massiveBody: 'Stock price returned as 0',
-        });
+        console.warn(`[Massive] ${symbol} — stock price is 0, skipping`);
+        symbolsFailed++;
+        continue;
       }
 
       const primarySupport = support(bars, stockPrice);
       const trendClass = trend(bars);
 
-      // ── Step 2: Options chain snapshot ──
-      const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
-      const chainResult = await massiveFetch(chainPath, apiKey, symbol, 'options_snapshot');
+      // ── Step 2: Options chain snapshot (with pagination) ──
+      let chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
+      const allRawContracts: any[] = [];
+      let pageCount = 0;
 
-      if (!chainResult.ok) {
-        return json({
-          success: false,
-          stage: 'options_snapshot',
-          provider: 'Massive',
-          symbol,
-          massiveStatus: chainResult.status,
-          massiveBody: chainResult.body,
-        });
+      while (chainPath && pageCount < MAX_CHAIN_PAGES) {
+        pageCount++;
+        const pageResult = await massiveFetch(chainPath, apiKey, symbol, `options_snapshot_p${pageCount}`);
+
+        if (!pageResult.ok) {
+          console.error(`[Massive] ${symbol} — options_snapshot page ${pageCount} failed (HTTP ${pageResult.status}), using ${allRawContracts.length} contracts so far`);
+          break;
+        }
+
+        const pageResults = pageResult.data?.results || [];
+        allRawContracts.push(...pageResults);
+        console.log(`[Massive] ${symbol} — page ${pageCount}: ${pageResults.length} contracts (total: ${allRawContracts.length})`);
+
+        const nextUrl = pageResult.data?.next_url;
+        if (nextUrl && typeof nextUrl === 'string' && nextUrl.length > 0) {
+          // next_url is a full URL — extract the path for our fetch wrapper
+          try {
+            const parsed = new URL(nextUrl);
+            chainPath = parsed.pathname + parsed.search;
+          } catch {
+            chainPath = '';
+          }
+        } else {
+          chainPath = '';
+        }
       }
 
-      const contracts = (chainResult.data?.results || []).filter(
+      const contracts = allRawContracts.filter(
         (c: any) => c?.details?.contract_type === 'put',
       );
+      totalPutsReturned += contracts.length;
+      console.log(`[Massive] ${symbol} — ${contracts.length} put contracts from ${pageCount} page(s)`);
 
       // ── Expiration filtering ──
       const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
       let chosenExpirations: string[];
 
       if (profile.expiration_enabled === false) {
-        // Expiration section OFF — don't filter by DTE or date
         chosenExpirations = allExpirations;
         console.log(`[Massive] ${symbol} — expiration section OFF, using all ${chosenExpirations.length} expirations`);
       } else if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
@@ -303,7 +320,6 @@ serve(async (req) => {
 
       // ── Strike filtering ──
       if (profile.order_strike_enabled === false) {
-        // Order & Strike section OFF — don't filter by strike
         console.log(`[Massive] ${symbol} — order/strike section OFF, not filtering by strike`);
       } else {
         const preferredStrikes = profile.preferred_strikes || [];
@@ -321,14 +337,22 @@ serve(async (req) => {
         }
       }
 
-      console.log(`[Massive] ${symbol} — ${contracts.length} put contracts, ${filteredContracts.length} in chosen expirations`);
+      console.log(`[Massive] ${symbol} — ${filteredContracts.length} contracts after all filtering`);
 
       for (const c of filteredContracts) {
-        contractCount++;
         const strike = Number(c.details.strike_price || 0);
         const bid = Number(c.last_quote?.bid || 0);
         const ask = Number(c.last_quote?.ask || 0);
-        if (!strike || !bid || !ask) continue;
+
+        // Track contracts with missing/zero bid or ask — don't silently skip
+        if (!strike || !bid || !ask) {
+          totalMissingQuote++;
+          continue;
+        }
+
+        totalUsableQuote++;
+        totalEvaluated++;
+
         const expiration = c.details.expiration_date as string;
         const dte = Math.max(0, Math.ceil((new Date(expiration).getTime() - today.getTime()) / 86400000));
         const mid = (bid + ask) / 2;
@@ -339,36 +363,68 @@ serve(async (req) => {
         const best = optimize(mid, strike, profile, true);
         const reasons: string[] = [];
 
+        // Exclude Existing Positions — independent of section toggles
         if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
+
         if (profile.order_strike_enabled !== false && strike > profile.max_strike) reasons.push('Strike too high');
-        if (profile.croi_pc_enabled !== false && !best) reasons.push('CROI too low');
+
+        if (profile.croi_pc_enabled !== false) {
+          if (!best) reasons.push('CROI too low');
+          const pc = best?.pc ?? (mid - 0.01) / mid * 100;
+          if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+        }
+
         if (profile.spread_enabled !== false && sp > profile.max_spread_pct) reasons.push('Spread too wide');
-        if (profile.cycle_liquidity_enabled !== false && oi < profile.min_target_oi) reasons.push('OI too low');
-        if (profile.cycle_liquidity_enabled !== false && volume < 10) reasons.push('Insufficient liquidity');
-        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
+
+        if (profile.cycle_liquidity_enabled !== false) {
+          if (oi < profile.min_target_oi) reasons.push('OI too low');
+          if (volume < 10) reasons.push('Insufficient liquidity');
+        }
+
+        // Technical rules — gated by technical_rules_enabled
+        if (profile.technical_rules_enabled !== false) {
+          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
+        }
 
         const btc = best?.btc || 0.01;
         const netProfit = best?.netProfit ?? ((mid - btc) * 100 - profile.round_trip_commission);
         const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
         const pc = best?.pc ?? (mid - btc) / mid * 100;
-        if (profile.croi_pc_enabled !== false && pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+
+        const qualified = reasons.length === 0;
+        if (qualified) totalQualified++; else totalRejected++;
 
         candidates.push({
           scan_date: fmt(today), ticker: symbol, company_name: symbol, stock_price: Number(stockPrice.toFixed(2)),
           strike, expiration, dte, bid, ask, mid: Number(mid.toFixed(2)), spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
           volume, open_interest: oi, volume_classification: volClass(volume), trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
           suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)), net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
-          premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)), qualified: reasons.length === 0, rejection_reasons: reasons,
+          premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)), qualified, rejection_reasons: reasons,
           strategy_profile_id: profile.id,
           strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
           strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
         });
       }
+
+      symbolsScanned++;
     }
 
     candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
-    console.log(`market-scan complete — ${candidates.length} candidates from ${contractCount} contracts`);
-    return json({ success: true, candidates, source: 'massive', scanned_at: new Date().toISOString(), symbols_scanned: symbols.length, contracts_scanned: contractCount });
+
+    const scan_counts = {
+      symbols_requested: symbols.length,
+      symbols_scanned: symbolsScanned,
+      symbols_failed: symbolsFailed,
+      puts_returned: totalPutsReturned,
+      puts_usable_quote: totalUsableQuote,
+      puts_missing_quote: totalMissingQuote,
+      contracts_evaluated: totalEvaluated,
+      qualified: totalQualified,
+      rejected: totalRejected,
+    };
+
+    console.log(`market-scan complete — ${candidates.length} candidates`, JSON.stringify(scan_counts));
+    return json({ success: true, candidates, source: 'massive', scanned_at: new Date().toISOString(), scan_counts });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Market scan failed';
     console.error(`market-scan fatal error: ${msg}`);

@@ -10,7 +10,7 @@ import type {
   DailyScanResult,
   Alert,
 } from '@/types';
-import type { AnalyzeTickerResponse } from '@/lib/liveMarketData';
+import type { AnalyzeTickerResponse, ScanCounts } from '@/lib/liveMarketData';
 
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
   name: 'My CSP Default',
@@ -48,6 +48,7 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   cycle_liquidity_enabled: true,
   spread_enabled: true,
   short_interest_enabled: true,
+  technical_rules_enabled: true,
 };
 
 export function useAppState() {
@@ -66,6 +67,7 @@ export function useAppState() {
   const [scanSource, setScanSource] = useState<'live' | null>(null);
   const [positionsLoaded, setPositionsLoaded] = useState(false);
   const [scanUniverse, setScanUniverse] = useState<string[]>([]);
+  const [scanCounts, setScanCounts] = useState<ScanCounts | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeTickerResponse | null>(null);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
@@ -192,9 +194,10 @@ export function useAppState() {
       let scannedAt = new Date().toISOString();
 
       try {
-        const live = await scanCandidatesLive(activeProfile, openTickers);
+        const live = await scanCandidatesLive(activeProfile, openTickers, scanUniverse);
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
+        setScanCounts(live.scan_counts || null);
       } catch (liveError) {
         const message = liveError instanceof Error
           ? `Massive API error: ${liveError.message}`
@@ -452,6 +455,7 @@ export function useAppState() {
     scanUniverse,
     addToScanUniverse,
     removeFromScanUniverse,
+    scanCounts,
     analyzing,
     analyzeResult,
     analyzeError,

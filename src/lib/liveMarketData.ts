@@ -6,13 +6,24 @@ import {
 import { supabase } from '@/lib/supabase';
 import type { CandidateScan, StrategyProfile } from '@/types';
 
+export interface ScanCounts {
+  symbols_requested: number;
+  symbols_scanned: number;
+  symbols_failed: number;
+  puts_returned: number;
+  puts_usable_quote: number;
+  puts_missing_quote: number;
+  contracts_evaluated: number;
+  qualified: number;
+  rejected: number;
+}
+
 export interface LiveScanResponse {
   success: true;
   candidates: CandidateScan[];
   source: 'massive';
   scanned_at: string;
-  symbols_scanned: number;
-  contracts_scanned: number;
+  scan_counts: ScanCounts;
 }
 
 export interface MassiveApiError {
@@ -136,11 +147,13 @@ export async function analyzeTicker(
 export async function scanCandidatesLive(
   profile: StrategyProfile,
   openTickers: string[],
+  scanUniverse: string[],
 ): Promise<LiveScanResponse> {
   const { data, error } = await supabase.functions.invoke('market-scan', {
     body: {
       profile,
       openTickers,
+      scanUniverse,
     },
   });
 

@@ -73,32 +73,27 @@ const sections: SectionDef[] = [
       { key: 'short_interest_exclusion', label: 'Short Interest Exclusion', type: 'number', unit: '%', step: '0.5' },
     ],
   },
-];
-
-const nonToggleSections: { title: string; fields: FieldDef[] }[] = [
   {
     title: 'Technical Rules',
+    enabledKey: 'technical_rules_enabled',
     fields: [
       { key: 'rsi_min', label: 'RSI Minimum', type: 'integer' },
       { key: 'rsi_max', label: 'RSI Maximum', type: 'integer' },
       { key: 'require_ma20_above_ma50', label: 'Require MA20 > MA50', type: 'boolean' },
       { key: 'require_ma50_above_ma200', label: 'Require MA50 > MA200', type: 'boolean' },
       { key: 'require_price_above_ma200', label: 'Require Price > MA200', type: 'boolean' },
+      { key: 'exclude_downtrend_no_support', label: 'Exclude Downtrend Without Support', type: 'boolean' },
     ],
   },
+];
+
+const nonToggleSections: { title: string; fields: FieldDef[] }[] = [
   {
     title: 'Commission & BTC',
     fields: [
       { key: 'round_trip_commission', label: 'Round-Trip Commission', type: 'number', unit: '$', step: '0.01' },
       { key: 'btc_increment', label: 'BTC Increment', type: 'number', unit: '$', step: '0.01' },
       { key: 'allow_penny_increments', label: 'Allow Penny Increments', type: 'boolean' },
-    ],
-  },
-  {
-    title: 'Filtering',
-    fields: [
-      { key: 'exclude_existing_positions', label: 'Exclude Existing Positions', type: 'boolean' },
-      { key: 'exclude_downtrend_no_support', label: 'Exclude Downtrend Without Support', type: 'boolean' },
     ],
   },
 ];
@@ -357,6 +352,24 @@ export function SettingsPage({ state }: { state: AppState }) {
         </div>
       </Card>
 
+      {/* Exclude Existing Positions — standalone, independent of section toggles */}
+      <Card className="p-5">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <label className="text-sm text-slate-300">Exclude Existing Positions</label>
+            <p className="text-xs text-slate-500 mt-0.5">
+              When ON, tickers you already hold open positions in are excluded from scan results. This setting is independent of the section toggles below and remains active even when all sections are OFF.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className={`text-xs font-medium ${profile.exclude_existing_positions ? 'text-sky-400' : 'text-slate-500'}`}>
+              {profile.exclude_existing_positions ? 'ON' : 'OFF'}
+            </span>
+            {renderField({ key: 'exclude_existing_positions', label: '', type: 'boolean' }, false)}
+          </div>
+        </div>
+      </Card>
+
       {/* Toggleable strategy rule sections */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {sections.map((section) => {
@@ -370,7 +383,6 @@ export function SettingsPage({ state }: { state: AppState }) {
                   : 'border-slate-800/60 bg-slate-900/30 opacity-60'
               }`}
             >
-              {/* Section header with ON/OFF toggle */}
               <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
                 <h3 className="text-sm font-semibold text-slate-200">{section.title}</h3>
                 <div className="flex items-center gap-2">
@@ -393,7 +405,6 @@ export function SettingsPage({ state }: { state: AppState }) {
                 </div>
               </div>
 
-              {/* Section fields */}
               <div className="p-5 space-y-4">
                 {section.fields.map((field) => (
                   <div key={field.key} className="flex items-center justify-between gap-4">
@@ -411,7 +422,6 @@ export function SettingsPage({ state }: { state: AppState }) {
           );
         })}
 
-        {/* Non-toggleable sections */}
         {nonToggleSections.map((section) => (
           <Card key={section.title} title={section.title}>
             <div className="p-5 space-y-4">
@@ -431,7 +441,6 @@ export function SettingsPage({ state }: { state: AppState }) {
         ))}
       </div>
 
-      {/* Order Type info banner */}
       <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
         <div className="flex items-center gap-2 text-sm">
           <span className="text-slate-500">Order Type:</span>
@@ -440,7 +449,6 @@ export function SettingsPage({ state }: { state: AppState }) {
         </div>
       </div>
 
-      {/* Volume classification reference */}
       <Card title="Volume Classifications (Reference)">
         <div className="p-5">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
