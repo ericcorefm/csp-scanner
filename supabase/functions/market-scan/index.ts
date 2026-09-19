@@ -94,39 +94,42 @@ async function massiveFetch(
   }
 }
 
-// ── Extract pricing from a Massive option contract ──
-// Massive's last_quote (bid/ask) is only available on paid plans.
-// On free/basic plans, we fall back to fmv (fair market value) or last_trade.price.
-function extractQuote(c: any): { bid: number; ask: number; mid: number; source: string } {
-  // 1. Best case: real bid/ask from last_quote
-  const lqBid = Number(c?.last_quote?.bid);
-  const lqAsk = Number(c?.last_quote?.ask);
-  const lqMid = Number(c?.last_quote?.midpoint);
+// ── Extract real bid/ask from Massive last_quote ──
+// Only real last_quote bid/ask counts as a valid executable quote.
+// fmv, last_trade, and day.close are NOT used for qualification.
+function extractQuote(c: any): { bid: number; ask: number; mid: number } {
+  const bid = Number(c?.last_quote?.bid || 0);
+  const ask = Number(c?.last_quote?.ask || 0);
+  const lqMid = Number(c?.last_quote?.midpoint || 0);
+  const mid = lqMid > 0 ? lqMid : (bid > 0 && ask > 0 ? (bid + ask) / 2 : 0);
+  return { bid, ask, mid };
+}
 
-  if (lqBid > 0 && lqAsk > 0) {
-    return { bid: lqBid, ask: lqAsk, mid: lqMid > 0 ? lqMid : (lqBid + lqAsk) / 2, source: 'last_quote' };
+// ── Load enabled scan universe directly from Supabase ──
+// Prevents stale frontend state from causing empty scans.
+async function fetchScanUniverse(): Promise<string[]> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey) {
+    console.error('SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured for scan universe lookup');
+    return [];
   }
-
-  // 2. Fall back to fmv (fair market value — available on all plans)
-  const fmv = Number(c?.fmv);
-  if (fmv > 0) {
-    // Synthetic bid/ask around fmv with a conservative 2% spread
-    return { bid: Number((fmv * 0.99).toFixed(2)), ask: Number((fmv * 1.01).toFixed(2)), mid: fmv, source: 'fmv' };
+  const url = `${supabaseUrl}/rest/v1/scan_universe?select=symbol&enabled=eq.true&order=symbol`;
+  const resp = await fetch(url, {
+    headers: {
+      'apikey': serviceKey,
+      'Authorization': `Bearer ${serviceKey}`,
+      'Content-Type': 'application/json',
+    },
+  });
+  if (!resp.ok) {
+    console.error(`[ScanUniverse] Failed to load: HTTP ${resp.status}`);
+    return [];
   }
-
-  // 3. Fall back to last_trade price
-  const ltPrice = Number(c?.last_trade?.price);
-  if (ltPrice > 0) {
-    return { bid: Number((ltPrice * 0.99).toFixed(2)), ask: Number((ltPrice * 1.01).toFixed(2)), mid: ltPrice, source: 'last_trade' };
-  }
-
-  // 4. Fall back to day.close
-  const dayClose = Number(c?.day?.close);
-  if (dayClose > 0) {
-    return { bid: Number((dayClose * 0.99).toFixed(2)), ask: Number((dayClose * 1.01).toFixed(2)), mid: dayClose, source: 'day_close' };
-  }
-
-  return { bid: 0, ask: 0, mid: 0, source: 'none' };
+  const rows = await resp.json();
+  const symbols = (rows || []).map((r: any) => String(r.symbol).toUpperCase());
+  console.log(`[ScanUniverse] Loaded ${symbols.length} enabled symbols from Supabase: ${symbols.join(', ')}`);
+  return symbols;
 }
 
 function sma(values: number[], n: number) {
@@ -242,13 +245,11 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const profile = body.profile as Profile | undefined;
     const openTickers: string[] = (body.openTickers || []).map((x: string) => x.toUpperCase());
-    const scanUniverse: string[] = (body.scanUniverse || []).map((x: string) => x.toUpperCase());
-
     if (!profile) {
       return json({ success: false, error: 'Missing strategy profile' });
     }
 
-    const symbols = scanUniverse;
+    const symbols = await fetchScanUniverse();
     console.log(`Scan universe (${symbols.length} symbols): ${symbols.join(', ')}`);
 
     const noFilterMode =
@@ -429,11 +430,12 @@ serve(async (req) => {
         if (!strike || strike <= 0) { totalMissingStrike++; continue; }
         if (!expiration) { totalMissingExpiration++; continue; }
 
-        // Extract pricing using fallback chain
-        const { bid, ask, mid, source } = extractQuote(c);
+        // Strict validation: only real last_quote bid/ask counts as a valid quote
+        const { bid, ask, mid } = extractQuote(c);
 
         if (bid <= 0) { totalMissingBid++; totalZeroBid++; continue; }
         if (ask <= 0) { totalMissingAsk++; totalZeroAsk++; continue; }
+        if (ask < bid) { totalMissingAsk++; continue; }
 
         // Passed data validation
         totalValidQuotes++;

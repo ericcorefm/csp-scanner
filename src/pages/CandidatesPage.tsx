@@ -89,6 +89,12 @@ export function CandidatesPage({
         </div>
       )}
 
+      {state.scanUniverseLoaded && state.scanUniverse.length === 0 && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+          No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers.
+        </div>
+      )}
+
       {state.noFilterMode && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-medium text-amber-300">
           NO FILTER MODE — All strategy sections and Exclude Existing Positions are OFF. Every put contract with valid bid/ask is qualified.

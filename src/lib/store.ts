@@ -69,6 +69,7 @@ export function useAppState() {
   const [positionsLoaded, setPositionsLoaded] = useState(false);
   const [scanUniverse, setScanUniverse] = useState<string[]>([]);
   const [scanUniverseEntries, setScanUniverseEntries] = useState<ScanUniverseEntry[]>([]);
+  const [scanUniverseLoaded, setScanUniverseLoaded] = useState(false);
   const [scanCounts, setScanCounts] = useState<ScanCounts | null>(null);
   const [noFilterMode, setNoFilterMode] = useState(false);
   const [rawSample, setRawSample] = useState<unknown>(null);
@@ -143,14 +144,19 @@ export function useAppState() {
   }, []);
 
   const loadScanUniverse = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('scan_universe')
-      .select('*')
-      .order('symbol');
-    if (error) throw error;
-    const entries = (data || []) as ScanUniverseEntry[];
-    setScanUniverseEntries(entries);
-    setScanUniverse(entries.filter((e) => e.enabled).map((e) => e.symbol));
+    setScanUniverseLoaded(false);
+    try {
+      const { data, error } = await supabase
+        .from('scan_universe')
+        .select('*')
+        .order('symbol');
+      if (error) throw error;
+      const entries = (data || []) as ScanUniverseEntry[];
+      setScanUniverseEntries(entries);
+      setScanUniverse(entries.filter((e) => e.enabled).map((e) => e.symbol));
+    } finally {
+      setScanUniverseLoaded(true);
+    }
   }, []);
 
   const addToScanUniverse = useCallback(async (symbol: string) => {
@@ -210,7 +216,11 @@ export function useAppState() {
   }, [activeProfile, analyzing]);
 
   const runScan = useCallback(async () => {
-    if (!activeProfile || scanning) return;
+    if (!activeProfile || scanning || !positionsLoaded || !scanUniverseLoaded) return;
+    if (scanUniverse.length === 0) {
+      setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers.');
+      return;
+    }
 
     setScanning(true);
     setScanError(null);
@@ -221,7 +231,7 @@ export function useAppState() {
       let scannedAt = new Date().toISOString();
 
       try {
-        const live = await scanCandidatesLive(activeProfile, openTickers, scanUniverse);
+        const live = await scanCandidatesLive(activeProfile, openTickers);
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
         setScanCounts(live.scan_counts || null);
@@ -292,7 +302,7 @@ export function useAppState() {
     } finally {
       setScanning(false);
     }
-  }, [activeProfile, openPositions, scanning]);
+  }, [activeProfile, openPositions, scanning, positionsLoaded, scanUniverseLoaded, scanUniverse.length]);
 
   const loadData = useCallback(async () => {
     try {
@@ -320,12 +330,13 @@ export function useAppState() {
   }, [activeProfile, loadOpenPositions, loadClosedPositions, loadDailyResults, loadAlerts, loadScanUniverse]);
 
   useEffect(() => {
-    if (activeProfile && positionsLoaded && candidates.length === 0 && !scanning) {
+    if (activeProfile && positionsLoaded && scanUniverseLoaded && candidates.length === 0 && !scanning) {
       void runScan();
     }
-    // Wait for open positions so the first scan can correctly exclude existing contracts.
+    // Wait for open positions and scan universe so the first scan can correctly
+    // exclude existing contracts and uses the correct ticker set.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProfile?.id, positionsLoaded]);
+  }, [activeProfile?.id, positionsLoaded, scanUniverseLoaded]);
 
   const saveProfile = useCallback(async (profile: StrategyProfile) => {
     const { data, error } = await supabase
@@ -491,6 +502,7 @@ export function useAppState() {
     closePosition,
     resetProfile,
     scanUniverse,
+    scanUniverseLoaded,
     scanUniverseEntries,
     addToScanUniverse,
     removeFromScanUniverse,

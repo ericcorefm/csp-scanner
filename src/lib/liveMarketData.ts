@@ -156,13 +156,11 @@ export async function analyzeTicker(
 export async function scanCandidatesLive(
   profile: StrategyProfile,
   openTickers: string[],
-  scanUniverse: string[],
 ): Promise<LiveScanResponse> {
   const { data, error } = await supabase.functions.invoke('market-scan', {
     body: {
       profile,
       openTickers,
-      scanUniverse,
     },
   });
 
