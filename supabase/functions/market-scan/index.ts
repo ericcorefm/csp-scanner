@@ -37,6 +37,12 @@ type Profile = {
   allow_penny_increments: boolean;
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
+  order_strike_enabled: boolean;
+  expiration_enabled: boolean;
+  croi_pc_enabled: boolean;
+  cycle_liquidity_enabled: boolean;
+  spread_enabled: boolean;
+  short_interest_enabled: boolean;
 };
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
@@ -276,12 +282,14 @@ serve(async (req) => {
       const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
       let chosenExpirations: string[];
 
-      if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
-        // Use only the preferred expiration dates that actually exist in the chain
+      if (profile.expiration_enabled === false) {
+        // Expiration section OFF — don't filter by DTE or date
+        chosenExpirations = allExpirations;
+        console.log(`[Massive] ${symbol} — expiration section OFF, using all ${chosenExpirations.length} expirations`);
+      } else if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
         chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
         console.log(`[Massive] ${symbol} — filtering to preferred expirations: ${chosenExpirations.join(', ')}`);
       } else {
-        // Filter by DTE range
         chosenExpirations = allExpirations.filter((e) => {
           const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
           return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
@@ -294,18 +302,23 @@ serve(async (req) => {
       );
 
       // ── Strike filtering ──
-      const preferredStrikes = profile.preferred_strikes || [];
-      if (preferredStrikes.length > 0) {
-        filteredContracts = filteredContracts.filter((c: any) =>
-          preferredStrikes.includes(Number(c.details.strike_price)),
-        );
+      if (profile.order_strike_enabled === false) {
+        // Order & Strike section OFF — don't filter by strike
+        console.log(`[Massive] ${symbol} — order/strike section OFF, not filtering by strike`);
       } else {
-        filteredContracts = filteredContracts.filter((c: any) => {
-          const s = Number(c.details.strike_price);
-          if (s > profile.max_strike) return false;
-          if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
-          return true;
-        });
+        const preferredStrikes = profile.preferred_strikes || [];
+        if (preferredStrikes.length > 0) {
+          filteredContracts = filteredContracts.filter((c: any) =>
+            preferredStrikes.includes(Number(c.details.strike_price)),
+          );
+        } else {
+          filteredContracts = filteredContracts.filter((c: any) => {
+            const s = Number(c.details.strike_price);
+            if (s > profile.max_strike) return false;
+            if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
+            return true;
+          });
+        }
       }
 
       console.log(`[Massive] ${symbol} — ${contracts.length} put contracts, ${filteredContracts.length} in chosen expirations`);
@@ -327,18 +340,18 @@ serve(async (req) => {
         const reasons: string[] = [];
 
         if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-        if (strike > profile.max_strike) reasons.push('Strike too high');
-        if (!best) reasons.push('CROI too low');
-        if (sp > profile.max_spread_pct) reasons.push('Spread too wide');
-        if (oi < profile.min_target_oi) reasons.push('OI too low');
-        if (volume < 10) reasons.push('Insufficient liquidity');
+        if (profile.order_strike_enabled !== false && strike > profile.max_strike) reasons.push('Strike too high');
+        if (profile.croi_pc_enabled !== false && !best) reasons.push('CROI too low');
+        if (profile.spread_enabled !== false && sp > profile.max_spread_pct) reasons.push('Spread too wide');
+        if (profile.cycle_liquidity_enabled !== false && oi < profile.min_target_oi) reasons.push('OI too low');
+        if (profile.cycle_liquidity_enabled !== false && volume < 10) reasons.push('Insufficient liquidity');
         if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
 
         const btc = best?.btc || 0.01;
         const netProfit = best?.netProfit ?? ((mid - btc) * 100 - profile.round_trip_commission);
         const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
         const pc = best?.pc ?? (mid - btc) / mid * 100;
-        if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+        if (profile.croi_pc_enabled !== false && pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
 
         candidates.push({
           scan_date: fmt(today), ticker: symbol, company_name: symbol, stock_price: Number(stockPrice.toFixed(2)),

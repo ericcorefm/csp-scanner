@@ -30,6 +30,12 @@ type Profile = {
   allow_penny_increments: boolean;
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
+  order_strike_enabled: boolean;
+  expiration_enabled: boolean;
+  croi_pc_enabled: boolean;
+  cycle_liquidity_enabled: boolean;
+  spread_enabled: boolean;
+  short_interest_enabled: boolean;
 };
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
@@ -262,7 +268,10 @@ Deno.serve(async (req) => {
     const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
     let chosenExpirations: string[];
 
-    if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
+    if (profile.expiration_enabled === false) {
+      chosenExpirations = allExpirations;
+      console.log(`[Massive] ${ticker} — expiration section OFF, using all ${chosenExpirations.length} expirations`);
+    } else if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
       chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
       console.log(`[Massive] ${ticker} — filtering to preferred expirations: ${chosenExpirations.join(', ')}`);
     } else {
@@ -278,18 +287,22 @@ Deno.serve(async (req) => {
     );
 
     // ── Strike filtering ──
-    const preferredStrikes = profile.preferred_strikes || [];
-    if (preferredStrikes.length > 0) {
-      filteredContracts = filteredContracts.filter((c: any) =>
-        preferredStrikes.includes(Number(c.details.strike_price)),
-      );
+    if (profile.order_strike_enabled === false) {
+      console.log(`[Massive] ${ticker} — order/strike section OFF, not filtering by strike`);
     } else {
-      filteredContracts = filteredContracts.filter((c: any) => {
-        const s = Number(c.details.strike_price);
-        if (s > profile.max_strike) return false;
-        if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
-        return true;
-      });
+      const preferredStrikes = profile.preferred_strikes || [];
+      if (preferredStrikes.length > 0) {
+        filteredContracts = filteredContracts.filter((c: any) =>
+          preferredStrikes.includes(Number(c.details.strike_price)),
+        );
+      } else {
+        filteredContracts = filteredContracts.filter((c: any) => {
+          const s = Number(c.details.strike_price);
+          if (s > profile.max_strike) return false;
+          if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
+          return true;
+        });
+      }
     }
 
     console.log(`[Massive] ${ticker} — ${contracts.length} put contracts, ${filteredContracts.length} in chosen expirations`);
@@ -317,17 +330,30 @@ Deno.serve(async (req) => {
       const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
       const pc = best?.pc ?? (mid - btc) / mid * 100;
 
-      // Build pass/fail list — same rules as market-scan
-      const passFail: { rule: string; pass: boolean }[] = [
-        { rule: `Strike <= $${profile.max_strike}`, pass: strike <= profile.max_strike },
-        { rule: `Net CROI >= ${profile.min_net_croi}%`, pass: netCroi >= profile.min_net_croi },
-        { rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pc <= profile.max_premium_capture },
-        { rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi },
-        { rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct },
-        { rule: `Strike below support ($${primarySupport.toFixed(2)})`, pass: strike < primarySupport },
-        { rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) },
-        { rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10 },
-      ];
+      // Build pass/fail list — only include rules from enabled sections
+      const passFail: { rule: string; pass: boolean }[] = [];
+
+      if (profile.order_strike_enabled !== false) {
+        passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike });
+        passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: strike < primarySupport });
+      }
+
+      if (profile.croi_pc_enabled !== false) {
+        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: netCroi >= profile.min_net_croi });
+        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pc <= profile.max_premium_capture });
+      }
+
+      if (profile.cycle_liquidity_enabled !== false) {
+        passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi });
+        passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10 });
+      }
+
+      if (profile.spread_enabled !== false) {
+        passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct });
+      }
+
+      // Trend rule is always present (it's in Technical Rules, not a toggleable section)
+      passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
 
       const qualified = passFail.every((r) => r.pass);
 

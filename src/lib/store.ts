@@ -42,6 +42,12 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   preferred_expirations: [],
   min_strike: null,
   preferred_strikes: [],
+  order_strike_enabled: true,
+  expiration_enabled: true,
+  croi_pc_enabled: true,
+  cycle_liquidity_enabled: true,
+  spread_enabled: true,
+  short_interest_enabled: true,
 };
 
 export function useAppState() {

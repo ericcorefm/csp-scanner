@@ -15,20 +15,24 @@ interface FieldDef {
   placeholder?: string;
 }
 
-const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
+interface SectionDef {
+  title: string;
+  enabledKey: keyof StrategyProfile;
+  fields: FieldDef[];
+}
+
+const sections: SectionDef[] = [
   {
     title: 'Order & Strike',
-    icon: 'order',
+    enabledKey: 'order_strike_enabled',
     fields: [
-      { key: 'order_type', label: 'Order Type', type: 'text', help: 'Limit orders recommended for options.' },
       { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5' },
       { key: 'min_strike', label: 'Minimum Put Strike', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no minimum.' },
-      { key: 'preferred_strikes', label: 'Preferred Strike Prices', type: 'number_array', help: 'Comma-separated (e.g. 10,12,13,15,20,25). If empty, scan all within min/max range.', placeholder: '10,12,13,15,20,25' },
     ],
   },
   {
     title: 'Expiration',
-    icon: 'expiration',
+    enabledKey: 'expiration_enabled',
     fields: [
       { key: 'min_dte', label: 'Minimum DTE', type: 'integer', unit: 'days', help: 'Minimum days to expiration.' },
       { key: 'max_dte', label: 'Maximum DTE', type: 'integer', unit: 'days', help: 'Maximum days to expiration.' },
@@ -37,7 +41,7 @@ const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
   },
   {
     title: 'CROI & Premium Capture',
-    icon: 'croi',
+    enabledKey: 'croi_pc_enabled',
     fields: [
       { key: 'min_net_croi', label: 'Minimum Net CROI', type: 'number', unit: '%', step: '0.1' },
       { key: 'preferred_croi_max', label: 'Preferred CROI Maximum', type: 'number', unit: '%', step: '0.1' },
@@ -46,7 +50,7 @@ const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
   },
   {
     title: 'Cycle & Liquidity',
-    icon: 'cycle',
+    enabledKey: 'cycle_liquidity_enabled',
     fields: [
       { key: 'max_recycle_days', label: 'Maximum Cycle Days', type: 'integer', unit: 'days' },
       { key: 'min_target_oi', label: 'Minimum Target OI', type: 'integer' },
@@ -55,15 +59,25 @@ const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
   },
   {
     title: 'Bid/Ask Spread',
-    icon: 'spread',
+    enabledKey: 'spread_enabled',
     fields: [
       { key: 'preferred_spread_pct', label: 'Preferred Spread', type: 'number', unit: '%', step: '0.5' },
       { key: 'max_spread_pct', label: 'Maximum Spread', type: 'number', unit: '%', step: '0.5' },
     ],
   },
   {
+    title: 'Short Interest',
+    enabledKey: 'short_interest_enabled',
+    fields: [
+      { key: 'short_interest_warning', label: 'Short Interest Warning', type: 'number', unit: '%', step: '0.5' },
+      { key: 'short_interest_exclusion', label: 'Short Interest Exclusion', type: 'number', unit: '%', step: '0.5' },
+    ],
+  },
+];
+
+const nonToggleSections: { title: string; fields: FieldDef[] }[] = [
+  {
     title: 'Technical Rules',
-    icon: 'tech',
     fields: [
       { key: 'rsi_min', label: 'RSI Minimum', type: 'integer' },
       { key: 'rsi_max', label: 'RSI Maximum', type: 'integer' },
@@ -73,16 +87,7 @@ const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
     ],
   },
   {
-    title: 'Short Interest',
-    icon: 'si',
-    fields: [
-      { key: 'short_interest_warning', label: 'Short Interest Warning', type: 'number', unit: '%', step: '0.5' },
-      { key: 'short_interest_exclusion', label: 'Short Interest Exclusion', type: 'number', unit: '%', step: '0.5' },
-    ],
-  },
-  {
     title: 'Commission & BTC',
-    icon: 'btc',
     fields: [
       { key: 'round_trip_commission', label: 'Round-Trip Commission', type: 'number', unit: '$', step: '0.01' },
       { key: 'btc_increment', label: 'BTC Increment', type: 'number', unit: '$', step: '0.01' },
@@ -91,7 +96,6 @@ const sections: { title: string; icon: string; fields: FieldDef[] }[] = [
   },
   {
     title: 'Filtering',
-    icon: 'filter',
     fields: [
       { key: 'exclude_existing_positions', label: 'Exclude Existing Positions', type: 'boolean' },
       { key: 'exclude_downtrend_no_support', label: 'Exclude Downtrend Without Support', type: 'boolean' },
@@ -144,6 +148,124 @@ export function SettingsPage({ state }: { state: AppState }) {
       setProfile(p);
       state.setActiveProfile(p);
     }
+  };
+
+  const renderField = (field: FieldDef, disabled: boolean) => {
+    if (field.type === 'date_array') {
+      const arr = profile[field.key] as string[];
+      return (
+        <div className="flex flex-col items-end gap-1">
+          <input
+            type="text"
+            value={arr.join(', ')}
+            onChange={(e) => {
+              const vals = e.target.value.split(',').map((v) => v.trim()).filter(Boolean);
+              updateField(field.key, vals);
+            }}
+            placeholder={field.placeholder || 'YYYY-MM-DD, ...'}
+            disabled={disabled}
+            className="w-48 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
+          />
+          {arr.length > 0 && (
+            <div className="flex flex-wrap gap-1 justify-end max-w-48">
+              {arr.map((d) => (
+                <span key={d} className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300">
+                  {d}
+                  <button onClick={() => updateField(field.key, arr.filter((x) => x !== d))} className="text-slate-500 hover:text-red-400" disabled={disabled}>&times;</button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (field.type === 'number_array') {
+      const arr = profile[field.key] as number[];
+      return (
+        <div className="flex flex-col items-end gap-1">
+          <input
+            type="text"
+            value={arr.join(', ')}
+            onChange={(e) => {
+              const vals = e.target.value.split(',').map((v) => parseFloat(v.trim())).filter((v) => !isNaN(v));
+              updateField(field.key, vals);
+            }}
+            placeholder={field.placeholder || 'e.g. 10,12,15,25'}
+            disabled={disabled}
+            className="w-48 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
+          />
+          {arr.length > 0 && (
+            <div className="flex flex-wrap gap-1 justify-end max-w-48">
+              {arr.map((s, i) => (
+                <span key={i} className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300">
+                  <span>{'$' + s}</span>
+                  <button onClick={() => updateField(field.key, arr.filter((_, idx) => idx !== i))} className="text-slate-500 hover:text-red-400" disabled={disabled}>&times;</button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (field.type === 'boolean') {
+      return (
+        <button
+          onClick={() => updateField(field.key, !profile[field.key])}
+          disabled={disabled}
+          className={`relative h-5 w-9 rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            profile[field.key] ? 'bg-sky-500' : 'bg-slate-700'
+          }`}
+        >
+          <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+            profile[field.key] ? 'left-4' : 'left-0.5'
+          }`} />
+        </button>
+      );
+    }
+
+    if (field.key === 'min_strike') {
+      return (
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-slate-500">$</span>
+          <input
+            type="number"
+            step={field.step}
+            min={field.min}
+            value={profile[field.key] === null ? '' : String(profile[field.key])}
+            onChange={(e) => {
+              const val = parseFloat(e.target.value);
+              updateField(field.key, isNaN(val) ? null : val);
+            }}
+            placeholder="—"
+            disabled={disabled}
+            className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
+          />
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex items-center gap-1">
+        {field.unit && field.unit !== '$' && (
+          <span className="text-xs text-slate-500">{field.unit}</span>
+        )}
+        <input
+          type="number"
+          step={field.step}
+          min={field.min}
+          value={String(profile[field.key])}
+          onChange={(e) => {
+            const val = field.type === 'integer' ? parseInt(e.target.value) : parseFloat(e.target.value);
+            updateField(field.key, isNaN(val) ? 0 : val);
+          }}
+          disabled={disabled}
+          className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums disabled:opacity-40 disabled:cursor-not-allowed"
+        />
+        {field.unit === '$' && <span className="text-xs text-slate-500">$</span>}
+      </div>
+    );
   };
 
   return (
@@ -235,124 +357,87 @@ export function SettingsPage({ state }: { state: AppState }) {
         </div>
       </Card>
 
-      {/* Strategy rule sections */}
+      {/* Toggleable strategy rule sections */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {sections.map((section) => (
+        {sections.map((section) => {
+          const enabled = profile[section.enabledKey] as boolean;
+          return (
+            <div
+              key={section.title}
+              className={`rounded-xl border transition-opacity ${
+                enabled
+                  ? 'border-slate-800 bg-slate-900/50'
+                  : 'border-slate-800/60 bg-slate-900/30 opacity-60'
+              }`}
+            >
+              {/* Section header with ON/OFF toggle */}
+              <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+                <h3 className="text-sm font-semibold text-slate-200">{section.title}</h3>
+                <div className="flex items-center gap-2">
+                  {!enabled && (
+                    <span className="text-xs text-slate-500">Requirements disabled</span>
+                  )}
+                  <span className={`text-xs font-medium ${enabled ? 'text-sky-400' : 'text-slate-500'}`}>
+                    {enabled ? 'ON' : 'OFF'}
+                  </span>
+                  <button
+                    onClick={() => updateField(section.enabledKey, !enabled)}
+                    className={`relative h-5 w-9 rounded-full transition-colors ${
+                      enabled ? 'bg-sky-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                      enabled ? 'left-4' : 'left-0.5'
+                    }`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Section fields */}
+              <div className="p-5 space-y-4">
+                {section.fields.map((field) => (
+                  <div key={field.key} className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <label className={`text-sm ${enabled ? 'text-slate-300' : 'text-slate-500'}`}>{field.label}</label>
+                      {field.help && <p className="text-xs text-slate-500 mt-0.5">{field.help}</p>}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {renderField(field, !enabled)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Non-toggleable sections */}
+        {nonToggleSections.map((section) => (
           <Card key={section.title} title={section.title}>
             <div className="p-5 space-y-4">
               {section.fields.map((field) => (
                 <div key={field.key} className="flex items-center justify-between gap-4">
-                  <div className="min-w-0">
+                  <div>
                     <label className="text-sm text-slate-300">{field.label}</label>
                     {field.help && <p className="text-xs text-slate-500 mt-0.5">{field.help}</p>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {field.key === 'order_type' ? (
-                      <select
-                        value={String(profile[field.key]) || 'LIMIT'}
-                        onChange={(e) => updateField(field.key, e.target.value)}
-                        className="w-28 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100"
-                      >
-                        <option value="LIMIT">LIMIT</option>
-                      </select>
-                    ) : field.type === 'date_array' ? (
-                      <div className="flex flex-col items-end gap-1">
-                        <input
-                          type="text"
-                          value={(profile[field.key] as string[]).join(', ')}
-                          onChange={(e) => {
-                            const vals = e.target.value.split(',').map((v) => v.trim()).filter(Boolean);
-                            updateField(field.key, vals);
-                          }}
-                          placeholder={field.placeholder || 'YYYY-MM-DD, ...'}
-                          className="w-48 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600"
-                        />
-                        {(profile[field.key] as string[]).length > 0 && (
-                          <div className="flex flex-wrap gap-1 justify-end max-w-48">
-                            {(profile[field.key] as string[]).map((d) => (
-                              <span key={d} className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300">
-                                {d}
-                                <button onClick={() => updateField(field.key, (profile[field.key] as string[]).filter((x) => x !== d))} className="text-slate-500 hover:text-red-400">&times;</button>
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : field.type === 'number_array' ? (
-                      <div className="flex flex-col items-end gap-1">
-                        <input
-                          type="text"
-                          value={(profile[field.key] as number[]).join(', ')}
-                          onChange={(e) => {
-                            const vals = e.target.value.split(',').map((v) => parseFloat(v.trim())).filter((v) => !isNaN(v));
-                            updateField(field.key, vals);
-                          }}
-                          placeholder={field.placeholder || 'e.g. 10,12,15,25'}
-                          className="w-48 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600"
-                        />
-                        {(profile[field.key] as number[]).length > 0 && (
-                          <div className="flex flex-wrap gap-1 justify-end max-w-48">
-                            {(profile[field.key] as number[]).map((s, i) => (
-                              <span key={i} className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300">
-                                ${s}
-                                <button onClick={() => updateField(field.key, (profile[field.key] as number[]).filter((_, idx) => idx !== i))} className="text-slate-500 hover:text-red-400">&times;</button>
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : field.type === 'boolean' ? (
-                      <button
-                        onClick={() => updateField(field.key, !profile[field.key])}
-                        className={`relative h-5 w-9 rounded-full transition-colors ${
-                          profile[field.key] ? 'bg-sky-500' : 'bg-slate-700'
-                        }`}
-                      >
-                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
-                          profile[field.key] ? 'left-4' : 'left-0.5'
-                        }`} />
-                      </button>
-                    ) : field.key === 'min_strike' ? (
-                      <div className="flex items-center gap-1">
-                        <span className="text-xs text-slate-500">$</span>
-                        <input
-                          type="number"
-                          step={field.step}
-                          min={field.min}
-                          value={profile[field.key] === null ? '' : String(profile[field.key])}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value);
-                            updateField(field.key, isNaN(val) ? null : val);
-                          }}
-                          placeholder="—"
-                          className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums placeholder:text-slate-600"
-                        />
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1">
-                        {field.unit && field.unit !== '$' && (
-                          <span className="text-xs text-slate-500">{field.unit}</span>
-                        )}
-                        <input
-                          type={field.type === 'integer' ? 'number' : 'number'}
-                          step={field.step}
-                          min={field.min}
-                          value={String(profile[field.key])}
-                          onChange={(e) => {
-                            const val = field.type === 'integer' ? parseInt(e.target.value) : parseFloat(e.target.value);
-                            updateField(field.key, isNaN(val) ? 0 : val);
-                          }}
-                          className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums"
-                        />
-                        {field.unit === '$' && <span className="text-xs text-slate-500">$</span>}
-                      </div>
-                    )}
+                    {renderField(field, false)}
                   </div>
                 </div>
               ))}
             </div>
           </Card>
         ))}
+      </div>
+
+      {/* Order Type info banner */}
+      <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-slate-500">Order Type:</span>
+          <span className="font-medium text-slate-200">LIMIT</span>
+          <span className="text-xs text-slate-500">— Limit orders are a fixed system rule. Market orders are not supported.</span>
+        </div>
       </div>
 
       {/* Volume classification reference */}

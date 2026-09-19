@@ -29,6 +29,12 @@ export interface StrategyProfile {
   preferred_expirations: string[];
   min_strike: number | null;
   preferred_strikes: number[];
+  order_strike_enabled: boolean;
+  expiration_enabled: boolean;
+  croi_pc_enabled: boolean;
+  cycle_liquidity_enabled: boolean;
+  spread_enabled: boolean;
+  short_interest_enabled: boolean;
   created_at?: string;
   updated_at?: string;
 }
