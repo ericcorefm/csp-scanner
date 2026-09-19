@@ -32,6 +32,7 @@ export interface LiveScanResponse {
   scanned_at: string;
   no_filter_mode: boolean;
   scan_counts: ScanCounts;
+  raw_sample?: unknown;
 }
 
 export interface MassiveApiError {

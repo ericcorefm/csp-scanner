@@ -112,6 +112,16 @@ export function CandidatesPage({
             <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color={state.scanCounts.rejected > 0 ? 'text-red-400' : 'text-slate-200'} />
             <ScanCountItem label="Pages Fetched" value={state.scanCounts.pages_fetched} />
           </div>
+          {state.rawSample && (
+            <details className="mt-3 border-t border-slate-800 pt-3">
+              <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-300">
+                Raw Massive sample contract (for debugging)
+              </summary>
+              <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-950 p-3 text-[11px] text-slate-400 max-h-64 overflow-y-auto">
+                {JSON.stringify(state.rawSample, null, 2)}
+              </pre>
+            </details>
+          )}
         </div>
       )}
 

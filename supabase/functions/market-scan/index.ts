@@ -57,16 +57,17 @@ async function massiveFetch(
   symbol: string,
   stage: string,
 ): Promise<{ ok: true; data: any } | { ok: false; status: number; body: string }> {
-  // Massive API uses ?apiKey= query parameter — append it if not already present
-  const separator = path.includes('?') ? '&' : '?';
-  const url = `${MASSIVE_API}${path}${separator}apiKey=${encodeURIComponent(apiKey)}`;
+  const url = `${MASSIVE_API}${path}`;
   const ts = new Date().toISOString();
-  console.log(`[Massive] ${symbol} | stage=${stage} | GET ${url.replace(apiKey, '***')} | ts=${ts}`);
+  console.log(`[Massive] ${symbol} | stage=${stage} | GET ${url} | ts=${ts}`);
 
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: { Accept: 'application/json' },
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
     });
   } catch (networkErr) {
     const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
@@ -298,7 +299,7 @@ serve(async (req) => {
     let totalQualified = 0;
     let totalRejected = 0;
     let totalPagesFetched = 0;
-    let rawContractLogged = false;
+    let rawSample: any = null;
 
     for (const symbol of symbols) {
       // ── Step 1: Stock aggregates ──
@@ -349,10 +350,10 @@ serve(async (req) => {
         allRawContracts.push(...pageResults);
         console.log(`[Massive] ${symbol} — page ${pageCount}: ${pageResults.length} contracts (total: ${allRawContracts.length})`);
 
-        // Log ONE raw contract for debugging (first contract of first symbol)
-        if (!rawContractLogged && pageResults.length > 0) {
+        // Capture ONE raw contract for debugging (first contract of first symbol)
+        if (!rawSample && pageResults.length > 0) {
+          rawSample = pageResults[0];
           logRawContract(symbol, pageResults[0]);
-          rawContractLogged = true;
         }
 
         const nextUrl = pageResult.data?.next_url;
@@ -522,7 +523,7 @@ serve(async (req) => {
     };
 
     console.log(`market-scan complete — ${candidates.length} candidates, no_filter_mode=${noFilterMode}`, JSON.stringify(scan_counts));
-    return json({ success: true, candidates, source: 'massive', scanned_at: new Date().toISOString(), no_filter_mode: noFilterMode, scan_counts });
+    return json({ success: true, candidates, source: 'massive', scanned_at: new Date().toISOString(), no_filter_mode: noFilterMode, scan_counts, raw_sample: rawSample });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Market scan failed';
     console.error(`market-scan fatal error: ${msg}`);
