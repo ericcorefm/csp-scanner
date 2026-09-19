@@ -10,7 +10,7 @@ import type {
   DailyScanResult,
   Alert,
 } from '@/types';
-import type { AnalyzeTickerResponse, ScanCounts } from '@/lib/liveMarketData';
+import type { AnalyzeTickerResponse, ScanCounts, ScanMode } from '@/lib/liveMarketData';
 import type { ScanUniverseEntry } from '@/types';
 
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
@@ -73,6 +73,7 @@ export function useAppState() {
   const [scanCounts, setScanCounts] = useState<ScanCounts | null>(null);
   const [noFilterMode, setNoFilterMode] = useState(false);
   const [rawSample, setRawSample] = useState<unknown>(null);
+  const [scanMode, setScanMode] = useState<ScanMode>('discovery');
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeTickerResponse | null>(null);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
@@ -216,9 +217,9 @@ export function useAppState() {
   }, [activeProfile, analyzing]);
 
   const runScan = useCallback(async () => {
-    if (!activeProfile || scanning || !positionsLoaded || !scanUniverseLoaded) return;
-    if (scanUniverse.length === 0) {
-      setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers.');
+    if (!activeProfile || scanning || !positionsLoaded) return;
+    if (scanMode === 'universe' && scanUniverse.length === 0) {
+      setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers, or switch to Market Discovery.');
       return;
     }
 
@@ -231,7 +232,7 @@ export function useAppState() {
       let scannedAt = new Date().toISOString();
 
       try {
-        const live = await scanCandidatesLive(activeProfile, openTickers);
+        const live = await scanCandidatesLive(activeProfile, openTickers, scanMode);
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
         setScanCounts(live.scan_counts || null);
@@ -302,7 +303,7 @@ export function useAppState() {
     } finally {
       setScanning(false);
     }
-  }, [activeProfile, openPositions, scanning, positionsLoaded, scanUniverseLoaded, scanUniverse.length]);
+  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse.length]);
 
   const loadData = useCallback(async () => {
     try {
@@ -330,13 +331,13 @@ export function useAppState() {
   }, [activeProfile, loadOpenPositions, loadClosedPositions, loadDailyResults, loadAlerts, loadScanUniverse]);
 
   useEffect(() => {
-    if (activeProfile && positionsLoaded && scanUniverseLoaded && candidates.length === 0 && !scanning) {
+    if (activeProfile && positionsLoaded && candidates.length === 0 && !scanning) {
       void runScan();
     }
-    // Wait for open positions and scan universe so the first scan can correctly
-    // exclude existing contracts and uses the correct ticker set.
+    // Wait for open positions so the first scan can correctly exclude existing contracts.
+    // Market Discovery mode does not require scan_universe to be loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProfile?.id, positionsLoaded, scanUniverseLoaded]);
+  }, [activeProfile?.id, positionsLoaded]);
 
   const saveProfile = useCallback(async (profile: StrategyProfile) => {
     const { data, error } = await supabase
@@ -510,6 +511,8 @@ export function useAppState() {
     clearScanUniverse,
     restoreDefaultUniverse,
     reloadScanUniverse: loadScanUniverse,
+    scanMode,
+    setScanMode,
     scanCounts,
     noFilterMode,
     rawSample,

@@ -6,11 +6,14 @@ import {
 import { supabase } from '@/lib/supabase';
 import type { CandidateScan, StrategyProfile } from '@/types';
 
+export type ScanMode = 'discovery' | 'universe';
+
 export interface ScanCounts {
   symbols_in_universe: number;
   symbols_requested: number;
   symbols_returned: number;
   symbols_failed: number;
+  symbols_with_chains: number;
   puts_returned: number;
   missing_bid: number;
   missing_ask: number;
@@ -30,6 +33,7 @@ export interface LiveScanResponse {
   candidates: CandidateScan[];
   source: 'massive';
   scanned_at: string;
+  scan_mode: ScanMode;
   no_filter_mode: boolean;
   scan_counts: ScanCounts;
   raw_sample?: unknown;
@@ -156,11 +160,13 @@ export async function analyzeTicker(
 export async function scanCandidatesLive(
   profile: StrategyProfile,
   openTickers: string[],
+  scanMode: ScanMode,
 ): Promise<LiveScanResponse> {
   const { data, error } = await supabase.functions.invoke('market-scan', {
     body: {
       profile,
       openTickers,
+      scanMode,
     },
   });
 

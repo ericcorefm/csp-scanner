@@ -1,6 +1,7 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
+import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { AnalyzeTickerSection } from '@/components/AnalyzeTickerSection';
@@ -37,6 +38,9 @@ export function CandidatesPage({
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+
+  const scanMode: ScanMode = state.scanMode;
+  const isDiscovery = scanMode === 'discovery';
 
   const filtered = useMemo(() => {
     let list = state.candidates.filter((c) => (showRejected ? true : c.qualified));
@@ -89,9 +93,9 @@ export function CandidatesPage({
         </div>
       )}
 
-      {state.scanUniverseLoaded && state.scanUniverse.length === 0 && (
+      {scanMode === 'universe' && state.scanUniverseLoaded && state.scanUniverse.length === 0 && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
-          No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers.
+          No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers, or switch to Market Discovery.
         </div>
       )}
 
@@ -103,10 +107,11 @@ export function CandidatesPage({
 
       {state.scanCounts && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-13 gap-3">
-            <ScanCountItem label="In Universe" value={state.scanCounts.symbols_in_universe} />
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-14 gap-3">
+            <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="Requested" value={state.scanCounts.symbols_requested} />
             <ScanCountItem label="Returned" value={state.scanCounts.symbols_returned} color={state.scanCounts.symbols_failed > 0 ? 'text-amber-400' : 'text-slate-200'} />
+            {isDiscovery && <ScanCountItem label="With Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />}
             <ScanCountItem label="Failed" value={state.scanCounts.symbols_failed} color={state.scanCounts.symbols_failed > 0 ? 'text-red-400' : 'text-slate-200'} />
             <ScanCountItem label="Puts Returned" value={state.scanCounts.puts_returned} />
             <ScanCountItem label="Missing Bid" value={state.scanCounts.missing_bid} color={state.scanCounts.missing_bid > 0 ? 'text-red-400' : 'text-slate-200'} />
@@ -133,10 +138,44 @@ export function CandidatesPage({
 
       <AnalyzeTickerSection state={state} />
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* Scan Mode Selector */}
+      <div className="flex flex-wrap items-center gap-4">
         <div>
           <h1 className="text-xl font-semibold text-slate-100">Today's CSP Candidates</h1>
           <p className="text-sm text-slate-500 mt-0.5">
+            {isDiscovery
+              ? 'Searching the broader optionable market using your active CSP rules.'
+              : 'Scanning only your saved tickers.'}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 ml-auto">
+          <span className="text-xs text-slate-500 mr-1">Scan Mode</span>
+          <div className="inline-flex rounded-lg border border-slate-700 bg-slate-800/50 p-0.5">
+            <button
+              onClick={() => state.setScanMode('discovery')}
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                isDiscovery ? 'bg-sky-500 text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Telescope className="h-4 w-4" />
+              Market Discovery
+            </button>
+            <button
+              onClick={() => state.setScanMode('universe')}
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                !isDiscovery ? 'bg-sky-500 text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Globe className="h-4 w-4" />
+              My Scan Universe
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm text-slate-500">
             {filtered.filter((c) => c.qualified).length} qualified
             {showRejected && ` · ${filtered.filter((c) => !c.qualified).length} rejected`}
           </p>
