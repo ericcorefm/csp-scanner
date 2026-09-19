@@ -113,10 +113,6 @@ export function CandidatesPage({
               isText
             />
           </div>
-          <div className="mt-3 flex items-center gap-2 border-t border-slate-800 pt-3">
-            <span className="text-xs text-slate-500">Market Data:</span>
-            <span className="text-xs font-medium text-emerald-400">MASSIVE DELAYED</span>
-          </div>
         </div>
       )}
 

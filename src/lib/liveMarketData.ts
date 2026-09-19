@@ -38,20 +38,6 @@ export interface ScanCounts {
   pages_fetched: number;
 }
 
-export interface SymbolTest {
-  ticker: string;
-  http_status: number;
-  total_contracts: number;
-  put_contracts: number;
-  contracts_with_last_quote: number;
-  bid_gt_zero: number;
-  ask_gt_zero: number;
-  valid_bid_ask: number;
-  has_expiration: number;
-  has_strike: number;
-  error?: string;
-}
-
 export interface LiveScanResponse {
   success: true;
   candidates: CandidateScan[];
@@ -61,7 +47,6 @@ export interface LiveScanResponse {
   no_filter_mode: boolean;
   scan_counts: ScanCounts;
   raw_sample?: unknown;
-  symbol_tests?: SymbolTest[];
 }
 
 export interface MassiveApiError {

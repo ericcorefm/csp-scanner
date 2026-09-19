@@ -212,6 +212,45 @@ function isSectionOff(profile: Profile, key: keyof Profile): boolean {
   return profile[key] === false;
 }
 
+// ── Robust date parsing for expiration_date from Massive ──
+// Handles ISO strings ("2026-09-19"), compact ("20260919"), timestamps, and more.
+function parseExpirationDate(raw: unknown): Date | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'number') {
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const s = String(raw).trim();
+  if (!s) return null;
+  // ISO: 2026-09-19 or 2026-09-19T17:00:00-04:00
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  // Compact: 20260919
+  if (/^\d{8}$/.test(s)) {
+    const d = new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  // Slash: 09/19/2026
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+    const parts = s.split('/');
+    const d = new Date(`${parts[2]}-${parts[0]}-${parts[1]}`);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// DTE using date-only comparison (strips time to avoid timezone off-by-one)
+function calcDTE(expRaw: unknown, today: Date): number {
+  const exp = parseExpirationDate(expRaw);
+  if (!exp) return -1;
+  const expDay = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate());
+  const todayDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.round((expDay.getTime() - todayDay.getTime()) / 86400000);
+}
+
 // ── Quote extraction: precisely categorize what's missing ──
 function extractQuote(c: any): {
   hasLastQuote: boolean;
@@ -468,21 +507,33 @@ async function scanSymbol(
 
   // ── Pre-filtering: expiration ──
   let filteredContracts = contracts;
-  if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-    const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
-    let chosenExpirations: string[];
-    if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
-      chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
+  if (noFilterMode || isSectionOff(profile, 'expiration_enabled')) {
+    if (verbose) console.log(`[VERBOSE] ${symbol} | expiration filter: SKIPPED (section off or noFilter)`);
+  } else {
+    const preferred = profile.preferred_expirations || [];
+    const before = filteredContracts.length;
+
+    if (preferred.length > 0) {
+      filteredContracts = filteredContracts.filter((c: any) => {
+        const expRaw = c?.details?.expiration_date;
+        const expStr = expRaw != null ? String(expRaw).slice(0, 10) : '';
+        return preferred.some((p: string) => p.slice(0, 10) === expStr);
+      });
     } else {
-      chosenExpirations = allExpirations.filter((e) => {
-        const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
-        return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
+      const minDte = profile.min_dte ?? 0;
+      const maxDte = profile.max_dte ?? 9999;
+      filteredContracts = filteredContracts.filter((c: any) => {
+        const dte = calcDTE(c?.details?.expiration_date, today);
+        return dte >= minDte && dte <= maxDte;
       });
     }
-    const before = filteredContracts.length;
-    filteredContracts = filteredContracts.filter((c: any) => chosenExpirations.includes(c.details.expiration_date));
+
     r.filteredByExpiration = before - filteredContracts.length;
-    if (verbose) console.log(`[VERBOSE] ${symbol} | expiration filter: ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
+    if (verbose) {
+      const sampleExp = contracts[0]?.details?.expiration_date;
+      console.log(`[VERBOSE] ${symbol} | raw expiration_date sample: ${JSON.stringify(sampleExp)} | type: ${typeof sampleExp}`);
+      console.log(`[VERBOSE] ${symbol} | expiration filter (DTE ${profile.min_dte}-${profile.max_dte}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
+    }
   }
 
   // ── Pre-filtering: strike ──
@@ -500,11 +551,12 @@ async function scanSymbol(
       });
     }
     r.filteredByStrike = before - filteredContracts.length;
-    if (verbose) console.log(`[VERBOSE] ${symbol} | strike filter: ${before} -> ${filteredContracts.length} (removed ${r.filteredByStrike})`);
+    if (verbose) console.log(`[VERBOSE] ${symbol} | strike filter (max ${profile.max_strike}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByStrike})`);
   }
 
   if (verbose) {
     console.log(`[VERBOSE] ${symbol} | contracts to evaluate: ${filteredContracts.length}`);
+    console.log(`[VERBOSE] ${symbol} | pipeline: puts=${contracts.length} | filtExp=${r.filteredByExpiration} | filtStrike=${r.filteredByStrike} | remaining=${filteredContracts.length}`);
   }
 
   // ── Contract evaluation with granular skip tracking ──
@@ -533,7 +585,7 @@ async function scanSymbol(
     r.validQuotes++;
     r.evaluated++;
 
-    const dte = Math.max(0, Math.ceil((new Date(expiration).getTime() - today.getTime()) / 86400000));
+    const dte = Math.max(0, calcDTE(expiration, today));
     const sp = spreadPct(bid, ask);
     const volume = Number(c?.day?.volume || c?.volume || 0);
     const oi = Number(c?.open_interest || 0);
@@ -752,7 +804,7 @@ serve(async (req) => {
     };
 
     if (symbolList.length === 0) {
-      return json({ success: true, candidates: [], source: 'massive', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts, symbol_tests: [] });
+      return json({ success: true, candidates: [], source: 'massive', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts });
     }
 
     // ── Run SOFI/RIOT/CIFR tests first ──
@@ -878,7 +930,6 @@ serve(async (req) => {
       scanned_at: new Date().toISOString(),
       scan_mode: scanMode, no_filter_mode: noFilterMode,
       scan_counts, raw_sample: rawSample,
-      symbol_tests: symbolTests,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Market scan failed';
