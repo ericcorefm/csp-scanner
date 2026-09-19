@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Save, RotateCcw, Copy, Plus, Trash2, Check } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Save, RotateCcw, Copy, Plus, Trash2, Check, AlertCircle } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { StrategyProfile } from '@/types';
 import { Card } from '@/components/ui';
@@ -101,26 +101,48 @@ const nonToggleSections: { title: string; fields: FieldDef[] }[] = [
 export function SettingsPage({ state }: { state: AppState }) {
   const [profile, setProfile] = useState<StrategyProfile | null>(state.activeProfile);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
+
+  // Sync local profile state when the store's activeProfile changes
+  // (e.g. after save, after profile switch, after reset)
+  useEffect(() => {
+    setProfile(state.activeProfile);
+  }, [state.activeProfile]);
 
   if (!profile) return <div className="text-slate-400">Loading...</div>;
 
   const updateField = (key: keyof StrategyProfile, value: string | number | boolean | string[] | number[]) => {
     setProfile({ ...profile, [key]: value });
     setSaved(false);
+    setSaveError(null);
   };
 
   const handleSave = async () => {
-    await state.saveProfile(profile);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    setSaveError(null);
+    try {
+      const saved = await state.saveProfile(profile);
+      // Sync local state from the database-returned row
+      setProfile(saved);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save profile';
+      setSaveError(msg);
+    }
   };
 
-  const handleReset = () => {
-    state.resetProfile();
-    if (state.activeProfile) {
-      setProfile({ ...state.activeProfile });
+  const handleReset = async () => {
+    setSaveError(null);
+    try {
+      const saved = await state.resetProfile();
+      if (saved) setProfile(saved);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to reset profile';
+      setSaveError(msg);
     }
   };
 
@@ -296,6 +318,12 @@ export function SettingsPage({ state }: { state: AppState }) {
             />
           </div>
           <div className="flex items-center gap-2 pt-6">
+            {saveError && (
+              <span className="flex items-center gap-1.5 text-xs text-red-400 mr-2">
+                <AlertCircle className="h-3.5 w-3.5" />
+                {saveError}
+              </span>
+            )}
             <button
               onClick={handleSave}
               className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 transition-colors"

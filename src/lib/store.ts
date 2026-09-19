@@ -421,10 +421,19 @@ export function useAppState() {
     return data as ClosedPosition;
   }, [deleteOpenPosition]);
 
-  const resetProfile = useCallback(() => {
-    if (activeProfile) {
-      setActiveProfile({ ...activeProfile, ...DEFAULT_PROFILE, id: activeProfile.id, name: activeProfile.name });
-    }
+  const resetProfile = useCallback(async (): Promise<StrategyProfile | null> => {
+    if (!activeProfile) return null;
+    const resetData = { ...activeProfile, ...DEFAULT_PROFILE, id: activeProfile.id, name: activeProfile.name, updated_at: new Date().toISOString() };
+    const { data, error } = await supabase
+      .from('strategy_profiles')
+      .upsert(resetData)
+      .select()
+      .single();
+    if (error) throw error;
+    const updated = data as StrategyProfile;
+    setActiveProfile(updated);
+    setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    return updated;
   }, [activeProfile]);
 
   return {
