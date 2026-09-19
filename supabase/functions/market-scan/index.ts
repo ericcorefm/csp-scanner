@@ -1,8 +1,9 @@
 // Supabase Edge Function: market-scan
-// Requires secret: MASSIVE_API_KEY (https://massive.com dashboard)
-// Supports two scan modes:
-//   "discovery" — scans a broad universe of U.S. optionable stocks from market_universe table
-//   "universe"  — scans only the user's enabled scan_universe tickers
+// Requires secret: MASSIVE_API_KEY
+// Modes:
+//   "discovery" — scan broad universe from market_universe table
+//   "universe"  — scan user's enabled scan_universe tickers
+//   "analyze"   — deep-analyze a single ticker (replaces analyze-ticker)
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
@@ -16,6 +17,7 @@ const MASSIVE_API = 'https://api.massive.com';
 const MAX_CHAIN_PAGES = 10;
 const MAX_DISCOVERY_SYMBOLS = 250;
 const MAX_CANDIDATES = 50;
+const TEST_SYMBOLS = ['SOFI', 'RIOT', 'CIFR'];
 
 type Profile = {
   id: string;
@@ -47,7 +49,6 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
-// Chain status categories
 type ChainStatus = 'success' | 'no_options' | 'api_error' | 'unauthorized' | 'rate_limited' | 'network_error';
 
 function json(body: unknown, status = 200) {
@@ -70,10 +71,7 @@ async function massiveFetch(
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` },
     });
   } catch (networkErr) {
     const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
@@ -100,57 +98,31 @@ async function massiveFetch(
   }
 }
 
-function extractQuote(c: any): { bid: number; ask: number; mid: number } {
-  const bid = Number(c?.last_quote?.bid || 0);
-  const ask = Number(c?.last_quote?.ask || 0);
-  const lqMid = Number(c?.last_quote?.midpoint || 0);
-  const mid = lqMid > 0 ? lqMid : (bid > 0 && ask > 0 ? (bid + ask) / 2 : 0);
-  return { bid, ask, mid };
-}
-
 // ── Supabase REST helper ──
 async function supabaseSelect(table: string, columns: string, filter?: string): Promise<any[]> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!supabaseUrl || !serviceKey) {
-    console.error(`[Supabase] Missing URL or service key for ${table}`);
-    return [];
-  }
+  if (!supabaseUrl || !serviceKey) { console.error(`[Supabase] Missing URL or service key for ${table}`); return []; }
   let url = `${supabaseUrl}/rest/v1/${table}?select=${columns}`;
   if (filter) url += `&${filter}`;
-  const resp = await fetch(url, {
-    headers: {
-      'apikey': serviceKey,
-      'Authorization': `Bearer ${serviceKey}`,
-      'Content-Type': 'application/json',
-    },
-  });
-  if (!resp.ok) {
-    console.error(`[Supabase] ${table} select failed: HTTP ${resp.status}`);
-    return [];
-  }
+  const resp = await fetch(url, { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' } });
+  if (!resp.ok) { console.error(`[Supabase] ${table} select failed: HTTP ${resp.status}`); return []; }
   return await resp.json();
 }
 
 async function fetchScanUniverse(): Promise<{ ticker: string; company_name: string | null }[]> {
   const rows = await supabaseSelect('scan_universe', 'symbol,company_name', 'enabled=eq.true&order=symbol');
-  return (rows || []).map((r: any) => ({
-    ticker: String(r.symbol).toUpperCase(),
-    company_name: r.company_name || null,
-  }));
+  return (rows || []).map((r: any) => ({ ticker: String(r.symbol).toUpperCase(), company_name: r.company_name || null }));
 }
 
 async function fetchMarketUniverse(limit: number): Promise<{ ticker: string; company_name: string | null }[]> {
   const rows = await supabaseSelect('market_universe', 'ticker,company_name', 'active=eq.true&optionable=eq.true&order=ticker');
-  const mapped = (rows || []).map((r: any) => ({
-    ticker: String(r.ticker).toUpperCase(),
-    company_name: r.company_name || null,
-  }));
-  // Shuffle for variety across scans, then cap at limit
+  const mapped = (rows || []).map((r: any) => ({ ticker: String(r.ticker).toUpperCase(), company_name: r.company_name || null }));
   const shuffled = mapped.sort(() => Math.random() - 0.5);
   return shuffled.slice(0, limit);
 }
 
+// ── Technical indicators ──
 function sma(values: number[], n: number) {
   if (!values.length) return 0;
   const slice = values.slice(-Math.min(n, values.length));
@@ -169,17 +141,33 @@ function rsi(values: number[], period = 14) {
   return 100 - 100 / (1 + rs);
 }
 
-function support(bars: HistoryBar[], price: number) {
-  const recent = bars.slice(-90);
-  if (!recent.length) return price * 0.9;
+function findSwingLows(bars: HistoryBar[]): number[] {
   const lows: number[] = [];
-  for (let i = 2; i < recent.length - 2; i++) {
-    if (recent[i].low <= recent[i-1].low && recent[i].low <= recent[i-2].low && recent[i].low <= recent[i+1].low && recent[i].low <= recent[i+2].low) {
-      lows.push(recent[i].low);
+  for (let i = 2; i < bars.length - 2; i++) {
+    if (bars[i].low <= bars[i-1].low && bars[i].low <= bars[i-2].low && bars[i].low <= bars[i+1].low && bars[i].low <= bars[i+2].low) {
+      lows.push(bars[i].low);
     }
   }
-  const below = lows.filter((x) => x < price).sort((a,b) => b-a);
-  return below[0] || Math.min(...recent.slice(-20).map((b) => b.low));
+  return lows.sort((a, b) => b - a);
+}
+
+function calcPrimarySupport(bars: HistoryBar[], price: number): number {
+  const lows = findSwingLows(bars.slice(-90));
+  const below = lows.filter((x) => x < price);
+  return below[0] || Math.min(...bars.slice(-20).map((b) => b.low));
+}
+
+function calcSecondarySupport(bars: HistoryBar[], primarySupport: number): number {
+  const lows = findSwingLows(bars.slice(-90));
+  const below = lows.filter((x) => x < primarySupport);
+  return below[0] || primarySupport * 0.95;
+}
+
+function findResistance(bars: HistoryBar[]): number {
+  const recent = bars.slice(-50);
+  let max = 0;
+  for (const b of recent) { if (b.high > max) max = b.high; }
+  return max;
 }
 
 function trend(bars: HistoryBar[]) {
@@ -216,14 +204,41 @@ function spreadPct(bid: number, ask: number) {
 }
 
 function volClass(v: number) {
-  if (v >= 250) return 'Excellent'; if (v >= 100) return 'Very Good'; if (v >= 50) return 'Good'; if (v >= 25) return 'Meaningful'; if (v >= 10) return 'Thin'; return 'Very Thin';
+  if (v >= 250) return 'Excellent'; if (v >= 100) return 'Very Good'; if (v >= 50) return 'Good';
+  if (v >= 25) return 'Meaningful'; if (v >= 10) return 'Thin'; return 'Very Thin';
 }
 
 function isSectionOff(profile: Profile, key: keyof Profile): boolean {
   return profile[key] === false;
 }
 
-function logRawContract(symbol: string, c: any) {
+// ── Quote extraction: precisely categorize what's missing ──
+function extractQuote(c: any): {
+  hasLastQuote: boolean;
+  bid: number | null;  // null = field missing, 0 = illiquid
+  ask: number | null;  // null = field missing, 0 = illiquid
+  mid: number;
+} {
+  const lq = c?.last_quote;
+  const hasLastQuote = lq != null && typeof lq === 'object';
+  const rawBid = hasLastQuote ? lq.bid : undefined;
+  const rawAsk = hasLastQuote ? lq.ask : undefined;
+  const bid = (rawBid === undefined || rawBid === null) ? null : Number(rawBid);
+  const ask = (rawAsk === undefined || rawAsk === null) ? null : Number(rawAsk);
+
+  // Calculate midpoint: prefer Massive's midpoint, fall back to (bid+ask)/2
+  let mid = 0;
+  const lqMid = hasLastQuote ? Number(lq.midpoint) : 0;
+  if (lqMid > 0) {
+    mid = lqMid;
+  } else if (bid !== null && ask !== null && bid > 0 && ask > 0) {
+    mid = (bid + ask) / 2;
+  }
+  return { hasLastQuote, bid, ask, mid };
+}
+
+// ── Log a sanitized raw contract (no API keys) ──
+function logRawContract(label: string, symbol: string, c: any) {
   const safe: any = {};
   for (const k of Object.keys(c || {})) {
     if (k === 'last_quote' && c[k]) {
@@ -231,17 +246,102 @@ function logRawContract(symbol: string, c: any) {
     } else if (k === 'details' && c[k]) {
       safe.details = { contract_type: c[k].contract_type, strike_price: c[k].strike_price, expiration_date: c[k].expiration_date };
     } else if (k === 'greeks' && c[k]) {
-      safe.greeks = { delta: c[k].delta };
+      safe.greeks = { delta: c[k].delta, gamma: c[k].gamma, theta: c[k].theta, vega: c[k].vega };
     } else if (k === 'day' && c[k]) {
       safe.day = { volume: c[k].volume, close: c[k].close };
     } else if (typeof c[k] !== 'object') {
       safe[k] = c[k];
     }
   }
-  console.log(`[Massive] RAW CONTRACT ${symbol}: ${JSON.stringify(safe)}`);
+  console.log(`[RAW ${label}] ${symbol}: ${JSON.stringify(safe)}`);
 }
 
-// ── Process a single symbol: fetch stock data + option chain, return candidates ──
+// ── Symbol test: fetch chain for a single ticker and return diagnostic counts ──
+async function testSymbol(symbol: string, apiKey: string): Promise<{
+  ticker: string;
+  http_status: number;
+  total_contracts: number;
+  put_contracts: number;
+  contracts_with_last_quote: number;
+  bid_gt_zero: number;
+  ask_gt_zero: number;
+  valid_bid_ask: number;
+  has_expiration: number;
+  has_strike: number;
+  error?: string;
+}> {
+  const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
+  const result = await massiveFetch(chainPath, apiKey, symbol, 'test_options');
+
+  if (!result.ok) {
+    return {
+      ticker: symbol, http_status: result.status,
+      total_contracts: 0, put_contracts: 0, contracts_with_last_quote: 0,
+      bid_gt_zero: 0, ask_gt_zero: 0, valid_bid_ask: 0,
+      has_expiration: 0, has_strike: 0,
+      error: result.body.slice(0, 200),
+    };
+  }
+
+  const contracts = (result.data?.results || []).filter((c: any) => c?.details?.contract_type === 'put');
+  let withLQ = 0, bidGt0 = 0, askGt0 = 0, validBA = 0, hasExp = 0, hasStrike = 0;
+
+  for (const c of contracts) {
+    if (c?.last_quote && typeof c.last_quote === 'object') {
+      withLQ++;
+      const b = Number(c.last_quote.bid || 0);
+      const a = Number(c.last_quote.ask || 0);
+      if (b > 0) bidGt0++;
+      if (a > 0) askGt0++;
+      if (b > 0 && a > 0 && a >= b) validBA++;
+    }
+    if (c?.details?.expiration_date) hasExp++;
+    if (c?.details?.strike_price && Number(c.details.strike_price) > 0) hasStrike++;
+  }
+
+  return {
+    ticker: symbol, http_status: 200,
+    total_contracts: result.data?.results?.length || 0,
+    put_contracts: contracts.length,
+    contracts_with_last_quote: withLQ,
+    bid_gt_zero: bidGt0, ask_gt_zero: askGt0, valid_bid_ask: validBA,
+    has_expiration: hasExp, has_strike: hasStrike,
+  };
+}
+
+// ── Per-symbol scan result ──
+type ScanSymbolResult = {
+  candidates: any[];
+  chainStatus: ChainStatus;
+  putsReturned: number;
+  filteredByExpiration: number;
+  filteredByStrike: number;
+  // Granular skip counters (must sum to filteredContracts.length)
+  missingStrike: number;
+  missingExpiration: number;
+  missingLastQuote: number;
+  missingBid: number;   // last_quote exists but bid field absent
+  zeroBid: number;      // bid = 0 (illiquid)
+  missingAsk: number;   // last_quote exists but ask field absent
+  zeroAsk: number;      // ask = 0
+  askLtBid: number;
+  otherInvalid: number;
+  // Valid contracts
+  validQuotes: number;
+  evaluated: number;
+  qualified: number;
+  rejected: number;
+  pagesFetched: number;
+  rawSample?: any;
+  // For analyze mode
+  analyses?: any[];
+  stockPrice?: number;
+  primarySupport?: number;
+  secondarySupport?: number;
+  resistance?: number;
+  trendClass?: string;
+};
+
 async function scanSymbol(
   symbol: string,
   companyName: string,
@@ -252,29 +352,15 @@ async function scanSymbol(
   today: Date,
   fmt: (d: Date) => string,
   verbose: boolean,
-): Promise<{
-  candidates: any[];
-  chainStatus: ChainStatus;
-  putsReturned: number;
-  missingBid: number;
-  missingAsk: number;
-  zeroBid: number;
-  zeroAsk: number;
-  missingStrike: number;
-  missingExpiration: number;
-  validQuotes: number;
-  evaluated: number;
-  qualified: number;
-  rejected: number;
-  pagesFetched: number;
-  rawSample?: any;
-}> {
-  const counts = {
-    candidates: [] as any[],
-    chainStatus: 'no_options' as ChainStatus,
-    putsReturned: 0, missingBid: 0, missingAsk: 0, zeroBid: 0, zeroAsk: 0,
-    missingStrike: 0, missingExpiration: 0, validQuotes: 0, evaluated: 0,
-    qualified: 0, rejected: 0, pagesFetched: 0, rawSample: undefined as any,
+  analyzeMode: boolean,
+): Promise<ScanSymbolResult> {
+  const r: ScanSymbolResult = {
+    candidates: [],
+    chainStatus: 'no_options',
+    putsReturned: 0, filteredByExpiration: 0, filteredByStrike: 0,
+    missingStrike: 0, missingExpiration: 0, missingLastQuote: 0,
+    missingBid: 0, zeroBid: 0, missingAsk: 0, zeroAsk: 0, askLtBid: 0, otherInvalid: 0,
+    validQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pagesFetched: 0,
   };
 
   const start = new Date(today); start.setDate(start.getDate() - 420);
@@ -282,37 +368,47 @@ async function scanSymbol(
   // Step 1: Stock aggregates
   const histPath = `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${fmt(start)}/${fmt(today)}`;
   const histResult = await massiveFetch(histPath, apiKey, symbol, 'stock_aggregates');
-  if (!histResult.ok) return counts;
+  if (!histResult.ok) return r;
 
   const bars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
     date: new Date(b.t).toISOString().slice(0, 10),
     open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
   }));
-  if (!bars.length) return counts;
+  if (!bars.length) return r;
   const stockPrice = Number(bars.at(-1)!.close);
-  if (!stockPrice) return counts;
+  if (!stockPrice) return r;
 
-  const primarySupport = support(bars, stockPrice);
+  const primarySupport = calcPrimarySupport(bars, stockPrice);
+  const secondarySupport = calcSecondarySupport(bars, primarySupport);
+  const resistance = findResistance(bars);
   const trendClass = trend(bars);
 
-  // Step 2: Options chain — match the analyze-ticker endpoint exactly
-  // No limit param: analyze-ticker uses ?contract_type=put only
+  r.stockPrice = stockPrice;
+  r.primarySupport = primarySupport;
+  r.secondarySupport = secondarySupport;
+  r.resistance = resistance;
+  r.trendClass = trendClass;
+
+  // Step 2: Options chain — no limit param, matching analyze-ticker
   const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?contract_type=put`;
   const allRawContracts: any[] = [];
   let pageCount = 0;
   let currentPath = chainPath;
   let chainError: { status: number; body: string } | null = null;
 
+  // Collect representative raw contracts for logging
+  let sampleWithQuote: any = null;
+  let sampleWithoutQuote: any = null;
+  let sampleOtherInvalid: any = null;
+
   while (currentPath && pageCount < MAX_CHAIN_PAGES) {
     pageCount++;
-    counts.pagesFetched++;
+    r.pagesFetched++;
     const pageResult = await massiveFetch(currentPath, apiKey, symbol, `options_snapshot_p${pageCount}`);
 
     if (!pageResult.ok) {
       chainError = { status: pageResult.status, body: pageResult.body };
-      if (verbose) {
-        console.log(`[VERBOSE] ${symbol} | options_snapshot FAILED | HTTP ${pageResult.status} | body: ${pageResult.body.slice(0, 200)}`);
-      }
+      if (verbose) console.log(`[VERBOSE] ${symbol} | options_snapshot FAILED | HTTP ${pageResult.status} | body: ${pageResult.body.slice(0, 200)}`);
       break;
     }
 
@@ -324,100 +420,118 @@ async function scanSymbol(
       console.log(`[VERBOSE] ${symbol} | response keys: ${Object.keys(pageResult.data || {}).join(', ')}`);
     }
 
-    if (!counts.rawSample && pageResults.length > 0) {
-      counts.rawSample = pageResults[0];
-      logRawContract(symbol, pageResults[0]);
+    // Collect representative samples
+    for (const c of pageResults) {
+      if (c?.details?.contract_type !== 'put') continue;
+      if (!sampleWithQuote && c?.last_quote && Number(c.last_quote.bid || 0) > 0) {
+        sampleWithQuote = c;
+        logRawContract('WITH_QUOTE', symbol, c);
+      }
+      if (!sampleWithoutQuote && (!c?.last_quote || typeof c.last_quote !== 'object')) {
+        sampleWithoutQuote = c;
+        logRawContract('WITHOUT_QUOTE', symbol, c);
+      }
+      if (!sampleOtherInvalid && c?.last_quote && Number(c.last_quote.bid || 0) === 0 && Number(c.last_quote.ask || 0) > 0) {
+        sampleOtherInvalid = c;
+        logRawContract('ZERO_BID', symbol, c);
+      }
     }
 
-    // Follow pagination via next_url
     const nextUrl = pageResult.data?.next_url;
     if (nextUrl && typeof nextUrl === 'string' && nextUrl.length > 0) {
-      try {
-        const parsed = new URL(nextUrl);
-        currentPath = parsed.pathname + parsed.search;
-      } catch { currentPath = ''; }
+      try { const parsed = new URL(nextUrl); currentPath = parsed.pathname + parsed.search; }
+      catch { currentPath = ''; }
     } else { currentPath = ''; }
   }
 
   // Determine chain status
   const contracts = allRawContracts.filter((c: any) => c?.details?.contract_type === 'put');
-  counts.putsReturned = contracts.length;
+  r.putsReturned = contracts.length;
 
   if (chainError) {
-    if (chainError.status === 401 || chainError.status === 403) {
-      counts.chainStatus = 'unauthorized';
-    } else if (chainError.status === 429) {
-      counts.chainStatus = 'rate_limited';
-    } else if (chainError.status === 0) {
-      counts.chainStatus = 'network_error';
-    } else {
-      counts.chainStatus = 'api_error';
-    }
-    if (verbose) {
-      console.log(`[VERBOSE] ${symbol} | chain_status=${counts.chainStatus} | HTTP ${chainError.status} | puts=${contracts.length}`);
-    }
-    return counts;
+    if (chainError.status === 401 || chainError.status === 403) r.chainStatus = 'unauthorized';
+    else if (chainError.status === 429) r.chainStatus = 'rate_limited';
+    else if (chainError.status === 0) r.chainStatus = 'network_error';
+    else r.chainStatus = 'api_error';
+    if (verbose) console.log(`[VERBOSE] ${symbol} | chain_status=${r.chainStatus} | HTTP ${chainError.status} | puts=${contracts.length}`);
+    return r;
   }
 
-  if (contracts.length > 0) {
-    counts.chainStatus = 'success';
-  } else {
-    counts.chainStatus = 'no_options';
+  r.chainStatus = contracts.length > 0 ? 'success' : 'no_options';
+
+  if (verbose) {
+    console.log(`[VERBOSE] ${symbol} | chain_status=${r.chainStatus} | total_contracts=${allRawContracts.length} | puts=${contracts.length} | pages=${pageCount}`);
+  }
+
+  // Store raw sample for response
+  if (sampleWithQuote) r.rawSample = sampleWithQuote;
+
+  // ── Pre-filtering: expiration ──
+  let filteredContracts = contracts;
+  if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
+    const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
+    let chosenExpirations: string[];
+    if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
+      chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
+    } else {
+      chosenExpirations = allExpirations.filter((e) => {
+        const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
+        return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
+      });
+    }
+    const before = filteredContracts.length;
+    filteredContracts = filteredContracts.filter((c: any) => chosenExpirations.includes(c.details.expiration_date));
+    r.filteredByExpiration = before - filteredContracts.length;
+    if (verbose) console.log(`[VERBOSE] ${symbol} | expiration filter: ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
+  }
+
+  // ── Pre-filtering: strike ──
+  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    const preferredStrikes = profile.preferred_strikes || [];
+    const before = filteredContracts.length;
+    if (preferredStrikes.length > 0) {
+      filteredContracts = filteredContracts.filter((c: any) => preferredStrikes.includes(Number(c.details.strike_price)));
+    } else {
+      filteredContracts = filteredContracts.filter((c: any) => {
+        const s = Number(c.details.strike_price);
+        if (s > profile.max_strike) return false;
+        if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
+        return true;
+      });
+    }
+    r.filteredByStrike = before - filteredContracts.length;
+    if (verbose) console.log(`[VERBOSE] ${symbol} | strike filter: ${before} -> ${filteredContracts.length} (removed ${r.filteredByStrike})`);
   }
 
   if (verbose) {
-    console.log(`[VERBOSE] ${symbol} | chain_status=${counts.chainStatus} | total_contracts=${allRawContracts.length} | puts=${contracts.length} | pages=${pageCount}`);
+    console.log(`[VERBOSE] ${symbol} | contracts to evaluate: ${filteredContracts.length}`);
   }
 
-  // Pre-filtering
-  let filteredContracts = contracts;
-  if (!noFilterMode) {
-    if (!isSectionOff(profile, 'expiration_enabled')) {
-      const allExpirations = [...new Set(contracts.map((c: any) => c.details.expiration_date))].sort();
-      let chosenExpirations: string[];
-      if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
-        chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
-      } else {
-        chosenExpirations = allExpirations.filter((e) => {
-          const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
-          return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
-        });
-      }
-      filteredContracts = contracts.filter((c: any) => chosenExpirations.includes(c.details.expiration_date));
-    }
+  // ── Contract evaluation with granular skip tracking ──
+  const analyses: any[] = [];
 
-    if (!isSectionOff(profile, 'order_strike_enabled')) {
-      const preferredStrikes = profile.preferred_strikes || [];
-      if (preferredStrikes.length > 0) {
-        filteredContracts = filteredContracts.filter((c: any) =>
-          preferredStrikes.includes(Number(c.details.strike_price)),
-        );
-      } else {
-        filteredContracts = filteredContracts.filter((c: any) => {
-          const s = Number(c.details.strike_price);
-          if (s > profile.max_strike) return false;
-          if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
-          return true;
-        });
-      }
-    }
-  }
-
-  // Contract evaluation
   for (const c of filteredContracts) {
     const strike = Number(c?.details?.strike_price || 0);
     const expiration = c?.details?.expiration_date as string;
 
-    if (!strike || strike <= 0) { counts.missingStrike++; continue; }
-    if (!expiration) { counts.missingExpiration++; continue; }
+    // Skip counting: strike
+    if (!strike || strike <= 0 || !isFinite(strike)) { r.missingStrike++; continue; }
+    // Skip counting: expiration
+    if (!expiration) { r.missingExpiration++; continue; }
 
-    const { bid, ask, mid } = extractQuote(c);
-    if (bid <= 0) { counts.missingBid++; counts.zeroBid++; continue; }
-    if (ask <= 0) { counts.missingAsk++; counts.zeroAsk++; continue; }
-    if (ask < bid) { counts.missingAsk++; continue; }
+    // Quote extraction with precise categorization
+    const { hasLastQuote, bid, ask, mid } = extractQuote(c);
 
-    counts.validQuotes++;
-    counts.evaluated++;
+    if (!hasLastQuote) { r.missingLastQuote++; continue; }
+    if (bid === null) { r.missingBid++; continue; }
+    if (bid === 0) { r.zeroBid++; continue; }  // illiquid but not missing
+    if (ask === null) { r.missingAsk++; continue; }
+    if (ask === 0) { r.zeroAsk++; continue; }
+    if (ask < bid) { r.askLtBid++; continue; }
+
+    // At this point: bid > 0, ask > 0, ask >= bid — valid executable quote
+    r.validQuotes++;
+    r.evaluated++;
 
     const dte = Math.max(0, Math.ceil((new Date(expiration).getTime() - today.getTime()) / 86400000));
     const sp = spreadPct(bid, ask);
@@ -432,44 +546,94 @@ async function scanSymbol(
     const netCroi = best?.netCroi ?? netProfit / (strike * 100) * 100;
     const pc = best?.pc ?? (mid - btc) / mid * 100;
 
-    const reasons: string[] = [];
-    if (!noFilterMode) {
-      if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-      if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
-      if (!isSectionOff(profile, 'croi_pc_enabled')) {
-        if (!best) reasons.push('CROI too low');
-        if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+    if (analyzeMode) {
+      // Build pass/fail list for analyze mode
+      const passFail: { rule: string; pass: boolean }[] = [];
+      if (!isSectionOff(profile, 'order_strike_enabled')) {
+        passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike });
+        passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: strike < primarySupport });
       }
-      if (!isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) reasons.push('Spread too wide');
+      if (!isSectionOff(profile, 'croi_pc_enabled')) {
+        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: netCroi >= profile.min_net_croi });
+        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pc <= profile.max_premium_capture });
+      }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
-        if (oi < profile.min_target_oi) reasons.push('OI too low');
-        if (volume < 10) reasons.push('Insufficient liquidity');
+        passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi });
+        passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10 });
+      }
+      if (!isSectionOff(profile, 'spread_enabled')) {
+        passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct });
       }
       if (!isSectionOff(profile, 'technical_rules_enabled')) {
-        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
+        passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
       }
+      const qualified = passFail.every((pf) => pf.pass);
+      if (qualified) r.qualified++; else r.rejected++;
+
+      analyses.push({
+        strike, expiration, dte, bid: Number(bid.toFixed(2)), ask: Number(ask.toFixed(2)), mid: Number(mid.toFixed(2)),
+        spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+        volume, open_interest: oi, volume_classification: volClass(volume),
+        suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)),
+        net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
+        premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)),
+        qualified, pass_fail: passFail,
+      });
+    } else {
+      // Scan mode: flat candidate with rejection_reasons
+      const reasons: string[] = [];
+      if (!noFilterMode) {
+        if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
+        if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
+        if (!isSectionOff(profile, 'croi_pc_enabled')) {
+          if (!best) reasons.push('CROI too low');
+          if (pc > profile.max_premium_capture && !reasons.includes('PC too high')) reasons.push('PC too high');
+        }
+        if (!isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) reasons.push('Spread too wide');
+        if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
+          if (oi < profile.min_target_oi) reasons.push('OI too low');
+          if (volume < 10) reasons.push('Insufficient liquidity');
+        }
+        if (!isSectionOff(profile, 'technical_rules_enabled')) {
+          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
+        }
+      }
+      const qualified = reasons.length === 0;
+      if (qualified) r.qualified++; else r.rejected++;
+
+      r.candidates.push({
+        scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol, stock_price: Number(stockPrice.toFixed(2)),
+        strike, expiration, dte, bid: Number(bid.toFixed(2)), ask: Number(ask.toFixed(2)), mid: Number(mid.toFixed(2)),
+        spread_pct: Number(sp.toFixed(1)), iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+        volume, open_interest: oi, volume_classification: volClass(volume),
+        trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
+        suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)),
+        net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
+        premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)),
+        qualified, rejection_reasons: reasons,
+        strategy_profile_id: profile.id,
+        strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
+        strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
+      });
     }
-
-    const qualified = reasons.length === 0;
-    if (qualified) counts.qualified++; else counts.rejected++;
-
-    counts.candidates.push({
-      scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol, stock_price: Number(stockPrice.toFixed(2)),
-      strike, expiration, dte, bid, ask, mid: Number(mid.toFixed(2)), spread_pct: Number(sp.toFixed(1)),
-      iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
-      volume, open_interest: oi, volume_classification: volClass(volume),
-      trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
-      suggested_sto: Number(mid.toFixed(2)), suggested_btc: Number(btc.toFixed(2)),
-      net_profit: Number(netProfit.toFixed(2)), net_croi: Number(netCroi.toFixed(2)),
-      premium_capture: Number(pc.toFixed(1)), breakeven: Number((strike - mid).toFixed(2)),
-      qualified, rejection_reasons: reasons,
-      strategy_profile_id: profile.id,
-      strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
-      strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
-    });
   }
 
-  return counts;
+  // In analyze mode, sort qualifying contracts and pick best
+  if (analyzeMode && analyses.length > 0) {
+    const qualifying = analyses.filter((a) => a.qualified);
+    qualifying.sort((a, b) => {
+      const aBelow = a.strike < primarySupport ? 0 : 1;
+      const bBelow = b.strike < primarySupport ? 0 : 1;
+      if (aBelow !== bBelow) return aBelow - bBelow;
+      if (a.spread_pct !== b.spread_pct) return a.spread_pct - b.spread_pct;
+      if (a.open_interest !== b.open_interest) return b.open_interest - a.open_interest;
+      if (a.volume !== b.volume) return b.volume - a.volume;
+      return Math.abs(a.delta) - Math.abs(b.delta);
+    });
+    r.analyses = analyses;
+  }
+
+  return r;
 }
 
 serve(async (req) => {
@@ -480,31 +644,18 @@ serve(async (req) => {
 
   try {
     const apiKey = Deno.env.get('MASSIVE_API_KEY');
-    if (!apiKey) {
-      return json({
-        success: false, provider: 'Massive',
-        error: 'MASSIVE_API_KEY is not configured.',
-      });
-    }
+    if (!apiKey) return json({ success: false, provider: 'Massive', error: 'MASSIVE_API_KEY is not configured.' });
 
     const body = await req.json().catch(() => ({}));
     const profile = body.profile as Profile | undefined;
     const openTickers: string[] = (body.openTickers || []).map((x: string) => x.toUpperCase());
+    const mode: string = body.mode || 'discovery';
     const scanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
 
-    if (!profile) {
-      return json({ success: false, error: 'Missing strategy profile' });
-    }
+    if (!profile) return json({ success: false, error: 'Missing strategy profile' });
 
-    // Load symbols based on scan mode
-    let symbolList: { ticker: string; company_name: string | null }[];
-    if (scanMode === 'universe') {
-      symbolList = await fetchScanUniverse();
-      console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols from scan_universe`);
-    } else {
-      symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
-      console.log(`[ScanMode=discovery] Loaded ${symbolList.length} optionable symbols from market_universe (cap ${MAX_DISCOVERY_SYMBOLS})`);
-    }
+    const today = new Date();
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
 
     const noFilterMode =
       isSectionOff(profile, 'order_strike_enabled') &&
@@ -516,40 +667,119 @@ serve(async (req) => {
       isSectionOff(profile, 'technical_rules_enabled') &&
       profile.exclude_existing_positions === false;
 
-    console.log(`NO FILTER MODE: ${noFilterMode}`);
-    console.log(`Profile toggles: order_strike=${profile.order_strike_enabled}, expiration=${profile.expiration_enabled}, croi_pc=${profile.croi_pc_enabled}, cycle_liq=${profile.cycle_liquidity_enabled}, spread=${profile.spread_enabled}, short_int=${profile.short_interest_enabled}, technical=${profile.technical_rules_enabled}, exclude_existing=${profile.exclude_existing_positions}`);
+    console.log(`mode=${mode}, scanMode=${scanMode}, noFilterMode=${noFilterMode}`);
+
+    // ── ANALYZE MODE: deep-analyze a single ticker ──
+    if (mode === 'analyze') {
+      const ticker = String(body.ticker || '').toUpperCase().trim();
+      if (!ticker) return json({ success: false, error: 'Missing ticker for analyze mode' });
+
+      console.log(`[Analyze] Analyzing ${ticker}`);
+      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true);
+
+      if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') {
+        return json({
+          success: false, stage: 'options_snapshot', provider: 'Massive', symbol: ticker,
+          massiveStatus: result.chainStatus === 'api_error' ? 500 : result.chainStatus === 'unauthorized' ? 401 : result.chainStatus === 'rate_limited' ? 429 : 0,
+          massiveBody: `Chain status: ${result.chainStatus}`,
+        });
+      }
+
+      if (!result.stockPrice) {
+        return json({ success: false, error: `No price history returned for ${ticker}` });
+      }
+
+      const analyses = result.analyses || [];
+      const qualifying = analyses.filter((a) => a.qualified);
+      const bestContract = qualifying[0] || null;
+
+      console.log(`[Analyze] ${ticker} complete — ${analyses.length} analyzed, ${qualifying.length} qualified, puts=${result.putsReturned}, validQuotes=${result.validQuotes}`);
+
+      return json({
+        success: true,
+        ticker,
+        stock_price: Number(result.stockPrice.toFixed(2)),
+        trend: result.trendClass || 'Unknown',
+        primary_support: Number((result.primarySupport || 0).toFixed(2)),
+        secondary_support: Number((result.secondarySupport || 0).toFixed(2)),
+        resistance: Number((result.resistance || 0).toFixed(2)),
+        qualifies: qualifying.length > 0,
+        best_contract: bestContract,
+        other_qualifying_contracts: qualifying.slice(1),
+        all_qualifying_contracts: qualifying,
+        all_contracts_count: analyses.length,
+        qualifying_count: qualifying.length,
+        // Diagnostic counts
+        scan_counts: {
+          puts_returned: result.putsReturned,
+          filtered_by_expiration: result.filteredByExpiration,
+          filtered_by_strike: result.filteredByStrike,
+          missing_strike: result.missingStrike,
+          missing_expiration: result.missingExpiration,
+          missing_last_quote: result.missingLastQuote,
+          missing_bid: result.missingBid,
+          zero_bid: result.zeroBid,
+          missing_ask: result.missingAsk,
+          zero_ask: result.zeroAsk,
+          ask_lt_bid: result.askLtBid,
+          other_invalid: result.otherInvalid,
+          valid_quotes: result.validQuotes,
+          contracts_evaluated: result.evaluated,
+          qualified: result.qualified,
+          rejected: result.rejected,
+        },
+      });
+    }
+
+    // ── DISCOVERY / UNIVERSE MODE ──
+    let symbolList: { ticker: string; company_name: string | null }[];
+    if (scanMode === 'universe') {
+      symbolList = await fetchScanUniverse();
+      console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols`);
+    } else {
+      symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
+      console.log(`[ScanMode=discovery] Loaded ${symbolList.length} optionable symbols (cap ${MAX_DISCOVERY_SYMBOLS})`);
+    }
 
     const emptyCounts = {
       symbols_in_universe: symbolList.length, symbols_requested: symbolList.length,
       symbols_returned: 0, symbols_failed: 0, symbols_with_chains: 0,
       chain_success: 0, chain_no_options: 0, chain_api_error: 0, chain_unauthorized: 0, chain_rate_limited: 0,
-      puts_returned: 0, missing_bid: 0, missing_ask: 0, zero_bid: 0, zero_ask: 0,
-      missing_strike: 0, missing_expiration: 0,
+      puts_returned: 0, filtered_by_expiration: 0, filtered_by_strike: 0,
+      missing_strike: 0, missing_expiration: 0, missing_last_quote: 0,
+      missing_bid: 0, zero_bid: 0, missing_ask: 0, zero_ask: 0, ask_lt_bid: 0, other_invalid: 0,
       valid_quotes: 0, contracts_evaluated: 0, qualified: 0, rejected: 0, pages_fetched: 0,
     };
 
     if (symbolList.length === 0) {
-      return json({
-        success: true, candidates: [], source: 'massive',
-        scanned_at: new Date().toISOString(),
-        scan_mode: scanMode, no_filter_mode: noFilterMode,
-        scan_counts: emptyCounts,
-      });
+      return json({ success: true, candidates: [], source: 'massive', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts, symbol_tests: [] });
     }
 
-    const today = new Date();
-    const fmt = (d: Date) => d.toISOString().slice(0, 10);
-    const candidates: any[] = [];
+    // ── Run SOFI/RIOT/CIFR tests first ──
+    console.log(`Running symbol tests: ${TEST_SYMBOLS.join(', ')}`);
+    const symbolTests = await Promise.all(
+      TEST_SYMBOLS.map((sym) => testSymbol(sym, apiKey).catch((err) => ({
+        ticker: sym, http_status: 0, total_contracts: 0, put_contracts: 0,
+        contracts_with_last_quote: 0, bid_gt_zero: 0, ask_gt_zero: 0, valid_bid_ask: 0,
+        has_expiration: 0, has_strike: 0,
+        error: err instanceof Error ? err.message : String(err),
+      })))
+    );
+    for (const t of symbolTests) {
+      console.log(`[TEST] ${t.ticker} | HTTP ${t.http_status} | total=${t.total_contracts} | puts=${t.put_contracts} | with_lq=${t.contracts_with_last_quote} | bid>0=${t.bid_gt_zero} | ask>0=${t.ask_gt_zero} | valid=${t.valid_bid_ask} | ${t.error ? 'ERROR: ' + t.error : 'OK'}`);
+    }
 
+    // ── Main scan ──
+    const candidates: any[] = [];
     let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
     let chainSuccess = 0, chainNoOptions = 0, chainApiError = 0, chainUnauthorized = 0, chainRateLimited = 0;
-    let totalPutsReturned = 0, totalMissingBid = 0, totalMissingAsk = 0;
-    let totalZeroBid = 0, totalZeroAsk = 0, totalMissingStrike = 0, totalMissingExpiration = 0;
+    let totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
+    let totalMissingStrike = 0, totalMissingExpiration = 0, totalMissingLastQuote = 0;
+    let totalMissingBid = 0, totalZeroBid = 0, totalMissingAsk = 0, totalZeroAsk = 0, totalAskLtBid = 0, totalOtherInvalid = 0;
     let totalValidQuotes = 0, totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPagesFetched = 0;
     let rawSample: any = null;
     let verboseCount = 0;
 
-    // Process symbols in batches of 5 to reduce rate-limit risk
     const BATCH_SIZE = 5;
     for (let i = 0; i < symbolList.length; i += BATCH_SIZE) {
       const batch = symbolList.slice(i, i + BATCH_SIZE);
@@ -557,10 +787,9 @@ serve(async (req) => {
 
       const batchResults = await Promise.all(
         batch.map((sym) => {
-          // Verbose logging for first 3 symbols total
           const isVerbose = verboseCount < 3;
           if (isVerbose) verboseCount++;
-          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose)
+          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false)
             .catch((err) => {
               console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
               return null;
@@ -568,24 +797,27 @@ serve(async (req) => {
         })
       );
 
-      for (let j = 0; j < batchResults.length; j++) {
-        const result = batchResults[j];
+      for (const result of batchResults) {
         if (!result) { symbolsFailed++; continue; }
         symbolsScanned++;
         totalPutsReturned += result.putsReturned;
-        totalMissingBid += result.missingBid;
-        totalMissingAsk += result.missingAsk;
-        totalZeroBid += result.zeroBid;
-        totalZeroAsk += result.zeroAsk;
+        totalFilteredByExp += result.filteredByExpiration;
+        totalFilteredByStrike += result.filteredByStrike;
         totalMissingStrike += result.missingStrike;
         totalMissingExpiration += result.missingExpiration;
+        totalMissingLastQuote += result.missingLastQuote;
+        totalMissingBid += result.missingBid;
+        totalZeroBid += result.zeroBid;
+        totalMissingAsk += result.missingAsk;
+        totalZeroAsk += result.zeroAsk;
+        totalAskLtBid += result.askLtBid;
+        totalOtherInvalid += result.otherInvalid;
         totalValidQuotes += result.validQuotes;
         totalEvaluated += result.evaluated;
         totalQualified += result.qualified;
         totalRejected += result.rejected;
         totalPagesFetched += result.pagesFetched;
 
-        // Track chain status separately
         switch (result.chainStatus) {
           case 'success': chainSuccess++; symbolsWithChains++; break;
           case 'no_options': chainNoOptions++; break;
@@ -599,7 +831,6 @@ serve(async (req) => {
         candidates.push(...result.candidates);
       }
 
-      // Early exit if we already have enough qualified candidates
       const qualifiedCount = candidates.filter((c) => c.qualified).length;
       if (qualifiedCount >= MAX_CANDIDATES) {
         console.log(`Reached ${MAX_CANDIDATES} qualified candidates, stopping early at ${symbolsScanned} symbols`);
@@ -608,8 +839,6 @@ serve(async (req) => {
     }
 
     candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
-
-    // Cap total candidates returned
     const capped = candidates.slice(0, MAX_CANDIDATES * 2);
 
     const scan_counts = {
@@ -624,12 +853,17 @@ serve(async (req) => {
       chain_unauthorized: chainUnauthorized,
       chain_rate_limited: chainRateLimited,
       puts_returned: totalPutsReturned,
-      missing_bid: totalMissingBid,
-      missing_ask: totalMissingAsk,
-      zero_bid: totalZeroBid,
-      zero_ask: totalZeroAsk,
+      filtered_by_expiration: totalFilteredByExp,
+      filtered_by_strike: totalFilteredByStrike,
       missing_strike: totalMissingStrike,
       missing_expiration: totalMissingExpiration,
+      missing_last_quote: totalMissingLastQuote,
+      missing_bid: totalMissingBid,
+      zero_bid: totalZeroBid,
+      missing_ask: totalMissingAsk,
+      zero_ask: totalZeroAsk,
+      ask_lt_bid: totalAskLtBid,
+      other_invalid: totalOtherInvalid,
       valid_quotes: totalValidQuotes,
       contracts_evaluated: totalEvaluated,
       qualified: totalQualified,
@@ -637,12 +871,14 @@ serve(async (req) => {
       pages_fetched: totalPagesFetched,
     };
 
-    console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates, no_filter_mode=${noFilterMode}`, JSON.stringify(scan_counts));
+    console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));
+
     return json({
       success: true, candidates: capped, source: 'massive',
       scanned_at: new Date().toISOString(),
       scan_mode: scanMode, no_filter_mode: noFilterMode,
       scan_counts, raw_sample: rawSample,
+      symbol_tests: symbolTests,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Market scan failed';

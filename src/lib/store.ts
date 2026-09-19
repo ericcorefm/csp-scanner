@@ -10,7 +10,7 @@ import type {
   DailyScanResult,
   Alert,
 } from '@/types';
-import type { AnalyzeTickerResponse, ScanCounts, ScanMode } from '@/lib/liveMarketData';
+import type { AnalyzeTickerResponse, ScanCounts, ScanMode, SymbolTest } from '@/lib/liveMarketData';
 import type { ScanUniverseEntry } from '@/types';
 
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
@@ -73,6 +73,7 @@ export function useAppState() {
   const [scanCounts, setScanCounts] = useState<ScanCounts | null>(null);
   const [noFilterMode, setNoFilterMode] = useState(false);
   const [rawSample, setRawSample] = useState<unknown>(null);
+  const [symbolTests, setSymbolTests] = useState<SymbolTest[]>([]);
   const [scanMode, setScanMode] = useState<ScanMode>('discovery');
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeTickerResponse | null>(null);
@@ -238,6 +239,7 @@ export function useAppState() {
         setScanCounts(live.scan_counts || null);
         setNoFilterMode(live.no_filter_mode || false);
         setRawSample(live.raw_sample || null);
+        setSymbolTests(live.symbol_tests || []);
       } catch (liveError) {
         const message = liveError instanceof Error
           ? `Massive API error: ${liveError.message}`
@@ -516,6 +518,7 @@ export function useAppState() {
     scanCounts,
     noFilterMode,
     rawSample,
+    symbolTests,
     analyzing,
     analyzeResult,
     analyzeError,

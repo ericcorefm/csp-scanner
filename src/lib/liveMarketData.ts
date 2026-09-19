@@ -20,17 +20,36 @@ export interface ScanCounts {
   chain_unauthorized: number;
   chain_rate_limited: number;
   puts_returned: number;
-  missing_bid: number;
-  missing_ask: number;
-  zero_bid: number;
-  zero_ask: number;
+  filtered_by_expiration: number;
+  filtered_by_strike: number;
   missing_strike: number;
   missing_expiration: number;
+  missing_last_quote: number;
+  missing_bid: number;
+  zero_bid: number;
+  missing_ask: number;
+  zero_ask: number;
+  ask_lt_bid: number;
+  other_invalid: number;
   valid_quotes: number;
   contracts_evaluated: number;
   qualified: number;
   rejected: number;
   pages_fetched: number;
+}
+
+export interface SymbolTest {
+  ticker: string;
+  http_status: number;
+  total_contracts: number;
+  put_contracts: number;
+  contracts_with_last_quote: number;
+  bid_gt_zero: number;
+  ask_gt_zero: number;
+  valid_bid_ask: number;
+  has_expiration: number;
+  has_strike: number;
+  error?: string;
 }
 
 export interface LiveScanResponse {
@@ -42,6 +61,7 @@ export interface LiveScanResponse {
   no_filter_mode: boolean;
   scan_counts: ScanCounts;
   raw_sample?: unknown;
+  symbol_tests?: SymbolTest[];
 }
 
 export interface MassiveApiError {
@@ -111,8 +131,9 @@ export async function analyzeTicker(
   ticker: string,
   profile: StrategyProfile,
 ): Promise<AnalyzeTickerResponse> {
-  const { data, error } = await supabase.functions.invoke('analyze-ticker', {
-    body: { ticker, profile },
+  // Route through market-scan edge function with mode=analyze
+  const { data, error } = await supabase.functions.invoke('market-scan', {
+    body: { mode: 'analyze', ticker, profile },
   });
 
   if (error instanceof FunctionsHttpError) {
