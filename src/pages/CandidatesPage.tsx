@@ -28,13 +28,7 @@ const trendColors: Record<string, 'success' | 'warning' | 'error' | 'neutral'> =
   Downtrend: 'error',
 };
 
-function dashIfNoQuote(c: CandidateScan, value: string | number, formatter: (v: number) => string) {
-  if (c.has_quotes === false || (c.bid === 0 && c.ask === 0 && c.suggested_sto === 0)) {
-    return <span className="text-amber-500/60">—</span>;
-  }
-  const num = typeof value === 'number' ? value : parseFloat(String(value));
-  return <>{formatter(num)}</>;
-}
+const DASH = <span className="text-slate-600">--</span>;
 
 export function CandidatesPage({
   state,
@@ -98,7 +92,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 24;
+  const colCount = 20;
 
   return (
     <div className="space-y-4">
@@ -134,19 +128,6 @@ export function CandidatesPage({
               isText
             />
           </div>
-          {state.scanCounts.contracts_awaiting_quotes > 0 && (
-            <div className="mt-3 border-t border-slate-800 pt-3 space-y-2">
-              <div className="flex items-center gap-2 text-sm text-amber-400">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span>Contracts found, but bid/ask quotes are unavailable from the current market-data plan.</span>
-              </div>
-              <div className="grid grid-cols-3 gap-4">
-                <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
-                <ScanCountItem label="With Quotes" value={state.scanCounts.valid_quotes} color="text-emerald-400" />
-                <ScanCountItem label="Awaiting Quote Data" value={state.scanCounts.contracts_awaiting_quotes} color="text-amber-400" />
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -192,7 +173,6 @@ export function CandidatesPage({
           <p className="text-sm text-slate-500">
             {filtered.filter((c) => c.qualified).length} qualified
             {showRejected && ` · ${filtered.filter((c) => !c.qualified).length} rejected`}
-            {` · ${filtered.filter((c) => c.has_quotes === false).length} awaiting quotes`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -223,19 +203,15 @@ export function CandidatesPage({
                 <SortHeader k="expiration" label="Expiration" />
                 <SortHeader k="dte" label="DTE" align="right" />
                 <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Quote Status</th>
-                <SortHeader k="bid" label="Bid" align="right" />
-                <SortHeader k="ask" label="Ask" align="right" />
-                <SortHeader k="mid" label="Mid" align="right" />
-                <SortHeader k="spread_pct" label="Spread %" align="right" />
                 <SortHeader k="suggested_sto" label="STO" align="right" />
                 <SortHeader k="suggested_btc" label="BTC" align="right" />
                 <SortHeader k="net_profit" label="Net $" align="right" />
                 <SortHeader k="net_croi" label="CROI %" align="right" />
                 <SortHeader k="premium_capture" label="PC %" align="right" />
-                <SortHeader k="breakeven" label="BE" align="right" />
+                <SortHeader k="breakeven" label="Breakeven" align="right" />
                 <SortHeader k="iv" label="IV %" align="right" />
                 <SortHeader k="delta" label="Delta" align="right" />
-                <SortHeader k="volume" label="Vol" align="right" />
+                <SortHeader k="volume" label="Volume" align="right" />
                 <SortHeader k="open_interest" label="OI" align="right" />
               </tr>
             </thead>
@@ -243,7 +219,7 @@ export function CandidatesPage({
               {filtered.map((c) => {
                 const rowKey = `${c.ticker}-${c.strike}-${c.expiration}`;
                 const isExpanded = expandedRow === rowKey;
-                const hasNoQuote = c.has_quotes === false || (c.bid === 0 && c.ask === 0 && c.suggested_sto === 0);
+                const hasNoQuote = c.suggested_sto === 0;
                 return (
                   <Fragment key={rowKey}>
                     <tr
@@ -255,8 +231,7 @@ export function CandidatesPage({
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
                           {c.qualified && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
-                          {!c.qualified && hasNoQuote && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
-                          {!c.qualified && !hasNoQuote && <XCircle className="h-3.5 w-3.5 text-red-400" />}
+                          {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
@@ -285,52 +260,40 @@ export function CandidatesPage({
                           <Badge variant="success" dot>Quoted</Badge>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.bid)}`}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.ask)}`}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.mid)}`}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : (
-                          <span className={c.spread_pct <= 5 ? 'text-emerald-400' : c.spread_pct <= 10 ? 'text-amber-400' : 'text-red-400'}>
-                            {formatPct(c.spread_pct)}
-                          </span>
-                        )}
-                      </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.suggested_sto)}`}
+                        {hasNoQuote ? DASH : `$${formatNum(c.suggested_sto)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.suggested_btc)}`}
+                        {hasNoQuote ? DASH : `$${formatNum(c.suggested_btc)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.net_profit)}`}
+                        {hasNoQuote ? DASH : `$${formatNum(c.net_profit)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : (
+                        {hasNoQuote ? DASH : (
                           <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
                             {formatPct(c.net_croi)}
                           </span>
                         )}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : formatPct(c.premium_capture)}
+                        {hasNoQuote ? DASH : formatPct(c.premium_capture)}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {hasNoQuote ? <span className="text-amber-500/60">—</span> : `$${formatNum(c.breakeven)}`}
+                        {hasNoQuote ? DASH : `$${formatNum(c.breakeven)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {c.iv > 0 ? `${formatNum(c.iv, 0)}%` : '—'}
+                        {c.iv > 0 ? `${formatNum(c.iv, 0)}%` : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {c.delta !== 0 ? formatNum(c.delta) : '—'}
+                        {c.delta !== 0 ? formatNum(c.delta) : DASH}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.volume}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.open_interest.toLocaleString()}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                        {c.volume > 0 ? c.volume : DASH}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                        {c.open_interest > 0 ? c.open_interest.toLocaleString() : DASH}
+                      </td>
                     </tr>
                     {showRejected && !c.qualified && isExpanded && (
                       <tr key={rowKey + '-detail'}>
@@ -365,18 +328,8 @@ export function CandidatesPage({
         </div>
         {filtered.length === 0 && (
           <div className="py-12 text-center text-slate-500">
-            {state.scanCounts && state.scanCounts.contracts_awaiting_quotes > 0 ? (
-              <>
-                <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-amber-500" />
-                <p className="text-sm text-amber-400 mb-1">Contracts found, but bid/ask quotes are unavailable from the current market-data plan.</p>
-                <p className="text-xs text-slate-500">Strike, expiration, IV, OI, and Greeks are shown where available. Use Enter Quote to add prices manually.</p>
-              </>
-            ) : (
-              <>
-                <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
-                <p className="text-sm">No candidates found. Try adjusting your strategy rules in Settings.</p>
-              </>
-            )}
+            <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
+            <p className="text-sm">No candidates found. Try adjusting your strategy rules in Settings.</p>
           </div>
         )}
       </div>

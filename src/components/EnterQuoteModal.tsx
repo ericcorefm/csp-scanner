@@ -12,22 +12,22 @@ interface EnterQuoteModalProps {
 }
 
 export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: EnterQuoteModalProps) {
-  const [bid, setBid] = useState(candidate.bid > 0 ? String(candidate.bid) : '');
-  const [ask, setAsk] = useState(candidate.ask > 0 ? String(candidate.ask) : '');
   const [sto, setSto] = useState('');
+  const [bid, setBid] = useState('');
+  const [ask, setAsk] = useState('');
   const [contracts, setContracts] = useState('1');
   const [error, setError] = useState<string | null>(null);
 
+  const stoNum = parseFloat(sto) || 0;
   const bidNum = parseFloat(bid) || 0;
   const askNum = parseFloat(ask) || 0;
-  const stoNum = parseFloat(sto) || 0;
   const contractsNum = parseInt(contracts) || 1;
 
-  const hasBidAsk = bidNum > 0 && askNum > 0 && askNum >= bidNum;
   const hasSto = stoNum > 0;
+  const hasBidAsk = bidNum > 0 && askNum > 0 && askNum >= bidNum;
 
   const mid = useMemo(() => hasBidAsk ? calcSpreadMidpoint(bidNum, askNum) : 0, [hasBidAsk, bidNum, askNum]);
-  const spreadPct = useMemo(() => hasBidAsk ? calcSpreadPct(bidNum, askNum) : 0, [hasBidAsk, bidNum, askNum]);
+  const spreadPctVal = useMemo(() => hasBidAsk ? calcSpreadPct(bidNum, askNum) : 0, [hasBidAsk, bidNum, askNum]);
 
   // Optimal BTC: find highest BTC satisfying CROI >= min and PC <= max
   const btcResult = useMemo(() => {
@@ -53,41 +53,35 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
   const handleSubmit = () => {
     setError(null);
 
-    if (!hasBidAsk && !hasSto) {
-      setError('Enter at least a bid/ask or an actual STO price.');
+    if (!hasSto) {
+      setError('Enter an Actual STO price to calculate targets.');
       return;
     }
 
     const updates: Partial<CandidateScan> = {
-      has_quotes: hasBidAsk || hasSto,
+      has_quotes: true,
+      suggested_sto: parseFloat(stoNum.toFixed(2)),
     };
+
+    if (btcResult) {
+      updates.suggested_btc = parseFloat(btcResult.btc.toFixed(2));
+      updates.net_profit = parseFloat(btcResult.netProfit.toFixed(2));
+      updates.net_croi = parseFloat(btcResult.netCroi.toFixed(2));
+      updates.premium_capture = parseFloat(btcResult.pc.toFixed(1));
+      updates.breakeven = parseFloat(calcBreakeven(candidate.strike, stoNum).toFixed(2));
+    } else {
+      updates.suggested_btc = 0;
+      updates.net_profit = 0;
+      updates.net_croi = 0;
+      updates.premium_capture = 0;
+      updates.breakeven = parseFloat(calcBreakeven(candidate.strike, stoNum).toFixed(2));
+    }
 
     if (hasBidAsk) {
       updates.bid = parseFloat(bidNum.toFixed(2));
       updates.ask = parseFloat(askNum.toFixed(2));
       updates.mid = parseFloat(mid.toFixed(2));
-      updates.spread_pct = parseFloat(spreadPct.toFixed(1));
-      updates.breakeven = parseFloat(calcBreakeven(candidate.strike, mid).toFixed(2));
-    }
-
-    if (hasSto) {
-      updates.suggested_sto = parseFloat(stoNum.toFixed(2));
-
-      if (btcResult) {
-        updates.suggested_btc = parseFloat(btcResult.btc.toFixed(2));
-        updates.net_profit = parseFloat(btcResult.netProfit.toFixed(2));
-        updates.net_croi = parseFloat(btcResult.netCroi.toFixed(2));
-        updates.premium_capture = parseFloat(btcResult.pc.toFixed(1));
-        updates.breakeven = parseFloat(calcBreakeven(candidate.strike, stoNum).toFixed(2));
-      } else {
-        updates.suggested_btc = 0;
-        updates.net_profit = 0;
-        updates.net_croi = 0;
-        updates.premium_capture = 0;
-      }
-    } else if (hasBidAsk) {
-      // Use midpoint as STO if no actual STO entered
-      updates.suggested_sto = parseFloat(mid.toFixed(2));
+      updates.spread_pct = parseFloat(spreadPctVal.toFixed(1));
     }
 
     onSubmit(updates);
@@ -119,9 +113,22 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
             </div>
           </div>
 
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Actual STO Price</label>
+            <input
+              type="number"
+              step="0.01"
+              value={sto}
+              onChange={(e) => setSto(e.target.value)}
+              placeholder="0.00"
+              autoFocus
+              className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Bid</label>
+              <label className="block text-xs text-slate-400 mb-1">Bid <span className="text-slate-600">(optional)</span></label>
               <input
                 type="number"
                 step="0.01"
@@ -132,7 +139,7 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
               />
             </div>
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Ask</label>
+              <label className="block text-xs text-slate-400 mb-1">Ask <span className="text-slate-600">(optional)</span></label>
               <input
                 type="number"
                 step="0.01"
@@ -144,28 +151,15 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Actual STO Price</label>
-              <input
-                type="number"
-                step="0.01"
-                value={sto}
-                onChange={(e) => setSto(e.target.value)}
-                placeholder="0.00"
-                className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Contracts</label>
-              <input
-                type="number"
-                step="1"
-                value={contracts}
-                onChange={(e) => setContracts(e.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
-              />
-            </div>
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Contracts</label>
+            <input
+              type="number"
+              step="1"
+              value={contracts}
+              onChange={(e) => setContracts(e.target.value)}
+              className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+            />
           </div>
 
           {hasBidAsk && (
@@ -181,8 +175,8 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Spread %</span>
-                  <span className={`tabular-nums ${spreadPct <= 5 ? 'text-emerald-400' : spreadPct <= 10 ? 'text-amber-400' : 'text-red-400'}`}>
-                    {formatPct(spreadPct)}
+                  <span className={`tabular-nums ${spreadPctVal <= 5 ? 'text-emerald-400' : spreadPctVal <= 10 ? 'text-amber-400' : 'text-red-400'}`}>
+                    {formatPct(spreadPctVal)}
                   </span>
                 </div>
               </div>
@@ -239,9 +233,9 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
 
           <div className="flex items-center justify-between pt-1">
             <div className="flex gap-1.5">
-              {hasBidAsk && <Badge variant="success">Bid/Ask OK</Badge>}
               {hasSto && <Badge variant="info">STO entered</Badge>}
-              {!hasBidAsk && !hasSto && <Badge variant="warning">Awaiting input</Badge>}
+              {hasBidAsk && <Badge variant="success">Bid/Ask entered</Badge>}
+              {!hasSto && <Badge variant="warning">Awaiting STO</Badge>}
             </div>
             <div className="flex gap-2">
               <button
