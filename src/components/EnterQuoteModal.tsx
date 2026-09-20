@@ -61,6 +61,7 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
     const updates: Partial<CandidateScan> = {
       has_quotes: true,
       suggested_sto: parseFloat(stoNum.toFixed(2)),
+      premium_source: 'MANUAL',
     };
 
     if (btcResult) {
@@ -75,6 +76,7 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
       updates.net_croi = 0;
       updates.premium_capture = 0;
       updates.breakeven = parseFloat(calcBreakeven(candidate.strike, stoNum).toFixed(2));
+      updates.premium_source = 'MANUAL';
     }
 
     if (hasBidAsk) {

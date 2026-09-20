@@ -155,7 +155,10 @@ export interface CandidateScan {
   strike_distance_from_stock: number | null;
   strike_distance_from_support: number | null;
   has_quotes: boolean;
+  premium_source?: PremiumSource;
 }
+
+export type PremiumSource = 'MID' | 'LAST' | 'DAY CLOSE' | 'MANUAL' | 'UNAVAILABLE';
 
 export interface OpenPosition {
   id?: string;

@@ -15,4 +15,5 @@ export type {
   RejectionReason,
   MarketDataStock,
   OhlcBar,
+  PremiumSource,
 } from '@/types';

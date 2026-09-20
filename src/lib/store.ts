@@ -300,6 +300,7 @@ export function useAppState() {
         strike_distance_from_support: r.strike_distance_from_support ?? null,
         has_quotes: r.has_quotes,
         stock_source: r.stock_source ?? null,
+        premium_source: r.premium_source ?? null,
       }));
 
       if (insertData.length > 0) {

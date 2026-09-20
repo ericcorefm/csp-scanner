@@ -4,7 +4,7 @@ import {
   FunctionsRelayError,
 } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
-import type { CandidateScan, StrategyProfile } from '@/types';
+import type { CandidateScan, StrategyProfile, PremiumSource } from '@/types';
 
 export type ScanMode = 'discovery' | 'universe';
 
@@ -117,6 +117,7 @@ export interface ContractAnalysis {
   qualified: boolean;
   pass_fail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
   has_quotes?: boolean;
+  premium_source?: PremiumSource;
   strike_distance_from_stock?: number | null;
   strike_distance_from_support?: number | null;
 }

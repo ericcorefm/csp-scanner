@@ -1,6 +1,6 @@
 import { useState, useMemo, Fragment } from 'react';
 import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil } from 'lucide-react';
-import type { CandidateScan, AppState } from '@/lib/types';
+import type { CandidateScan, AppState, PremiumSource } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
@@ -18,16 +18,15 @@ const rejectionColors: Record<string, 'error' | 'warning'> = {
   'Insufficient liquidity': 'error',
 };
 
-const trendColors: Record<string, 'success' | 'warning' | 'error' | 'neutral'> = {
-  Bullish: 'success',
-  Rebound: 'success',
-  Improving: 'success',
-  Sideways: 'neutral',
-  Stabilizing: 'info' as 'neutral',
-  Downtrend: 'error',
-};
-
 const DASH = <span className="text-slate-600">--</span>;
+
+const premiumSourceColors: Record<PremiumSource, 'success' | 'info' | 'neutral' | 'warning'> = {
+  'MID': 'success',
+  'LAST': 'info',
+  'DAY CLOSE': 'info',
+  'MANUAL': 'warning',
+  'UNAVAILABLE': 'neutral',
+};
 
 export function CandidatesPage({
   state,
@@ -93,7 +92,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 20;
+  const colCount = 15;
 
   return (
     <div className="space-y-4">
@@ -194,31 +193,27 @@ export function CandidatesPage({
               <tr>
                 <SortHeader k="ticker" label="Ticker" />
                 <SortHeader k="stock_price" label="Price" align="right" />
-                <SortHeader k="trend_classification" label="Trend" />
-                <SortHeader k="primary_support" label="Support" align="right" />
                 <SortHeader k="strike" label="Strike" align="right" />
-                <SortHeader k="strike_distance_from_stock" label="Dist %" align="right" />
-                <SortHeader k="strike_distance_from_support" label="Supp Dist %" align="right" />
                 <SortHeader k="expiration" label="Expiration" />
                 <SortHeader k="dte" label="DTE" align="right" />
-                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Quote Status</th>
-                <SortHeader k="suggested_sto" label="STO" align="right" />
+                <SortHeader k="suggested_sto" label="Premium" align="right" />
+                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Premium Source</th>
                 <SortHeader k="suggested_btc" label="BTC" align="right" />
-                <SortHeader k="net_profit" label="Net $" align="right" />
-                <SortHeader k="net_croi" label="CROI %" align="right" />
-                <SortHeader k="premium_capture" label="PC %" align="right" />
-                <SortHeader k="breakeven" label="Breakeven" align="right" />
-                <SortHeader k="iv" label="IV %" align="right" />
-                <SortHeader k="delta" label="Delta" align="right" />
-                <SortHeader k="volume" label="Volume" align="right" />
+                <SortHeader k="net_croi" label="Net CROI" align="right" />
+                <SortHeader k="premium_capture" label="PC" align="right" />
                 <SortHeader k="open_interest" label="OI" align="right" />
+                <SortHeader k="iv" label="IV" align="right" />
+                <SortHeader k="volume" label="Volume" align="right" />
+                <SortHeader k="strike_distance_from_support" label="Support Dist %" align="right" />
+                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {filtered.map((c) => {
                 const rowKey = `${c.ticker}-${c.strike}-${c.expiration}`;
                 const isExpanded = expandedRow === rowKey;
-                const hasNoQuote = c.suggested_sto === 0;
+                const hasNoPremium = c.suggested_sto === 0 || c.suggested_btc === 0;
+                const pSource = c.premium_source || 'UNAVAILABLE';
                 return (
                   <Fragment key={rowKey}>
                     <tr
@@ -235,63 +230,50 @@ export function CandidatesPage({
                         </div>
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.stock_price != null ? `${formatNum(c.stock_price)}` : <span className="text-slate-600">Unavailable</span>}</td>
-                      <td className="px-3 py-2.5">
-                        <Badge variant={trendColors[c.trend_classification] || 'neutral'} dot>
-                          {c.trend_classification}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.primary_support != null ? `${formatNum(c.primary_support)}` : <span className="text-slate-600">Unavailable</span>}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-200 font-medium">${formatNum(c.strike)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_stock != null ? `${c.strike_distance_from_stock}%` : <span className="text-slate-600">--</span>}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
                       <td className="px-3 py-2.5 text-slate-400 text-xs whitespace-nowrap">{c.expiration}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.dte}</td>
-                      <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
-                        {hasNoQuote ? (
-                          <button
-                            onClick={() => setQuoteModalRow(rowKey)}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/20 transition-colors"
-                          >
-                            <Pencil className="h-3 w-3" />
-                            Enter Quote
-                          </button>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">
+                        {hasNoPremium ? DASH : `${formatNum(c.suggested_sto)}`}
+                      </td>
+                      <td className="px-3 py-2.5 text-center">
+                        {hasNoPremium ? (
+                          <span className="text-xs text-slate-600">--</span>
                         ) : (
-                          <Badge variant="success" dot>Quoted</Badge>
+                          <Badge variant={premiumSourceColors[pSource] || 'neutral'}>{pSource}</Badge>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">
-                        {hasNoQuote ? DASH : `$${formatNum(c.suggested_sto)}`}
-                      </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">
-                        {hasNoQuote ? DASH : `$${formatNum(c.suggested_btc)}`}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {hasNoQuote ? DASH : `$${formatNum(c.net_profit)}`}
+                        {hasNoPremium ? DASH : `${formatNum(c.suggested_btc)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
-                        {hasNoQuote ? DASH : (
+                        {hasNoPremium ? DASH : (
                           <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
                             {formatPct(c.net_croi)}
                           </span>
                         )}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {hasNoQuote ? DASH : formatPct(c.premium_capture)}
+                        {hasNoPremium ? DASH : formatPct(c.premium_capture)}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {hasNoQuote ? DASH : `$${formatNum(c.breakeven)}`}
+                        {c.open_interest > 0 ? c.open_interest.toLocaleString() : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
                         {c.iv > 0 ? `${formatNum(c.iv, 0)}%` : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {c.delta !== 0 ? formatNum(c.delta) : DASH}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
                         {c.volume > 0 ? c.volume : DASH}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {c.open_interest > 0 ? c.open_interest.toLocaleString() : DASH}
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
+                      <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => setQuoteModalRow(rowKey)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/20 transition-colors"
+                        >
+                          <Pencil className="h-3 w-3" />
+                          Enter Quote
+                        </button>
                       </td>
                     </tr>
                     {showRejected && !c.qualified && isExpanded && (

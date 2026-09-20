@@ -15,7 +15,7 @@ import {
   MinusCircle,
   X,
 } from 'lucide-react';
-import type { AppState } from '@/lib/types';
+import type { AppState, PremiumSource } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 
@@ -354,7 +354,7 @@ function AnalyzeResult({
                 <table className="w-full text-sm">
                   <thead className="border-b border-slate-800 bg-slate-900/40">
                     <tr>
-                      {['Strike', 'Expiration', 'DTE', 'Strike Below Stock %', 'Strike Below Support %', 'Quote Status', 'STO', 'BTC', 'Net Profit', 'CROI', 'PC', 'Breakeven'].map((h) => (
+                      {['Strike', 'Expiration', 'DTE', 'Strike Below Stock %', 'Strike Below Support %', 'Premium', 'Premium Source', 'BTC', 'Net Profit', 'CROI', 'PC', 'Breakeven'].map((h) => (
                         <th key={h} className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
@@ -374,15 +374,15 @@ function AnalyzeResult({
                           <td className="px-3 py-2 text-right tabular-nums text-slate-400">
                             {c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : DASH}
                           </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-sky-400 font-medium">
+                            {noQuote ? DASH : `${formatNum(c.suggested_sto)}`}
+                          </td>
                           <td className="px-3 py-2 text-right">
                             {noQuote ? (
-                              <span className="text-amber-300">Enter Quote</span>
+                              <span className="text-slate-600 text-xs">--</span>
                             ) : (
-                              <Badge variant="success" dot>Quoted</Badge>
+                              <Badge variant={c.premium_source === 'MANUAL' ? 'warning' : c.premium_source === 'MID' ? 'success' : 'info'}>{c.premium_source || 'UNAVAILABLE'}</Badge>
                             )}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-sky-400 font-medium">
-                            {noQuote ? DASH : `$${formatNum(c.suggested_sto)}`}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-sky-300">
                             {noQuote ? DASH : `$${formatNum(c.suggested_btc)}`}

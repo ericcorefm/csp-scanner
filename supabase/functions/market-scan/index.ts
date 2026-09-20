@@ -242,19 +242,41 @@ function trend(bars: HistoryBar[]) {
   return 'Downtrend';
 }
 
-function optimize(sto: number, strike: number, p: Profile, penny = true) {
-  const increment = penny && p.allow_penny_increments ? 0.01 : Math.max(0.01, p.btc_increment || 0.05);
-  let best: null | { btc: number; netProfit: number; netCroi: number; pc: number } = null;
-  for (let btc = increment; btc < sto; btc += increment) {
-    const px = Number(btc.toFixed(2));
-    const netProfit = (sto - px) * 100 - p.round_trip_commission;
-    const netCroi = netProfit / (strike * 100) * 100;
-    const pc = (sto - px) / sto * 100;
-    if (netCroi >= p.min_net_croi && pc <= p.max_premium_capture) {
-      if (!best || px > best.btc) best = { btc: px, netProfit, netCroi, pc };
-    }
+// ── BTC calculation: round DOWN to BTC increment so CROI stays at or above target ──
+// collateral = strike * 100
+// minimumRequiredNetProfit = collateral * (minimumNetCROI / 100)
+// requiredGrossProfit = minimumRequiredNetProfit + roundTripCommission
+// requiredPremiumCapturePerShare = requiredGrossProfit / 100
+// highestBTC = suggestedSTO - requiredPremiumCapturePerShare
+// Round BTC DOWN to the configured BTC increment.
+function calcBtc(suggestedSTO: number, strike: number, p: Profile): {
+  btc: number | null;
+  netProfit: number;
+  netCroi: number;
+  pc: number;
+} {
+  const collateral = strike * 100;
+  const minimumRequiredNetProfit = collateral * (p.min_net_croi / 100);
+  const requiredGrossProfit = minimumRequiredNetProfit + p.round_trip_commission;
+  const requiredPremiumCapturePerShare = requiredGrossProfit / 100;
+  const highestBtc = suggestedSTO - requiredPremiumCapturePerShare;
+
+  const increment = p.allow_penny_increments ? 0.01 : Math.max(0.01, p.btc_increment || 0.05);
+
+  // Round DOWN to the increment
+  let btc = Math.floor(highestBtc / increment) * increment;
+  btc = parseFloat(btc.toFixed(2));
+
+  // BTC must be > 0 to qualify
+  if (btc <= 0) {
+    return { btc: null, netProfit: 0, netCroi: 0, pc: 0 };
   }
-  return best;
+
+  const netProfit = (suggestedSTO - btc) * 100 - p.round_trip_commission;
+  const netCroi = collateral > 0 ? (netProfit / collateral) * 100 : 0;
+  const pc = suggestedSTO > 0 ? ((suggestedSTO - btc) / suggestedSTO) * 100 : 0;
+
+  return { btc, netProfit, netCroi, pc };
 }
 
 function spreadPct(bid: number, ask: number) {
@@ -310,29 +332,44 @@ function calcDTE(expRaw: unknown, today: Date): number {
   return Math.round((expDay.getTime() - todayDay.getTime()) / 86400000);
 }
 
-// ── Quote extraction: precisely categorize what's missing ──
-function extractQuote(c: any): {
-  hasLastQuote: boolean;
-  bid: number | null;  // null = field missing, 0 = illiquid
-  ask: number | null;  // null = field missing, 0 = illiquid
+// ── Premium extraction: priority MID → LAST → DAY CLOSE → UNAVAILABLE ──
+// Uses the Massive Options Chain Snapshot endpoint (no quote-history access needed).
+// Never converts unavailable premium to 0 — returns null and source 'UNAVAILABLE'.
+function extractPremium(c: any): {
+  bid: number | null;
+  ask: number | null;
   mid: number;
+  suggestedSTO: number | null;
+  premiumSource: 'MID' | 'LAST' | 'DAY CLOSE' | 'UNAVAILABLE';
 } {
   const lq = c?.last_quote;
-  const hasLastQuote = lq != null && typeof lq === 'object';
-  const rawBid = hasLastQuote ? lq.bid : undefined;
-  const rawAsk = hasLastQuote ? lq.ask : undefined;
-  const bid = (rawBid === undefined || rawBid === null) ? null : Number(rawBid);
-  const ask = (rawAsk === undefined || rawAsk === null) ? null : Number(rawAsk);
+  const rawBid = lq?.bid != null ? Number(lq.bid) : null;
+  const rawAsk = lq?.ask != null ? Number(lq.ask) : null;
+  const bid = rawBid !== null && Number.isFinite(rawBid) ? rawBid : null;
+  const ask = rawAsk !== null && Number.isFinite(rawAsk) ? rawAsk : null;
 
-  // Calculate midpoint: prefer Massive's midpoint, fall back to (bid+ask)/2
-  let mid = 0;
-  const lqMid = hasLastQuote ? Number(lq.midpoint) : 0;
-  if (lqMid > 0) {
-    mid = lqMid;
-  } else if (bid !== null && ask !== null && bid > 0 && ask > 0) {
-    mid = (bid + ask) / 2;
+  // 1. MID: valid bid AND ask
+  if (bid !== null && ask !== null && bid > 0 && ask > 0 && ask >= bid) {
+    const midpoint = lq?.midpoint != null ? Number(lq.midpoint) : 0;
+    const sto = midpoint > 0 ? midpoint : (bid + ask) / 2;
+    return { bid, ask, mid: sto, suggestedSTO: sto, premiumSource: 'MID' };
   }
-  return { hasLastQuote, bid, ask, mid };
+
+  // 2. LAST: valid latest trade price
+  const lastTrade = c?.last_trade;
+  const lastPrice = lastTrade?.price != null ? Number(lastTrade.price) : null;
+  if (lastPrice !== null && Number.isFinite(lastPrice) && lastPrice > 0) {
+    return { bid, ask, mid: lastPrice, suggestedSTO: lastPrice, premiumSource: 'LAST' };
+  }
+
+  // 3. DAY CLOSE: valid day.close
+  const dayClose = c?.day?.close != null ? Number(c.day.close) : null;
+  if (dayClose !== null && Number.isFinite(dayClose) && dayClose > 0) {
+    return { bid, ask, mid: dayClose, suggestedSTO: dayClose, premiumSource: 'DAY CLOSE' };
+  }
+
+  // 4. UNAVAILABLE
+  return { bid, ask, mid: 0, suggestedSTO: null, premiumSource: 'UNAVAILABLE' };
 }
 
 // ── Log a sanitized raw contract (no API keys) ──
@@ -766,10 +803,9 @@ async function scanSymbol(
     console.log(`[VERBOSE] ${symbol} | pipeline: puts=${contracts.length} | filtExp=${r.filteredByExpiration} | filtStrike=${r.filteredByStrike} | remaining=${filteredContracts.length}`);
   }
 
-  // ── Contract evaluation — Massive is discovery-only, quotes are optional ──
-  // Qualification uses only non-quote rules (strike, DTE, trend, support, OI, existing position).
-  // Quote fields (bid/ask/mid/spread/STO/BTC/CROI/PC) are included when available but
-  // never required — contracts without quotes are still listed as candidates.
+  // ── Contract evaluation — premium estimated from Massive Options Chain Snapshot ──
+  // Premium priority: MID (bid+ask)/2 → LAST (latest trade) → DAY CLOSE → UNAVAILABLE
+  // CROI/PC qualification applies when a suggested STO is available.
   const analyses: any[] = [];
 
   for (const c of filteredContracts) {
@@ -787,11 +823,15 @@ async function scanSymbol(
     const iv = Number(c?.implied_volatility || 0) * 100;
     const delta = Number(c?.greeks?.delta || 0);
 
-    // Extract quote data if available (never fabricated)
-    const { hasLastQuote, bid, ask, mid } = extractQuote(c);
-    const hasValidQuote = hasLastQuote && bid !== null && bid > 0 && ask !== null && ask > 0 && ask >= bid;
+    // Extract premium using priority: MID → LAST → DAY CLOSE → UNAVAILABLE
+    const { bid, ask, mid, suggestedSTO, premiumSource } = extractPremium(c);
+    const hasPremium = suggestedSTO !== null && suggestedSTO > 0;
 
-    // ── Non-quote qualification rules (applied regardless of quote availability) ──
+    // Spread only calculable with valid bid+ask
+    const hasBidAsk = bid !== null && ask !== null && bid > 0 && ask > 0 && ask >= bid;
+    const sp = hasBidAsk ? spreadPct(bid!, ask!) : 0;
+
+    // ── Non-premium qualification rules (applied regardless of premium availability) ──
     const reasons: string[] = [];
     if (!noFilterMode) {
       if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
@@ -803,57 +843,59 @@ async function scanSymbol(
           if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
         }
       }
-      // OI and volume rules are non-quote — they come from the contract itself
+      // OI and volume rules are non-premium — they come from the contract itself
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         if (oi < profile.min_target_oi) reasons.push('OI too low');
         if (volume < 10) reasons.push('Insufficient liquidity');
       }
     }
-    const qualified = reasons.length === 0;
-    r.evaluated++;
-    if (qualified) r.qualified++; else r.rejected++;
 
-    // Track quote availability
-    if (hasValidQuote) {
+    // Track premium availability
+    if (hasPremium) {
       r.validQuotes++;
     } else {
       r.contractsAwaitingQuotes++;
     }
 
-    // Financial calculations only when real bid/ask exist
-    let sp = 0, stoPrice = 0, btcPrice = 0, netProfit = 0, netCroi = 0, pc = 0, breakeven = 0;
+    // Financial calculations only when a suggested STO is available
+    let stoPrice = 0, btcPrice: number | null = null, netProfit = 0, netCroi = 0, pc = 0, breakeven = 0;
     let croiOptimized = false;
-    if (hasValidQuote) {
-      sp = spreadPct(bid!, ask!);
-      stoPrice = mid;
-      const best = optimize(mid, strike, profile, true);
-      if (best) {
-        btcPrice = best.btc;
-        netProfit = best.netProfit;
-        netCroi = best.netCroi;
-        pc = best.pc;
+    if (hasPremium) {
+      stoPrice = suggestedSTO!;
+      const btcResult = calcBtc(stoPrice, strike, profile);
+      if (btcResult.btc !== null) {
+        btcPrice = btcResult.btc;
+        netProfit = btcResult.netProfit;
+        netCroi = btcResult.netCroi;
+        pc = btcResult.pc;
         croiOptimized = true;
       }
-      breakeven = strike - mid;
+      breakeven = strike - stoPrice;
 
-      // Filter Strikes by CROI: when ON and a quote is available, reject strikes
-      // where no BTC exit satisfies both Minimum Net CROI and Maximum Premium Capture.
-      // preferred_croi_max is informational only — never used to reject.
+      // CROI & Premium Capture qualification (when section ON):
+      // PASS only if netCROI >= min AND premiumCapture <= max AND BTC > 0
       if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-        if (!croiOptimized) {
+        if (!croiOptimized || netCroi < profile.min_net_croi || pc > profile.max_premium_capture) {
           reasons.push('CROI too low');
-          if (qualified) { r.qualified--; r.rejected++; }
         }
       }
 
-      // Spread rule only applies when a quote exists
-      if (!noFilterMode && !isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) {
+      // Spread rule only applies when bid/ask exist
+      if (!noFilterMode && !isSectionOff(profile, 'spread_enabled') && hasBidAsk && sp > profile.max_spread_pct) {
         if (!reasons.includes('Spread too wide')) {
           reasons.push('Spread too wide');
-          if (qualified) { r.qualified--; r.rejected++; }
         }
       }
+    } else if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
+      // No premium available and CROI filter is ON — cannot qualify
+      reasons.push('CROI too low');
     }
+
+    const qualified = reasons.length === 0;
+    r.evaluated++;
+    if (qualified) r.qualified++; else r.rejected++;
+
+    const premiumSourceOut = premiumSource as string;
 
     if (analyzeMode) {
       const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
@@ -886,13 +928,13 @@ async function scanSymbol(
           passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
         }
       }
-      if (hasValidQuote && !isSectionOff(profile, 'spread_enabled')) {
+      if (hasBidAsk && !isSectionOff(profile, 'spread_enabled')) {
         const spreadOk = sp <= profile.max_spread_pct;
         passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: spreadOk, status: spreadOk ? 'pass' : 'fail' });
       }
-      if (hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled')) {
+      if (hasPremium && !isSectionOff(profile, 'croi_pc_enabled')) {
         if (profile.filter_strikes_croi) {
-          const croiOk = croiOptimized;
+          const croiOk = croiOptimized && netCroi >= profile.min_net_croi && pc <= profile.max_premium_capture;
           passFail.push({ rule: `Filter Strikes by CROI: Net CROI >= ${profile.min_net_croi}% & PC <= ${profile.max_premium_capture}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
         } else {
           const croiOk = netCroi >= profile.min_net_croi;
@@ -901,32 +943,31 @@ async function scanSymbol(
           passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
         }
       }
-      if (!hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-        passFail.push({ rule: 'Filter Strikes by CROI — Quote required', pass: true, status: 'not_evaluated' });
+      if (!hasPremium && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
+        passFail.push({ rule: 'Filter Strikes by CROI — Premium required', pass: true, status: 'not_evaluated' });
       }
-      if (!hasValidQuote) {
-        passFail.push({ rule: 'Quote data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
+      if (!hasPremium) {
+        passFail.push({ rule: 'Premium data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
       }
-      // Massive is used for contract discovery. Missing quote data is not a failure.
-      // Quote-dependent rules become pending until the user enters a quote.
       const finalQualified = reasons.length === 0;
 
       analyses.push({
         strike, expiration, dte,
-        bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
-        ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
-        mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
-        spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
+        bid: hasBidAsk ? Number(bid!.toFixed(2)) : 0,
+        ask: hasBidAsk ? Number(ask!.toFixed(2)) : 0,
+        mid: hasPremium ? Number(mid.toFixed(2)) : 0,
+        spread_pct: hasBidAsk ? Number(sp.toFixed(1)) : 0,
         iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
         volume, open_interest: oi, volume_classification: volClass(volume),
-        suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
-        suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
-        net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
-        net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
-        premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
-        breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
+        suggested_sto: hasPremium ? Number(stoPrice.toFixed(2)) : 0,
+        suggested_btc: btcPrice !== null ? Number(btcPrice.toFixed(2)) : 0,
+        net_profit: hasPremium ? Number(netProfit.toFixed(2)) : 0,
+        net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
+        premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
+        breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
         qualified: finalQualified, pass_fail: passFail,
-        has_quotes: hasValidQuote,
+        has_quotes: hasPremium,
+        premium_source: premiumSourceOut,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
       });
@@ -936,24 +977,25 @@ async function scanSymbol(
         stock_price: stockPrice !== null && stockPrice > 0 ? Number(stockPrice.toFixed(2)) : null,
         stock_source: r.stockSource || 'none',
         strike, expiration, dte,
-        bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
-        ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
-        mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
-        spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
+        bid: hasBidAsk ? Number(bid!.toFixed(2)) : 0,
+        ask: hasBidAsk ? Number(ask!.toFixed(2)) : 0,
+        mid: hasPremium ? Number(mid.toFixed(2)) : 0,
+        spread_pct: hasBidAsk ? Number(sp.toFixed(1)) : 0,
         iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
         volume, open_interest: oi, volume_classification: volClass(volume),
         trend_classification: trendClass, primary_support: primarySupport !== null ? Number(primarySupport.toFixed(2)) : null,
-        suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
-        suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
-        net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
-        net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
-        premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
-        breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
+        suggested_sto: hasPremium ? Number(stoPrice.toFixed(2)) : 0,
+        suggested_btc: btcPrice !== null ? Number(btcPrice.toFixed(2)) : 0,
+        net_profit: hasPremium ? Number(netProfit.toFixed(2)) : 0,
+        net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
+        premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
+        breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
         strategy_profile_id: profile.id,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
-        has_quotes: hasValidQuote,
+        has_quotes: hasPremium,
+        premium_source: premiumSourceOut,
         secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
         resistance: resistance !== null ? Number(resistance.toFixed(2)) : null,
       });
