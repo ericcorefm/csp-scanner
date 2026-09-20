@@ -1,6 +1,6 @@
 import { useState, useMemo, Fragment } from 'react';
 import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil } from 'lucide-react';
-import type { CandidateScan, AppState, PremiumSource } from '@/lib/types';
+import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
@@ -20,13 +20,6 @@ const rejectionColors: Record<string, 'error' | 'warning'> = {
 
 const DASH = <span className="text-slate-600">--</span>;
 
-const premiumSourceColors: Record<PremiumSource, 'success' | 'info' | 'neutral' | 'warning'> = {
-  'MID': 'success',
-  'LAST': 'info',
-  'DAY CLOSE': 'info',
-  'MANUAL': 'warning',
-  'UNAVAILABLE': 'neutral',
-};
 
 export function CandidatesPage({
   state,
@@ -196,8 +189,7 @@ export function CandidatesPage({
                 <SortHeader k="strike" label="Strike" align="right" />
                 <SortHeader k="expiration" label="Expiration" />
                 <SortHeader k="dte" label="DTE" align="right" />
-                <SortHeader k="suggested_sto" label="Premium" align="right" />
-                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Premium Source</th>
+                <SortHeader k="suggested_sto" label="STO" align="right" />
                 <SortHeader k="suggested_btc" label="BTC" align="right" />
                 <SortHeader k="net_croi" label="Net CROI" align="right" />
                 <SortHeader k="premium_capture" label="PC" align="right" />
@@ -213,7 +205,6 @@ export function CandidatesPage({
                 const rowKey = `${c.ticker}-${c.strike}-${c.expiration}`;
                 const isExpanded = expandedRow === rowKey;
                 const hasNoPremium = c.suggested_sto === 0 || c.suggested_btc === 0;
-                const pSource = c.premium_source || 'UNAVAILABLE';
                 return (
                   <Fragment key={rowKey}>
                     <tr
@@ -235,13 +226,6 @@ export function CandidatesPage({
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.dte}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">
                         {hasNoPremium ? DASH : `${formatNum(c.suggested_sto)}`}
-                      </td>
-                      <td className="px-3 py-2.5 text-center">
-                        {hasNoPremium ? (
-                          <span className="text-xs text-slate-600">--</span>
-                        ) : (
-                          <Badge variant={premiumSourceColors[pSource] || 'neutral'}>{pSource}</Badge>
-                        )}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">
                         {hasNoPremium ? DASH : `${formatNum(c.suggested_btc)}`}
