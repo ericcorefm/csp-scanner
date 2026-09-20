@@ -25,6 +25,8 @@ type Profile = {
   min_dte: number;
   max_dte: number;
   preferred_expirations: string[];
+  minimum_stock_price: number | null;
+  maximum_stock_price: number | null;
   min_net_croi: number;
   max_premium_capture: number;
   max_spread_pct: number;
@@ -363,6 +365,23 @@ async function scanSymbol(
   const stockPrice = Number(bars.at(-1)!.close);
   if (!stockPrice) return r;
 
+  // Stock price filter (if Order & Strike section enabled)
+  // This filters the underlying stock price, independent of put strike price.
+  // A $71 stock with max put strike $25 is still allowed — stock price and
+  // strike price are separate filters.
+  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} < minimum ${profile.minimum_stock_price}, skipping symbol`);
+      r.chainStatus = 'no_options';
+      return r;
+    }
+    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} > maximum ${profile.maximum_stock_price}, skipping symbol`);
+      r.chainStatus = 'no_options';
+      return r;
+    }
+  }
+
   const primarySupport = calcPrimarySupport(bars, stockPrice);
   const secondarySupport = calcSecondarySupport(bars, primarySupport);
   const resistance = findResistance(bars);
@@ -390,17 +409,14 @@ async function scanSymbol(
   // When preferred_expirations has dates, skip DTE range server-side so
   // contracts matching those exact dates aren't excluded. The client-side
   // filter below handles exact-date matching.
+  // No max DTE limit is applied — only minimum DTE when no preferred dates.
   if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
     const preferred = profile.preferred_expirations || [];
     if (preferred.length === 0) {
       const minDte = profile.min_dte ?? 0;
-      const maxDte = profile.max_dte ?? 9999;
       const minDate = new Date(today);
       minDate.setDate(minDate.getDate() + minDte);
-      const maxDate = new Date(today);
-      maxDate.setDate(maxDate.getDate() + maxDte);
       chainParams.set('expiration_date.gte', fmt(minDate));
-      chainParams.set('expiration_date.lte', fmt(maxDate));
     }
   }
 
@@ -496,10 +512,9 @@ async function scanSymbol(
       });
     } else {
       const minDte = profile.min_dte ?? 0;
-      const maxDte = profile.max_dte ?? 9999;
       filteredContracts = filteredContracts.filter((c: any) => {
         const dte = calcDTE(c?.details?.expiration_date, today);
-        return dte >= minDte && dte <= maxDte;
+        return dte >= minDte;
       });
     }
 
@@ -509,7 +524,7 @@ async function scanSymbol(
       console.log(`[VERBOSE] ${symbol} | raw expiration_date sample: ${JSON.stringify(sampleExp)} | type: ${typeof sampleExp}`);
       const filterDesc = preferred.length > 0
         ? `preferred dates [${preferred.join(', ')}]`
-        : `DTE ${profile.min_dte}-${profile.max_dte}`;
+        : `DTE >= ${profile.min_dte}`;
       console.log(`[VERBOSE] ${symbol} | expiration filter (${filterDesc}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
     }
   }

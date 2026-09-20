@@ -28,8 +28,10 @@ const sections: SectionDef[] = [
     title: 'Order & Strike',
     enabledKey: 'order_strike_enabled',
     fields: [
-      { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5' },
+      { key: 'minimum_stock_price', label: 'Minimum Stock Price', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no minimum stock price.' },
+      { key: 'maximum_stock_price', label: 'Maximum Stock Price', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no maximum stock price.' },
       { key: 'min_strike', label: 'Minimum Put Strike', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no minimum.' },
+      { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5' },
     ],
   },
   {
@@ -37,7 +39,6 @@ const sections: SectionDef[] = [
     enabledKey: 'expiration_enabled',
     fields: [
       { key: 'min_dte', label: 'Minimum DTE', type: 'integer', unit: 'days', help: 'Minimum days to expiration. Ignored when specific expiration dates are selected.' },
-      { key: 'max_dte', label: 'Maximum DTE', type: 'integer', unit: 'days', help: 'Maximum days to expiration. Ignored when specific expiration dates are selected.' },
     ],
   },
   {
@@ -99,6 +100,12 @@ const nonToggleSections: { title: string; fields: FieldDef[] }[] = [
   },
 ];
 
+const NULLABLE_PRICE_KEYS: (keyof StrategyProfile)[] = [
+  'min_strike',
+  'minimum_stock_price',
+  'maximum_stock_price',
+];
+
 export function SettingsPage({ state }: { state: AppState }) {
   const [profile, setProfile] = useState<StrategyProfile | null>(state.activeProfile);
   const [saved, setSaved] = useState(false);
@@ -106,14 +113,10 @@ export function SettingsPage({ state }: { state: AppState }) {
   const [newProfileName, setNewProfileName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
 
-  // Sync local profile state when the store's activeProfile changes
-  // (e.g. after save, after profile switch, after reset)
   useEffect(() => {
     setProfile(state.activeProfile);
   }, [state.activeProfile]);
 
-  // Load available expiration dates from Massive — cached by scan mode.
-  // Force-refresh when scan mode changes.
   useEffect(() => {
     state.loadAvailableExpirations(state.scanMode as ScanMode, true);
   }, [state.scanMode]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -130,7 +133,6 @@ export function SettingsPage({ state }: { state: AppState }) {
     setSaveError(null);
     try {
       const saved = await state.saveProfile(profile);
-      // Sync local state from the database-returned row
       setProfile(saved);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -220,7 +222,7 @@ export function SettingsPage({ state }: { state: AppState }) {
       );
     }
 
-    if (field.key === 'min_strike') {
+    if (NULLABLE_PRICE_KEYS.includes(field.key)) {
       return (
         <div className="flex items-center gap-1">
           <span className="text-xs text-slate-500">$</span>
@@ -228,7 +230,7 @@ export function SettingsPage({ state }: { state: AppState }) {
             type="number"
             step={field.step}
             min={field.min}
-            value={profile[field.key] === null ? '' : String(profile[field.key])}
+            value={profile[field.key] === null || profile[field.key] === undefined ? '' : String(profile[field.key])}
             onChange={(e) => {
               const val = parseFloat(e.target.value);
               updateField(field.key, isNaN(val) ? null : val);
@@ -417,7 +419,7 @@ export function SettingsPage({ state }: { state: AppState }) {
                   const dteSuppressed = preferredDates.length > 0 && enabled;
                   return (
                     <div className={`rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300 ${dteSuppressed ? '' : 'hidden'}`}>
-                      Specific expiration dates are selected, so DTE range is ignored.
+                      Specific expiration dates are selected, so Minimum DTE is ignored.
                     </div>
                   );
                 })()}
@@ -426,7 +428,7 @@ export function SettingsPage({ state }: { state: AppState }) {
                     <div className="flex items-center justify-between gap-4">
                       <div className="min-w-0">
                         <label className={`text-sm ${enabled ? 'text-slate-300' : 'text-slate-500'}`}>Preferred Expiration Dates</label>
-                        <p className="text-xs text-slate-500 mt-0.5">Select specific dates to filter to, or choose Any Expiration to use DTE range.</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Select specific dates to filter to, or choose Any Expiration to use Minimum DTE.</p>
                       </div>
                     </div>
                     <ExpirationSelect
@@ -442,7 +444,7 @@ export function SettingsPage({ state }: { state: AppState }) {
                 )}
                 {section.fields.map((field) => {
                   const preferredDates = (profile.preferred_expirations || []).filter(Boolean);
-                  const dteSuppressed = section.title === 'Expiration' && preferredDates.length > 0 && enabled && (field.key === 'min_dte' || field.key === 'max_dte');
+                  const dteSuppressed = section.title === 'Expiration' && preferredDates.length > 0 && enabled && field.key === 'min_dte';
                   return (
                   <div key={field.key} className={`flex items-center justify-between gap-4 ${dteSuppressed ? 'opacity-40' : ''}`}>
                     <div className="min-w-0">

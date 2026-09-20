@@ -278,9 +278,9 @@ Deno.serve(async (req) => {
     } else {
       chosenExpirations = allExpirations.filter((e) => {
         const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
-        return dte >= (profile.min_dte || 0) && dte <= (profile.max_dte || 9999);
+        return dte >= (profile.min_dte || 0);
       });
-      console.log(`[Massive] ${ticker} — filtering to DTE ${profile.min_dte}-${profile.max_dte}: ${chosenExpirations.length} expirations`);
+      console.log(`[Massive] ${ticker} — filtering to DTE >= ${profile.min_dte}: ${chosenExpirations.length} expirations`);
     }
 
     let filteredContracts = contracts.filter((c: any) =>

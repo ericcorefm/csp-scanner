@@ -28,6 +28,8 @@ export interface StrategyProfile {
   max_dte: number;
   preferred_expirations: string[];
   min_strike: number | null;
+  minimum_stock_price: number | null;
+  maximum_stock_price: number | null;
   preferred_strikes: number[];
   order_strike_enabled: boolean;
   expiration_enabled: boolean;

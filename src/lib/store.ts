@@ -42,6 +42,8 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   max_dte: 550,
   preferred_expirations: [],
   min_strike: null,
+  minimum_stock_price: null,
+  maximum_stock_price: null,
   preferred_strikes: [],
   order_strike_enabled: true,
   expiration_enabled: true,
