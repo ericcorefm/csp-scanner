@@ -36,6 +36,7 @@ type Profile = {
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
   minimum_support_distance_pct: number;
+  maximum_support_distance_pct: number;
   order_strike_enabled: boolean;
   expiration_enabled: boolean;
   croi_pc_enabled: boolean;
@@ -839,6 +840,7 @@ async function scanSymbol(
         if (primarySupport !== null && primarySupport > 0) {
           const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
           if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
+          if (supportDistPct > profile.maximum_support_distance_pct) reasons.push('Support distance too high');
         }
       }
       // OI and volume rules are non-quote — they come from the contract itself
@@ -914,8 +916,10 @@ async function scanSymbol(
           passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
           if (primarySupport !== null && primarySupport > 0) {
             const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-            const distOk = supportDistPct >= profile.minimum_support_distance_pct;
-            passFail.push({ rule: `Support distance >= ${profile.minimum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
+            const minOk = supportDistPct >= profile.minimum_support_distance_pct;
+            const maxOk = supportDistPct <= profile.maximum_support_distance_pct;
+            passFail.push({ rule: `Minimum support distance >= ${profile.minimum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: minOk, status: minOk ? 'pass' : 'fail' });
+            passFail.push({ rule: `Maximum support distance <= ${profile.maximum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: maxOk, status: maxOk ? 'pass' : 'fail' });
           } else {
             passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
           }
