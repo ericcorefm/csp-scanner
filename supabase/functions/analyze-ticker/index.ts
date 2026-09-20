@@ -14,11 +14,9 @@ const MASSIVE_API = 'https://api.massive.com';
 type Profile = {
   id: string;
   max_strike: number;
-  min_strike: number | null;
   preferred_strikes: number[];
   min_dte: number;
   max_dte: number;
-  preferred_expirations: string[];
   min_net_croi: number;
   max_premium_capture: number;
   max_spread_pct: number;
@@ -272,9 +270,6 @@ Deno.serve(async (req) => {
     if (profile.expiration_enabled === false) {
       chosenExpirations = allExpirations;
       console.log(`[Massive] ${ticker} — expiration section OFF, using all ${chosenExpirations.length} expirations`);
-    } else if (profile.preferred_expirations && profile.preferred_expirations.length > 0) {
-      chosenExpirations = allExpirations.filter((e) => profile.preferred_expirations.includes(e));
-      console.log(`[Massive] ${ticker} — filtering to preferred expirations: ${chosenExpirations.join(', ')}`);
     } else {
       chosenExpirations = allExpirations.filter((e) => {
         const dte = Math.ceil((new Date(e).getTime() - today.getTime()) / 86400000);
@@ -300,7 +295,6 @@ Deno.serve(async (req) => {
         filteredContracts = filteredContracts.filter((c: any) => {
           const s = Number(c.details.strike_price);
           if (s > profile.max_strike) return false;
-          if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
           return true;
         });
       }

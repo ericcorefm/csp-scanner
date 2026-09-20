@@ -26,8 +26,6 @@ export interface StrategyProfile {
   exclude_downtrend_no_support: boolean;
   min_dte: number;
   max_dte: number;
-  preferred_expirations: string[];
-  min_strike: number | null;
   minimum_stock_price: number | null;
   maximum_stock_price: number | null;
   preferred_strikes: number[];

@@ -21,10 +21,8 @@ const MAX_CANDIDATES = 50;
 type Profile = {
   id: string;
   max_strike: number;
-  min_strike: number | null;
   min_dte: number;
   max_dte: number;
-  preferred_expirations: string[];
   minimum_stock_price: number | null;
   maximum_stock_price: number | null;
   min_net_croi: number;
@@ -400,24 +398,14 @@ async function scanSymbol(
   // Server-side strike filter (if Order & Strike enabled)
   if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
     chainParams.set('strike_price.lte', String(profile.max_strike));
-    if (profile.min_strike !== null && profile.min_strike !== undefined) {
-      chainParams.set('strike_price.gte', String(profile.min_strike));
-    }
   }
 
   // Server-side expiration filter (if Expiration enabled)
-  // When preferred_expirations has dates, skip DTE range server-side so
-  // contracts matching those exact dates aren't excluded. The client-side
-  // filter below handles exact-date matching.
-  // No max DTE limit is applied — only minimum DTE when no preferred dates.
   if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-    const preferred = profile.preferred_expirations || [];
-    if (preferred.length === 0) {
-      const minDte = profile.min_dte ?? 0;
-      const minDate = new Date(today);
-      minDate.setDate(minDate.getDate() + minDte);
-      chainParams.set('expiration_date.gte', fmt(minDate));
-    }
+    const minDte = profile.min_dte ?? 0;
+    const minDate = new Date(today);
+    minDate.setDate(minDate.getDate() + minDte);
+    chainParams.set('expiration_date.gte', fmt(minDate));
   }
 
   const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?${chainParams.toString()}`;
@@ -501,31 +489,18 @@ async function scanSymbol(
   if (noFilterMode || isSectionOff(profile, 'expiration_enabled')) {
     if (verbose) console.log(`[VERBOSE] ${symbol} | expiration filter: SKIPPED (section off or noFilter)`);
   } else {
-    const preferred = profile.preferred_expirations || [];
     const before = filteredContracts.length;
-
-    if (preferred.length > 0) {
-      filteredContracts = filteredContracts.filter((c: any) => {
-        const expRaw = c?.details?.expiration_date;
-        const expStr = expRaw != null ? String(expRaw).slice(0, 10) : '';
-        return preferred.some((p: string) => p.slice(0, 10) === expStr);
-      });
-    } else {
-      const minDte = profile.min_dte ?? 0;
-      filteredContracts = filteredContracts.filter((c: any) => {
-        const dte = calcDTE(c?.details?.expiration_date, today);
-        return dte >= minDte;
-      });
-    }
+    const minDte = profile.min_dte ?? 0;
+    filteredContracts = filteredContracts.filter((c: any) => {
+      const dte = calcDTE(c?.details?.expiration_date, today);
+      return dte >= minDte;
+    });
 
     r.filteredByExpiration = before - filteredContracts.length;
     if (verbose) {
       const sampleExp = contracts[0]?.details?.expiration_date;
       console.log(`[VERBOSE] ${symbol} | raw expiration_date sample: ${JSON.stringify(sampleExp)} | type: ${typeof sampleExp}`);
-      const filterDesc = preferred.length > 0
-        ? `preferred dates [${preferred.join(', ')}]`
-        : `DTE >= ${profile.min_dte}`;
-      console.log(`[VERBOSE] ${symbol} | expiration filter (${filterDesc}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
+      console.log(`[VERBOSE] ${symbol} | expiration filter (DTE >= ${profile.min_dte}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
     }
   }
 
@@ -535,7 +510,6 @@ async function scanSymbol(
     filteredContracts = filteredContracts.filter((c: any) => {
       const s = Number(c.details.strike_price);
       if (s > profile.max_strike) return false;
-      if (profile.min_strike !== null && profile.min_strike !== undefined && s < profile.min_strike) return false;
       return true;
     });
     r.filteredByStrike = before - filteredContracts.length;
@@ -740,85 +714,6 @@ serve(async (req) => {
       profile.exclude_existing_positions === false;
 
     console.log(`mode=${mode}, scanMode=${scanMode}, noFilterMode=${noFilterMode}`);
-
-    // ── LIST-EXPIRATIONS MODE: collect all unique PUT expiration dates ──
-    // Uses contract metadata only (details.expiration_date). No quote/IV/OI/volume
-    // data required. No DTE/strike/CROI/liquidity/technical filters applied.
-    if (mode === 'list-expirations') {
-      let symbolList: { ticker: string; company_name: string | null }[];
-      if (scanMode === 'universe') {
-        symbolList = await fetchScanUniverse();
-      } else {
-        symbolList = await fetchMarketUniverse(50);
-      }
-
-      // For analyze mode, use the specific ticker if provided
-      const analyzeTicker = String(body.ticker || '').toUpperCase().trim();
-      if (analyzeTicker) {
-        symbolList = [{ ticker: analyzeTicker, company_name: null }];
-      }
-
-      console.log(`[list-expirations] scanMode=${scanMode}, symbols=${symbolList.length}, ticker=${analyzeTicker || 'none'}`);
-
-      const today = new Date();
-      const todayStr = fmt(today);
-      const allExpirations = new Set<string>();
-      let symbolsWithChains = 0;
-      let symbolsFailed = 0;
-
-      const BATCH = 5;
-      for (let i = 0; i < symbolList.length; i += BATCH) {
-        const batch = symbolList.slice(i, i + BATCH);
-        const results = await Promise.all(
-          batch.map(async (sym) => {
-            // No filters — just fetch PUT contracts and read expiration_date metadata
-            const chainParams = new URLSearchParams();
-            chainParams.set('contract_type', 'put');
-            const chainPath = `/v3/snapshot/options/${encodeURIComponent(sym.ticker)}?${chainParams.toString()}`;
-            const pageResult = await massiveFetch(chainPath, apiKey, sym.ticker, 'list_expirations');
-            if (!pageResult.ok) {
-              console.log(`[list-expirations] ${sym.ticker} failed: HTTP ${pageResult.status}`);
-              return { exps: [] as string[], ok: false };
-            }
-            const contracts = (pageResult.data?.results || []).filter((c: any) => c?.details?.contract_type === 'put');
-            // Paginate through all results to collect every expiration date
-            let nextUrl = pageResult.data?.next_url;
-            let allContracts = [...contracts];
-            let pageCount = 1;
-            while (nextUrl && typeof nextUrl === 'string' && pageCount < MAX_CHAIN_PAGES) {
-              pageCount++;
-              let nextPath: string;
-              try { const parsed = new URL(nextUrl); nextPath = parsed.pathname + parsed.search; }
-              catch { break; }
-              const nextPage = await massiveFetch(nextPath, apiKey, sym.ticker, `list_expirations_p${pageCount}`);
-              if (!nextPage.ok) break;
-              const moreContracts = (nextPage.data?.results || []).filter((c: any) => c?.details?.contract_type === 'put');
-              allContracts.push(...moreContracts);
-              nextUrl = nextPage.data?.next_url;
-            }
-            const exps = allContracts.map((c: any) => {
-              const expRaw = c?.details?.expiration_date;
-              if (!expRaw) return '';
-              const d = parseExpirationDate(expRaw);
-              if (!d) return '';
-              return fmt(d);
-            }).filter(Boolean);
-            return { exps, ok: true };
-          }),
-        );
-        for (const r of results) {
-          if (r.ok) symbolsWithChains++;
-          else symbolsFailed++;
-          for (const e of r.exps) allExpirations.add(e);
-        }
-      }
-
-      const sorted = [...allExpirations].filter((d) => d >= todayStr).sort();
-      console.log(`[list-expirations] Found ${sorted.length} unique expiration dates from ${symbolsWithChains} symbols (${symbolsFailed} failed)`);
-
-      // Return success even if empty — the frontend handles empty gracefully
-      return json({ success: true, expirations: sorted, symbols_scanned: symbolList.length, symbols_with_chains: symbolsWithChains, symbols_failed: symbolsFailed });
-    }
 
     // ── ANALYZE MODE: deep-analyze a single ticker ──
     if (mode === 'analyze') {
