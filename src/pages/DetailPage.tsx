@@ -1,12 +1,11 @@
 import { useMemo } from 'react';
 import {
   TrendingUp, TrendingDown, Minus, ArrowUpRight, BarChart3, Building2,
-  CandlestickChart, Calculator, Target, Plus, X,
+  CandlestickChart, Calculator, Target, Plus,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
-import { getTechnicalSnapshot, getFundamentalSnapshot, getStockDef } from '@/lib/marketData';
 import { calcBtcOptimization, calcRecycleDate } from '@/lib/calculations';
-import { Badge, Card, StatRow, MetricIndicator, formatCurrency, formatPct, formatNum } from '@/components/ui';
+import { Badge, Card, StatRow, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { BackButton } from '@/components/Layout';
 import type { Page } from '@/components/Layout';
 
@@ -35,23 +34,38 @@ function volClassColor(cls: string): 'success' | 'warning' | 'error' | 'neutral'
   return 'error';
 }
 
+function displayPrice(v: number | null | undefined): string {
+  if (v === null || v === undefined || v === 0) return 'Unavailable';
+  return `$${formatNum(v)}`;
+}
+
+function displayTrend(v: string | null | undefined): string {
+  if (!v || v === 'Unavailable') return 'Unavailable';
+  return v;
+}
+
 export function DetailPage({
   ticker,
+  strike,
+  expiration,
   state,
   onNavigate,
 }: {
   ticker: string;
+  strike: number | null;
+  expiration: string | null;
   state: AppState;
-  onNavigate: (page: Page, ticker?: string) => void;
+  onNavigate: (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => void;
 }) {
-  const tech = useMemo(() => getTechnicalSnapshot(ticker), [ticker]);
-  const fund = useMemo(() => getFundamentalSnapshot(ticker), [ticker]);
-  const stockDef = useMemo(() => getStockDef(ticker), [ticker]);
-
-  const candidate = useMemo(
-    () => state.candidates.find((c) => c.ticker === ticker && c.qualified),
-    [state.candidates, ticker],
-  );
+  const candidate = useMemo(() => {
+    if (strike !== null && expiration) {
+      const exact = state.candidates.find(
+        (c) => c.ticker === ticker && c.strike === strike && c.expiration === expiration,
+      );
+      if (exact) return exact;
+    }
+    return state.candidates.find((c) => c.ticker === ticker && c.qualified);
+  }, [state.candidates, ticker, strike, expiration]);
 
   const btcTable = useMemo(() => {
     if (!candidate || !state.activeProfile) return null;
@@ -60,21 +74,31 @@ export function DetailPage({
       candidate.strike,
       1,
       state.activeProfile,
-      candidate.open_interest > 0 && stockDef?.supportsPenny === true,
+      candidate.open_interest > 0,
     );
-  }, [candidate, state.activeProfile, stockDef]);
+  }, [candidate, state.activeProfile]);
 
-  if (!tech || !fund) {
+  if (!candidate) {
     return (
       <div>
         <BackButton onClick={() => onNavigate('candidates')} />
-        <p className="text-slate-400">Data not found for {ticker}.</p>
+        <div className="py-16 text-center">
+          <p className="text-slate-400 mb-2">No candidate data found for {ticker}.</p>
+          <p className="text-sm text-slate-500">
+            Run a scan from Today's Candidates, then click a row to see details here.
+          </p>
+        </div>
       </div>
     );
   }
 
-  const TrendIcon = trendIcons[tech.trend_classification] || Minus;
-  const recycleDate = candidate ? calcRecycleDate(new Date().toISOString().split('T')[0], state.activeProfile?.max_recycle_days || 120) : '';
+  const TrendIcon = trendIcons[candidate.trend_classification] || Minus;
+  const trendColor = trendColors[candidate.trend_classification] || 'neutral';
+  const recycleDate = calcRecycleDate(new Date().toISOString().split('T')[0], state.activeProfile?.max_recycle_days || 120);
+  const stockPrice = candidate.stock_price;
+  const primarySupport = candidate.primary_support;
+  const secondarySupport = candidate.secondary_support ?? null;
+  const resistance = candidate.resistance ?? null;
 
   const handleAddPosition = async () => {
     if (!candidate || !state.activeProfile) return;
@@ -95,9 +119,9 @@ export function DetailPage({
       premium_capture: candidate.premium_capture,
       collateral: candidate.strike * 100,
       breakeven: candidate.breakeven,
-      stock_price: candidate.stock_price,
+      stock_price: stockPrice ?? 0,
       trend_classification: candidate.trend_classification,
-      primary_support: candidate.primary_support,
+      primary_support: primarySupport ?? 0,
       support_status: 'Stable',
       position_status: 'Waiting',
       days_open: 0,
@@ -111,34 +135,42 @@ export function DetailPage({
     <div className="space-y-5">
       <BackButton onClick={() => onNavigate('candidates')} />
 
-      {/* Header */}
+      {/* Header — uses the candidate row's own data, never a static lookup */}
       <div className="rounded-xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-900/50 p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold text-slate-100">{ticker}</h1>
-              <Badge variant={trendColors[tech.trend_classification]} dot>
+              <Badge variant={trendColor} dot>
                 <TrendIcon className="h-3 w-3 inline mr-0.5" />
-                {tech.trend_classification}
+                {displayTrend(candidate.trend_classification)}
               </Badge>
             </div>
-            <p className="text-sm text-slate-400 mt-1">{fund.company_name}</p>
+            <p className="text-sm text-slate-400 mt-1">{candidate.company_name}</p>
             <div className="flex items-center gap-6 mt-4">
               <div>
                 <div className="text-xs text-slate-500">Stock Price</div>
-                <div className="text-xl font-semibold text-slate-100 tabular-nums">${formatNum(tech.stock_price)}</div>
+                <div className={`text-xl font-semibold tabular-nums ${stockPrice ? 'text-slate-100' : 'text-slate-600'}`}>
+                  {displayPrice(stockPrice)}
+                </div>
               </div>
               <div>
                 <div className="text-xs text-slate-500">Primary Support</div>
-                <div className="text-xl font-semibold text-emerald-400 tabular-nums">${formatNum(tech.primary_support)}</div>
+                <div className={`text-xl font-semibold tabular-nums ${primarySupport ? 'text-emerald-400' : 'text-slate-600'}`}>
+                  {displayPrice(primarySupport)}
+                </div>
               </div>
               <div>
                 <div className="text-xs text-slate-500">Secondary Support</div>
-                <div className="text-xl font-semibold text-emerald-400/70 tabular-nums">${formatNum(tech.secondary_support)}</div>
+                <div className={`text-xl font-semibold tabular-nums ${secondarySupport ? 'text-emerald-400/70' : 'text-slate-600'}`}>
+                  {displayPrice(secondarySupport)}
+                </div>
               </div>
               <div>
                 <div className="text-xs text-slate-500">Resistance</div>
-                <div className="text-xl font-semibold text-amber-400 tabular-nums">${formatNum(tech.resistance)}</div>
+                <div className={`text-xl font-semibold tabular-nums ${resistance ? 'text-amber-400' : 'text-slate-600'}`}>
+                  {displayPrice(resistance)}
+                </div>
               </div>
             </div>
           </div>
@@ -154,94 +186,51 @@ export function DetailPage({
         </div>
       </div>
 
+      {!stockPrice && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+          <BarChart3 className="h-4 w-4 shrink-0" />
+          <span>Historical price data was unavailable for {ticker}. Technical indicators and support/resistance levels could not be calculated. Contract discovery and strike/expiration rules were still applied.</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {/* Technical card */}
+        {/* Technical card — shows data from the scan, or Unavailable */}
         <Card title="Technical Analysis" action={<BarChart3 className="h-4 w-4 text-slate-500" />}>
           <div className="p-5">
-            <div className="grid grid-cols-2 gap-x-6">
-              <div>
-                <StatRow label="20-day MA" value={`$${formatNum(tech.ma20)}`} highlight={tech.stock_price > tech.ma20} />
-                <StatRow label="50-day MA" value={`$${formatNum(tech.ma50)}`} highlight={tech.stock_price > tech.ma50} />
-                <StatRow label="200-day MA" value={`$${formatNum(tech.ma200)}`} highlight={tech.stock_price > tech.ma200} />
-                <StatRow
-                  label="RSI (14)"
-                  value={formatNum(tech.rsi, 1)}
-                  highlight={tech.rsi >= 40 && tech.rsi <= 60}
-                />
-              </div>
-              <div>
-                <StatRow label="MACD Line" value={formatNum(tech.macd_line, 3)} />
-                <StatRow label="MACD Signal" value={formatNum(tech.macd_signal, 3)} />
-                <StatRow
-                  label="MACD Hist"
-                  value={formatNum(tech.macd_histogram, 3)}
-                  highlight={tech.macd_histogram > 0}
-                />
-                <StatRow label="Volume Trend" value={tech.volume_trend} />
-              </div>
-            </div>
-            <div className="mt-4 border-t border-slate-800 pt-4">
-              <div className="text-xs text-slate-500 mb-2">Bollinger Bands (20, 2)</div>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-lg bg-slate-800/50 p-3">
-                  <div className="text-xs text-slate-500">Upper</div>
-                  <div className="text-sm font-medium text-slate-200 tabular-nums">${formatNum(tech.bb_upper)}</div>
+            {stockPrice ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <MetricIndicator status={candidate.trend_classification === 'Downtrend' ? 'fail' : 'pass'} />
+                  <span className="text-xs text-slate-500">Trend Classification</span>
                 </div>
-                <div className="rounded-lg bg-slate-800/50 p-3">
-                  <div className="text-xs text-slate-500">Middle</div>
-                  <div className="text-sm font-medium text-slate-200 tabular-nums">${formatNum(tech.bb_middle)}</div>
-                </div>
-                <div className="rounded-lg bg-slate-800/50 p-3">
-                  <div className="text-xs text-slate-500">Lower</div>
-                  <div className="text-sm font-medium text-slate-200 tabular-nums">${formatNum(tech.bb_lower)}</div>
+                <div className="text-sm text-slate-200">{displayTrend(candidate.trend_classification)}</div>
+                <div className="grid grid-cols-2 gap-x-6 border-t border-slate-800 pt-4">
+                  <StatRow label="Primary Support" value={displayPrice(primarySupport)} />
+                  <StatRow label="Secondary Support" value={displayPrice(secondarySupport)} />
+                  <StatRow label="Resistance" value={displayPrice(resistance)} />
                 </div>
               </div>
-            </div>
-            <div className="mt-4 border-t border-slate-800 pt-4">
-              <div className="flex items-center gap-2 mb-2">
-                <MetricIndicator status={tech.trend_classification === 'Downtrend' ? 'fail' : 'pass'} />
-                <span className="text-xs text-slate-500">Trend Classification</span>
+            ) : (
+              <div className="py-8 text-center">
+                <p className="text-sm text-slate-500">Historical data unavailable — technical indicators could not be calculated.</p>
               </div>
-              <div className="text-sm text-slate-200">{tech.trend_classification}</div>
-            </div>
+            )}
           </div>
         </Card>
 
-        {/* Fundamental card */}
-        <Card title="Fundamental Analysis" action={<Building2 className="h-4 w-4 text-slate-500" />}>
+        {/* Fundamental card — uses candidate metadata, not static lookup */}
+        <Card title="Fundamental Snapshot" action={<Building2 className="h-4 w-4 text-slate-500" />}>
           <div className="p-5">
             <div className="grid grid-cols-2 gap-x-6">
-              <div>
-                <StatRow label="Revenue" value={formatCurrency(fund.revenue)} />
-                <StatRow
-                  label="Revenue Growth"
-                  value={formatPct(fund.revenue_growth_pct)}
-                  highlight={fund.revenue_growth_pct > 0}
-                />
-                <StatRow label="Profitability" value={fund.profitability} />
-                <StatRow label="Cash Balance" value={formatCurrency(fund.cash_balance)} />
-                <StatRow label="Debt" value={formatCurrency(fund.debt)} />
-              </div>
-              <div>
-                <StatRow label="Cash Flow" value={fund.cash_flow} />
-                <StatRow label="Liquidity" value={fund.liquidity} />
-                <StatRow label="Outlook" value={fund.outlook} />
-                <StatRow
-                  label="Short Interest"
-                  value={formatPct(fund.short_interest_pct)}
-                  highlight={fund.short_interest_pct < 10}
-                />
-              </div>
+              <StatRow label="Company" value={candidate.company_name} />
+              <StatRow label="Stock Price" value={displayPrice(stockPrice)} />
+              <StatRow label="Trend" value={displayTrend(candidate.trend_classification)} />
+              <StatRow label="Primary Support" value={displayPrice(primarySupport)} />
             </div>
-            <div className="mt-4 space-y-3 border-t border-slate-800 pt-4">
-              <div>
-                <div className="text-xs text-slate-500 mb-1">Recent Developments</div>
-                <p className="text-sm text-slate-300">{fund.recent_developments}</p>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500 mb-1">Risk Factors</div>
-                <p className="text-sm text-slate-300">{fund.risk_factors}</p>
-              </div>
+            <div className="mt-4 border-t border-slate-800 pt-4">
+              <p className="text-xs text-slate-500">
+                Fundamental data is derived from live scan results. Detailed revenue, debt, and cash flow figures require a separate data feed.
+              </p>
             </div>
           </div>
         </Card>
@@ -292,8 +281,14 @@ export function DetailPage({
               <StatRow label="Net CROI" value={formatPct(candidate.net_croi)} highlight={candidate.net_croi >= 3.5} />
               <StatRow label="Premium Capture" value={formatPct(candidate.premium_capture)} />
               <div className="mt-3 border-t border-slate-800 pt-3">
-                <StatRow label="Strike Dist from Stock" value={`${candidate.strike_distance_from_stock}%`} />
-                <StatRow label="Strike Dist from Support" value={`${candidate.strike_distance_from_support}%`} />
+                <StatRow
+                  label="Strike Dist from Stock"
+                  value={candidate.strike_distance_from_stock != null ? `${candidate.strike_distance_from_stock}%` : 'Unavailable'}
+                />
+                <StatRow
+                  label="Strike Dist from Support"
+                  value={candidate.strike_distance_from_support != null ? `${candidate.strike_distance_from_support}%` : 'Unavailable'}
+                />
                 <StatRow label="Recycle Date (120d)" value={recycleDate} />
               </div>
             </div>

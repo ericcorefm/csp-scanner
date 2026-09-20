@@ -13,10 +13,16 @@ import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('candidates');
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
+  const [selectedExpiration, setSelectedExpiration] = useState<string | null>(null);
   const state = useAppState();
 
-  const handleNavigate = (page: Page, ticker?: string) => {
+  const handleNavigate = (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => {
     if (ticker) setSelectedTicker(ticker);
+    if (contract) {
+      setSelectedStrike(contract.strike);
+      setSelectedExpiration(contract.expiration);
+    }
     setCurrentPage(page);
   };
 
@@ -51,7 +57,13 @@ function App() {
         <AnalyzeTickerPage state={state} />
       )}
       {currentPage === 'detail' && selectedTicker && (
-        <DetailPage ticker={selectedTicker} state={state} onNavigate={handleNavigate} />
+        <DetailPage
+          ticker={selectedTicker}
+          strike={selectedStrike}
+          expiration={selectedExpiration}
+          state={state}
+          onNavigate={handleNavigate}
+        />
       )}
       {currentPage === 'detail' && !selectedTicker && (
         <CandidatesPage state={state} onNavigate={handleNavigate} />

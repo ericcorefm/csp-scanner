@@ -34,7 +34,7 @@ export function CandidatesPage({
   onNavigate,
 }: {
   state: AppState;
-  onNavigate: (page: Page, ticker?: string) => void;
+  onNavigate: (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => void;
 }) {
   const [showRejected, setShowRejected] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
@@ -50,6 +50,8 @@ export function CandidatesPage({
     list = [...list].sort((a, b) => {
       let aVal = a[sortKey];
       let bVal = b[sortKey];
+      if (aVal === null || aVal === undefined) aVal = 0;
+      if (bVal === null || bVal === undefined) bVal = 0;
       if (typeof aVal === 'string') aVal = aVal.toLowerCase();
       if (typeof bVal === 'string') bVal = bVal.toLowerCase();
       if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
@@ -220,7 +222,7 @@ export function CandidatesPage({
                 return (
                   <Fragment key={rowKey}>
                     <tr
-                      onClick={() => onNavigate('detail', c.ticker)}
+                      onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
                       className={`cursor-pointer transition-colors ${
                         c.qualified ? 'hover:bg-slate-800/40' : 'opacity-60 hover:bg-slate-800/40'
                       }`}
@@ -232,16 +234,16 @@ export function CandidatesPage({
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">${formatNum(c.stock_price)}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.stock_price != null ? `${formatNum(c.stock_price)}` : <span className="text-slate-600">Unavailable</span>}</td>
                       <td className="px-3 py-2.5">
                         <Badge variant={trendColors[c.trend_classification] || 'neutral'} dot>
                           {c.trend_classification}
                         </Badge>
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">${formatNum(c.primary_support)}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.primary_support != null ? `${formatNum(c.primary_support)}` : <span className="text-slate-600">Unavailable</span>}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-200 font-medium">${formatNum(c.strike)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_stock}%</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support}%</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_stock != null ? `${c.strike_distance_from_stock}%` : <span className="text-slate-600">--</span>}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
                       <td className="px-3 py-2.5 text-slate-400 text-xs whitespace-nowrap">{c.expiration}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.dte}</td>
                       <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>

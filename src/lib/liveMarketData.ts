@@ -78,11 +78,11 @@ export interface TechnicalData {
 export interface AnalyzeTickerResponse {
   success: true;
   ticker: string;
-  stock_price: number;
+  stock_price: number | null;
   trend: string;
-  primary_support: number;
-  secondary_support: number;
-  resistance: number;
+  primary_support: number | null;
+  secondary_support: number | null;
+  resistance: number | null;
   technical_data_available?: boolean;
   technical_warning?: string | null;
   technical?: TechnicalData | null;
@@ -114,10 +114,10 @@ export interface ContractAnalysis {
   premium_capture: number;
   breakeven: number;
   qualified: boolean;
-  pass_fail: { rule: string; pass: boolean }[];
+  pass_fail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
   has_quotes?: boolean;
-  strike_distance_from_stock?: number;
-  strike_distance_from_support?: number;
+  strike_distance_from_stock?: number | null;
+  strike_distance_from_support?: number | null;
 }
 
 

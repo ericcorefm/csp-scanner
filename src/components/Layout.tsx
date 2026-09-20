@@ -22,7 +22,7 @@ export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'se
 interface LayoutProps {
   children: React.ReactNode;
   currentPage: Page;
-  onNavigate: (page: Page) => void;
+  onNavigate: (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => void;
   state: AppState;
 }
 

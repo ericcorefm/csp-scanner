@@ -12,9 +12,10 @@ import {
   TrendingUp,
   Crosshair,
   BarChart3,
+  MinusCircle,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
-import type { AnalyzeTickerResponse, ContractAnalysis, TechnicalData } from '@/lib/liveMarketData';
+import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 
 export function AnalyzeTickerPage({ state }: { state: AppState }) {
@@ -183,11 +184,11 @@ function AnalyzeResult({
         <div className="p-5">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatBox label="Ticker" value={result.ticker} />
-            <StatBox label="Stock Price" value={`$${formatNum(result.stock_price)}`} />
-            <StatBox label="Trend" value={result.trend} />
-            <StatBox label="Primary Support" value={`$${formatNum(result.primary_support)}`} />
-            <StatBox label="Secondary Support" value={`$${formatNum(result.secondary_support)}`} />
-            <StatBox label="Resistance" value={`$${formatNum(result.resistance)}`} />
+            <StatBox label="Stock Price" value={result.stock_price != null ? `${formatNum(result.stock_price)}` : 'Unavailable'} />
+            <StatBox label="Trend" value={result.trend === 'Unavailable' ? 'Unavailable' : result.trend} />
+            <StatBox label="Primary Support" value={result.primary_support != null ? `${formatNum(result.primary_support)}` : 'Unavailable'} />
+            <StatBox label="Secondary Support" value={result.secondary_support != null ? `${formatNum(result.secondary_support)}` : 'Unavailable'} />
+            <StatBox label="Resistance" value={result.resistance != null ? `${formatNum(result.resistance)}` : 'Unavailable'} />
           </div>
         </div>
       </Card>
@@ -232,16 +233,21 @@ function AnalyzeResult({
         <Card title="Rule Check (Best Contract)">
           <div className="p-5">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              {result.best_contract.pass_fail.map((pf, i) => (
-                <div key={i} className="flex items-center gap-2 text-sm">
-                  {pf.pass ? (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-                  ) : (
-                    <XCircle className="h-4 w-4 text-red-400 shrink-0" />
-                  )}
-                  <span className={pf.pass ? 'text-slate-300' : 'text-red-400'}>{pf.rule}</span>
-                </div>
-              ))}
+              {result.best_contract.pass_fail.map((pf, i) => {
+                const isNotEvaluated = pf.status === 'not_evaluated';
+                return (
+                  <div key={i} className="flex items-center gap-2 text-sm">
+                    {isNotEvaluated ? (
+                      <MinusCircle className="h-4 w-4 text-slate-500 shrink-0" />
+                    ) : pf.pass ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                    ) : (
+                      <XCircle className="h-4 w-4 text-red-400 shrink-0" />
+                    )}
+                    <span className={isNotEvaluated ? 'text-slate-500' : pf.pass ? 'text-slate-300' : 'text-red-400'}>{pf.rule}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </Card>

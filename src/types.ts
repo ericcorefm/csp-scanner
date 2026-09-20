@@ -123,7 +123,7 @@ export interface CandidateScan {
   scan_date: string;
   ticker: string;
   company_name: string;
-  stock_price: number;
+  stock_price: number | null;
   strike: number;
   expiration: string;
   dte: number;
@@ -137,7 +137,9 @@ export interface CandidateScan {
   open_interest: number;
   volume_classification: string;
   trend_classification: string;
-  primary_support: number;
+  primary_support: number | null;
+  secondary_support?: number | null;
+  resistance?: number | null;
   suggested_sto: number;
   suggested_btc: number;
   net_profit: number;
@@ -147,8 +149,8 @@ export interface CandidateScan {
   qualified: boolean;
   rejection_reasons: string[];
   strategy_profile_id?: string;
-  strike_distance_from_stock: number;
-  strike_distance_from_support: number;
+  strike_distance_from_stock: number | null;
+  strike_distance_from_support: number | null;
   has_quotes: boolean;
 }
 

@@ -380,9 +380,9 @@ type ScanSymbolResult = {
   // For analyze mode
   analyses?: any[];
   stockPrice?: number;
-  primarySupport?: number;
-  secondarySupport?: number;
-  resistance?: number;
+  primarySupport?: number | null;
+  secondarySupport?: number | null;
+  resistance?: number | null;
   trendClass?: string;
   technicalDataAvailable?: boolean;
   historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
@@ -474,9 +474,9 @@ async function scanSymbol(
     }
   }
 
-  let primarySupport = technicalDataAvailable ? calcPrimarySupport(bars, stockPrice) : 0;
-  let secondarySupport = technicalDataAvailable ? calcSecondarySupport(bars, primarySupport) : 0;
-  let resistance = technicalDataAvailable ? findResistance(bars) : 0;
+  let primarySupport: number | null = technicalDataAvailable ? calcPrimarySupport(bars, stockPrice) : null;
+  let secondarySupport: number | null = technicalDataAvailable ? calcSecondarySupport(bars, primarySupport!) : null;
+  let resistance: number | null = technicalDataAvailable ? findResistance(bars) : null;
   let trendClass = technicalDataAvailable ? trend(bars) : 'Unavailable';
 
   r.stockPrice = stockPrice;
@@ -690,7 +690,7 @@ async function scanSymbol(
       if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
       if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
       if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
-        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
+        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
       }
       // OI and volume rules are non-quote — they come from the contract itself
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
@@ -734,31 +734,40 @@ async function scanSymbol(
     }
 
     if (analyzeMode) {
-      const passFail: { rule: string; pass: boolean }[] = [];
+      const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
       if (!isSectionOff(profile, 'order_strike_enabled')) {
-        passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike });
-        passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: strike < primarySupport });
+        passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
+        if (primarySupport !== null && primarySupport > 0) {
+          const belowSupport = strike < primarySupport;
+          passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: belowSupport, status: belowSupport ? 'pass' : 'fail' });
+        } else {
+          passFail.push({ rule: 'Support rule not evaluated — historical data unavailable', pass: true, status: 'not_evaluated' });
+        }
       }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
-        passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi });
-        passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10 });
+        passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi, status: oi >= profile.min_target_oi ? 'pass' : 'fail' });
+        passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10, status: volume >= 10 ? 'pass' : 'fail' });
       }
       if (!isSectionOff(profile, 'technical_rules_enabled')) {
         if (technicalDataAvailable) {
-          passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
+          const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport);
+          passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
         } else {
-          passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true });
+          passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true, status: 'not_evaluated' });
         }
       }
       if (hasValidQuote && !isSectionOff(profile, 'spread_enabled')) {
-        passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct });
+        const spreadOk = sp <= profile.max_spread_pct;
+        passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: spreadOk, status: spreadOk ? 'pass' : 'fail' });
       }
       if (hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled')) {
-        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: netCroi >= profile.min_net_croi });
-        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pc <= profile.max_premium_capture });
+        const croiOk = netCroi >= profile.min_net_croi;
+        const pcOk = pc <= profile.max_premium_capture;
+        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
+        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
       }
       if (!hasValidQuote) {
-        passFail.push({ rule: 'Quote data — enter manually for CROI / PC', pass: true });
+        passFail.push({ rule: 'Quote data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
       }
       // Massive is used for contract discovery. Missing quote data is not a failure.
       // Quote-dependent rules become pending until the user enters a quote.
@@ -780,8 +789,8 @@ async function scanSymbol(
         breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
         qualified: finalQualified, pass_fail: passFail,
         has_quotes: hasValidQuote,
-        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : 0,
-        strike_distance_from_support: primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : 0,
+        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
+        strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
       });
     } else {
       r.candidates.push({
@@ -794,7 +803,7 @@ async function scanSymbol(
         spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
         iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
         volume, open_interest: oi, volume_classification: volClass(volume),
-        trend_classification: trendClass, primary_support: Number(primarySupport.toFixed(2)),
+        trend_classification: trendClass, primary_support: primarySupport !== null ? Number(primarySupport.toFixed(2)) : null,
         suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
         suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
         net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
@@ -803,9 +812,11 @@ async function scanSymbol(
         breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
         strategy_profile_id: profile.id,
-        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : 0,
-        strike_distance_from_support: primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : 0,
+        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
+        strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
         has_quotes: hasValidQuote,
+        secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
+        resistance: resistance !== null ? Number(resistance.toFixed(2)) : null,
       });
     }
   }
@@ -814,8 +825,8 @@ async function scanSymbol(
   if (analyzeMode && analyses.length > 0) {
     const qualifying = analyses.filter((a) => a.qualified);
     qualifying.sort((a, b) => {
-      const aBelow = a.strike < primarySupport ? 0 : 1;
-      const bBelow = b.strike < primarySupport ? 0 : 1;
+      const aBelow = primarySupport !== null && a.strike < primarySupport ? 0 : 1;
+      const bBelow = primarySupport !== null && b.strike < primarySupport ? 0 : 1;
       if (aBelow !== bBelow) return aBelow - bBelow;
       if (a.spread_pct !== b.spread_pct) return a.spread_pct - b.spread_pct;
       if (a.open_interest !== b.open_interest) return b.open_interest - a.open_interest;
@@ -896,11 +907,11 @@ serve(async (req) => {
       return json({
         success: true,
         ticker,
-        stock_price: Number(result.stockPrice.toFixed(2)),
+        stock_price: result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
         trend: result.trendClass || 'Unknown',
-        primary_support: Number((result.primarySupport || 0).toFixed(2)),
-        secondary_support: Number((result.secondarySupport || 0).toFixed(2)),
-        resistance: Number((result.resistance || 0).toFixed(2)),
+        primary_support: result.primarySupport !== null ? Number(result.primarySupport.toFixed(2)) : null,
+        secondary_support: result.secondarySupport !== null ? Number(result.secondarySupport.toFixed(2)) : null,
+        resistance: result.resistance !== null ? Number(result.resistance.toFixed(2)) : null,
         technical_data_available: Boolean(result.technicalDataAvailable),
         technical_warning: result.technicalDataAvailable ? null : 'Historical price data was unavailable or insufficient; support/trend rules were not used to reject contracts.',
         technical: result.technical || null,
