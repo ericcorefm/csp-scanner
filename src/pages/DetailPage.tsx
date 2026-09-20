@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import {
   TrendingUp, TrendingDown, Minus, ArrowUpRight, BarChart3, Building2,
-  CandlestickChart, Calculator, Target, Plus,
+  CandlestickChart, Calculator, Target, Plus, Check, XCircle,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import { calcBtcOptimization, calcRecycleDate } from '@/lib/calculations';
@@ -297,13 +297,13 @@ export function DetailPage({
             </div>
           </Card>
 
-          {/* BTC Optimization */}
+          {/* BTC Optimization — single best qualifying BTC */}
           <Card title="BTC Optimization" action={<Target className="h-4 w-4 text-slate-500" />}>
             <div className="p-3">
               <div className="text-xs text-slate-500 px-2 py-1">
                 Highest BTC meeting CROI &gt;= {state.activeProfile?.min_net_croi}% and PC &lt;= {state.activeProfile?.max_premium_capture}%
               </div>
-              <div className="overflow-x-auto mt-2">
+              <div className="mt-2">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-slate-500 border-b border-slate-800">
@@ -314,31 +314,31 @@ export function DetailPage({
                       <th className="px-2 py-1.5 text-center">Status</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/40">
-                    {btcTable?.table.slice(0, 25).map((row) => (
-                      <tr
-                        key={row.btc_price}
-                        className={row.is_best ? 'bg-emerald-500/10' : ''}
-                      >
-                        <td className="px-2 py-1.5 tabular-nums text-slate-300">${formatNum(row.btc_price)}</td>
-                        <td className="px-2 py-1.5 tabular-nums text-right text-slate-400">${formatNum(row.net_profit)}</td>
-                        <td className="px-2 py-1.5 tabular-nums text-right">
-                          <span className={row.net_croi >= 3.5 ? 'text-emerald-400' : 'text-slate-500'}>{formatPct(row.net_croi)}</span>
-                        </td>
-                        <td className="px-2 py-1.5 tabular-nums text-right text-slate-400">{formatPct(row.premium_capture)}</td>
-                        <td className="px-2 py-1.5 text-center">
-                          {row.is_best ? (
-                            <Badge variant="success">Best</Badge>
-                          ) : row.status === 'qualifies' ? (
-                            <MetricIndicator status="pass" />
-                          ) : row.status === 'above_pc' ? (
-                            <MetricIndicator status="fail" />
-                          ) : (
-                            <MetricIndicator status="warn" />
-                          )}
+                  <tbody>
+                    {btcTable?.best ? (
+                      <tr className="bg-emerald-500/10">
+                        <td className="px-2 py-2 tabular-nums text-emerald-300 font-medium">${formatNum(btcTable.best.btc_price)}</td>
+                        <td className="px-2 py-2 tabular-nums text-right text-slate-300">${formatNum(btcTable.best.net_profit)}</td>
+                        <td className="px-2 py-2 tabular-nums text-right text-emerald-400">{formatPct(btcTable.best.net_croi)}</td>
+                        <td className="px-2 py-2 tabular-nums text-right text-slate-300">{formatPct(btcTable.best.premium_capture)}</td>
+                        <td className="px-2 py-2 text-center">
+                          <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+                            <Check className="h-3.5 w-3.5" />
+                            Pass
+                          </span>
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      <tr>
+                        <td colSpan={4} className="px-2 py-2 text-center text-slate-500">No qualifying BTC target</td>
+                        <td className="px-2 py-2 text-center">
+                          <span className="inline-flex items-center gap-1 text-red-400 font-medium">
+                            <XCircle className="h-3.5 w-3.5" />
+                            Fail
+                          </span>
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
