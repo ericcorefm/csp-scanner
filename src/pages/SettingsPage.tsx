@@ -434,17 +434,30 @@ export function SettingsPage({ state }: { state: AppState }) {
               </div>
 
               <div className="p-5 space-y-4">
-                {section.fields.map((field) => (
-                  <div key={field.key} className="flex items-center justify-between gap-4">
+                {section.title === 'Expiration' && (() => {
+                  const preferredDates = (profile.preferred_expirations || []).filter(Boolean);
+                  const dteSuppressed = preferredDates.length > 0 && enabled;
+                  return (
+                    <div className={`rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300 ${dteSuppressed ? '' : 'hidden'}`}>
+                      Preferred Expiration Dates is active, so DTE range is ignored.
+                    </div>
+                  );
+                })()}
+                {section.fields.map((field) => {
+                  const preferredDates = (profile.preferred_expirations || []).filter(Boolean);
+                  const dteSuppressed = section.title === 'Expiration' && preferredDates.length > 0 && enabled && (field.key === 'min_dte' || field.key === 'max_dte');
+                  return (
+                  <div key={field.key} className={`flex items-center justify-between gap-4 ${dteSuppressed ? 'opacity-40' : ''}`}>
                     <div className="min-w-0">
-                      <label className={`text-sm ${enabled ? 'text-slate-300' : 'text-slate-500'}`}>{field.label}</label>
+                      <label className={`text-sm ${enabled && !dteSuppressed ? 'text-slate-300' : 'text-slate-500'}`}>{field.label}</label>
                       {field.help && <p className="text-xs text-slate-500 mt-0.5">{field.help}</p>}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      {renderField(field, !enabled)}
+                      {renderField(field, !enabled || dteSuppressed)}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           );

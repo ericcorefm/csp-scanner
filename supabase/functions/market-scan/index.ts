@@ -387,15 +387,21 @@ async function scanSymbol(
   }
 
   // Server-side expiration filter (if Expiration enabled)
+  // When preferred_expirations has dates, skip DTE range server-side so
+  // contracts matching those exact dates aren't excluded. The client-side
+  // filter below handles exact-date matching.
   if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-    const minDte = profile.min_dte ?? 0;
-    const maxDte = profile.max_dte ?? 9999;
-    const minDate = new Date(today);
-    minDate.setDate(minDate.getDate() + minDte);
-    const maxDate = new Date(today);
-    maxDate.setDate(maxDate.getDate() + maxDte);
-    chainParams.set('expiration_date.gte', fmt(minDate));
-    chainParams.set('expiration_date.lte', fmt(maxDate));
+    const preferred = profile.preferred_expirations || [];
+    if (preferred.length === 0) {
+      const minDte = profile.min_dte ?? 0;
+      const maxDte = profile.max_dte ?? 9999;
+      const minDate = new Date(today);
+      minDate.setDate(minDate.getDate() + minDte);
+      const maxDate = new Date(today);
+      maxDate.setDate(maxDate.getDate() + maxDte);
+      chainParams.set('expiration_date.gte', fmt(minDate));
+      chainParams.set('expiration_date.lte', fmt(maxDate));
+    }
   }
 
   const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?${chainParams.toString()}`;
@@ -501,7 +507,10 @@ async function scanSymbol(
     if (verbose) {
       const sampleExp = contracts[0]?.details?.expiration_date;
       console.log(`[VERBOSE] ${symbol} | raw expiration_date sample: ${JSON.stringify(sampleExp)} | type: ${typeof sampleExp}`);
-      console.log(`[VERBOSE] ${symbol} | expiration filter (DTE ${profile.min_dte}-${profile.max_dte}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
+      const filterDesc = preferred.length > 0
+        ? `preferred dates [${preferred.join(', ')}]`
+        : `DTE ${profile.min_dte}-${profile.max_dte}`;
+      console.log(`[VERBOSE] ${symbol} | expiration filter (${filterDesc}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
     }
   }
 
