@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Search, Plus, Trash2, CheckCircle2, XCircle, Loader2, Filter } from 'lucide-react';
+import { Search, Plus, Trash2, CheckCircle2, XCircle, Loader2, Filter, AlertTriangle } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
@@ -149,6 +149,13 @@ function AnalyzeResult({
         <StatBox label="Resistance" value={`$${formatNum(result.resistance)}`} />
       </div>
 
+      {result.technical_warning && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <span>{result.technical_warning}</span>
+        </div>
+      )}
+
       {/* Pass/Fail reasons for best contract */}
       {result.best_contract && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
@@ -227,7 +234,7 @@ function AnalyzeResult({
                 <table className="w-full text-sm">
                   <thead className="border-b border-slate-800 bg-slate-900/40">
                     <tr>
-                      {['Strike', 'Bid', 'Ask', 'Spread %', 'STO', 'BTC', 'CROI %', 'PC %', 'Delta', 'IV %', 'Vol', 'OI'].map((h) => (
+                      {['Strike', 'Expiration', 'DTE', 'Quote Status'].map((h) => (
                         <th key={h} className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
@@ -236,21 +243,9 @@ function AnalyzeResult({
                     {contracts.map((c, i) => (
                       <tr key={i} className="hover:bg-slate-800/40 transition-colors">
                         <td className="px-3 py-2 text-right tabular-nums text-slate-200">${formatNum(c.strike)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">${formatNum(c.bid)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">${formatNum(c.ask)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">
-                          <span className={c.spread_pct <= 5 ? 'text-emerald-400' : c.spread_pct <= 10 ? 'text-amber-400' : 'text-red-400'}>
-                            {formatPct(c.spread_pct)}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-sky-400">${formatNum(c.suggested_sto)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-sky-300">${formatNum(c.suggested_btc)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-emerald-400">{formatPct(c.net_croi)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatPct(c.premium_capture)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{formatNum(c.delta)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{formatNum(c.iv, 0)}%</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.volume}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.open_interest.toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.expiration}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.dte}</td>
+                        <td className="px-3 py-2 text-right text-amber-300">{c.has_quotes ? 'Quote Available' : 'Enter Quote'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -290,27 +285,14 @@ function AnalyzeResult({
 
 function BestContractDetails({ contract }: { contract: ContractAnalysis }) {
   const rows: { label: string; value: string; highlight?: boolean }[] = [
-    { label: 'Strike', value: `$${formatNum(contract.strike)}` },
+    { label: 'Strike', value: `$${formatNum(contract.strike)}`, highlight: true },
     { label: 'Expiration', value: contract.expiration },
     { label: 'DTE', value: String(contract.dte) },
-    { label: 'Bid', value: `$${formatNum(contract.bid)}` },
-    { label: 'Ask', value: `$${formatNum(contract.ask)}` },
-    { label: 'Mid', value: `$${formatNum(contract.mid)}` },
-    { label: 'Spread %', value: formatPct(contract.spread_pct) },
-    { label: 'Suggested STO Limit', value: `$${formatNum(contract.suggested_sto)}`, highlight: true },
-    { label: 'Suggested BTC Limit', value: `$${formatNum(contract.suggested_btc)}`, highlight: true },
-    { label: 'Net Profit', value: `$${formatNum(contract.net_profit)}` },
-    { label: 'Net CROI', value: formatPct(contract.net_croi), highlight: true },
-    { label: 'Premium Capture', value: formatPct(contract.premium_capture) },
-    { label: 'Breakeven', value: `$${formatNum(contract.breakeven)}` },
-    { label: 'IV', value: `${formatNum(contract.iv, 0)}%` },
-    { label: 'Delta', value: formatNum(contract.delta) },
-    { label: 'Volume', value: String(contract.volume) },
-    { label: 'Open Interest', value: contract.open_interest.toLocaleString() },
+    { label: 'Quote Status', value: contract.has_quotes ? 'Quote Available' : 'Enter Quote' },
   ];
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       {rows.map((r) => (
         <div key={r.label} className="rounded-lg bg-slate-800/50 px-3 py-2">
           <div className="text-xs text-slate-500">{r.label}</div>

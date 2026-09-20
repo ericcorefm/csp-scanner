@@ -16,7 +16,6 @@ import type { ScanUniverseEntry } from '@/types';
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
   name: 'My CSP Default',
   is_default: true,
-  order_type: 'LIMIT',
   max_strike: 25,
   min_net_croi: 3.5,
   preferred_croi_max: 4.0,
@@ -39,10 +38,8 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   exclude_existing_positions: true,
   exclude_downtrend_no_support: true,
   min_dte: 365,
-  max_dte: 550,
   minimum_stock_price: null,
   maximum_stock_price: null,
-  preferred_strikes: [],
   order_strike_enabled: true,
   expiration_enabled: true,
   croi_pc_enabled: true,

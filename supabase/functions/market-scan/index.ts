@@ -22,7 +22,6 @@ type Profile = {
   id: string;
   max_strike: number;
   min_dte: number;
-  max_dte: number;
   minimum_stock_price: number | null;
   maximum_stock_price: number | null;
   min_net_croi: number;
@@ -325,6 +324,9 @@ type ScanSymbolResult = {
   secondarySupport?: number;
   resistance?: number;
   trendClass?: string;
+  technicalDataAvailable?: boolean;
+  historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
+  historyError?: string;
 };
 
 async function scanSymbol(
@@ -350,24 +352,55 @@ async function scanSymbol(
 
   const start = new Date(today); start.setDate(start.getDate() - 420);
 
-  // Step 1: Stock aggregates
-  const histPath = `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${fmt(start)}/${fmt(today)}`;
+  // Step 1: Stock aggregates. Analyze Ticker must not fail just because the
+  // history endpoint is temporarily empty. Retry with previous-close data and,
+  // if needed, continue with contract discovery while marking technical data unavailable.
+  const histPath = `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
   const histResult = await massiveFetch(histPath, apiKey, symbol, 'stock_aggregates');
-  if (!histResult.ok) return r;
 
-  const bars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
-    date: new Date(b.t).toISOString().slice(0, 10),
-    open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
-  }));
-  if (!bars.length) return r;
-  const stockPrice = Number(bars.at(-1)!.close);
-  if (!stockPrice) return r;
+  let bars: HistoryBar[] = [];
+  if (histResult.ok) {
+    bars = (histResult.data?.results || []).map((b: any) => ({
+      date: new Date(b.t).toISOString().slice(0, 10),
+      open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
+    })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+  } else {
+    r.historyStatus = 'error';
+    r.historyError = `HTTP ${histResult.status}: ${histResult.body}`;
+  }
 
-  // Stock price filter (if Order & Strike section enabled)
+  // Fallback to Massive previous-close endpoint if the daily history request is empty.
+  // This preserves Analyze Ticker contract discovery and stock-price filtering even
+  // when a historical aggregate request is unavailable. Technical/support fields are
+  // only considered available when sufficient daily history exists.
+  if (!bars.length) {
+    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(symbol)}/prev?adjusted=true`;
+    const prevResult = await massiveFetch(prevPath, apiKey, symbol, 'stock_previous_close');
+    if (prevResult.ok) {
+      bars = (prevResult.data?.results || []).map((b: any) => ({
+        date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
+        open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
+      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+      if (bars.length) r.historyStatus = 'fallback';
+    } else if (!r.historyError) {
+      r.historyStatus = 'error';
+      r.historyError = `HTTP ${prevResult.status}: ${prevResult.body}`;
+    }
+  } else {
+    r.historyStatus = 'success';
+  }
+
+  let stockPrice = bars.length ? Number(bars.at(-1)!.close) : 0;
+  const technicalDataAvailable = bars.length >= 20;
+  r.technicalDataAvailable = technicalDataAvailable;
+
+  // Stock price filter (if Order & Strike section enabled). If even the previous
+  // close is unavailable, defer this filter until an underlying price can be read
+  // from the option-chain snapshot.
   // This filters the underlying stock price, independent of put strike price.
   // A $71 stock with max put strike $25 is still allowed — stock price and
   // strike price are separate filters.
-  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+  if (stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
     if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
       if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} < minimum ${profile.minimum_stock_price}, skipping symbol`);
       r.chainStatus = 'no_options';
@@ -380,10 +413,10 @@ async function scanSymbol(
     }
   }
 
-  const primarySupport = calcPrimarySupport(bars, stockPrice);
-  const secondarySupport = calcSecondarySupport(bars, primarySupport);
-  const resistance = findResistance(bars);
-  const trendClass = trend(bars);
+  let primarySupport = technicalDataAvailable ? calcPrimarySupport(bars, stockPrice) : 0;
+  let secondarySupport = technicalDataAvailable ? calcSecondarySupport(bars, primarySupport) : 0;
+  let resistance = technicalDataAvailable ? findResistance(bars) : 0;
+  let trendClass = technicalDataAvailable ? trend(bars) : 'Unavailable';
 
   r.stockPrice = stockPrice;
   r.primarySupport = primarySupport;
@@ -465,6 +498,30 @@ async function scanSymbol(
   // Determine chain status
   const contracts = allRawContracts.filter((c: any) => c?.details?.contract_type === 'put');
   r.putsReturned = contracts.length;
+
+  // Final stock-price fallback from the option snapshot's underlying_asset object.
+  // This is contract-discovery data, not an invented price.
+  if (!stockPrice && allRawContracts.length) {
+    const underlyingPrice = allRawContracts
+      .map((c: any) => Number(c?.underlying_asset?.price || c?.underlying_asset?.value || 0))
+      .find((v: number) => Number.isFinite(v) && v > 0) || 0;
+    if (underlyingPrice > 0) {
+      stockPrice = underlyingPrice;
+      r.stockPrice = stockPrice;
+    }
+  }
+
+  // Apply deferred underlying-price filters after all real price fallbacks were tried.
+  if (stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+      r.chainStatus = 'no_options';
+      return r;
+    }
+    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+      r.chainStatus = 'no_options';
+      return r;
+    }
+  }
 
   if (chainError) {
     if (chainError.status === 401 || chainError.status === 403) r.chainStatus = 'unauthorized';
@@ -551,7 +608,7 @@ async function scanSymbol(
     if (!noFilterMode) {
       if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
       if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
-      if (!isSectionOff(profile, 'technical_rules_enabled')) {
+      if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
         if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) reasons.push('Downtrend without support');
       }
       // OI and volume rules are non-quote — they come from the contract itself
@@ -606,7 +663,11 @@ async function scanSymbol(
         passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10 });
       }
       if (!isSectionOff(profile, 'technical_rules_enabled')) {
-        passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
+        if (technicalDataAvailable) {
+          passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && strike >= primarySupport) });
+        } else {
+          passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true });
+        }
       }
       if (hasValidQuote && !isSectionOff(profile, 'spread_enabled')) {
         passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: sp <= profile.max_spread_pct });
@@ -616,9 +677,11 @@ async function scanSymbol(
         passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pc <= profile.max_premium_capture });
       }
       if (!hasValidQuote) {
-        passFail.push({ rule: 'Quote data — enter manually', pass: false });
+        passFail.push({ rule: 'Quote data — enter manually for CROI / PC', pass: true });
       }
-      const finalQualified = passFail.every((pf) => pf.pass);
+      // Massive is used for contract discovery. Missing quote data is not a failure.
+      // Quote-dependent rules become pending until the user enters a quote.
+      const finalQualified = reasons.length === 0;
 
       analyses.push({
         strike, expiration, dte,
@@ -657,8 +720,8 @@ async function scanSymbol(
         breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
         strategy_profile_id: profile.id,
-        strike_distance_from_stock: Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)),
-        strike_distance_from_support: Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)),
+        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : 0,
+        strike_distance_from_support: primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : 0,
         has_quotes: hasValidQuote,
       });
     }
@@ -731,8 +794,14 @@ serve(async (req) => {
         });
       }
 
-      if (!result.stockPrice) {
-        return json({ success: false, error: `No price history returned for ${ticker}` });
+      if (!result.stockPrice && result.putsReturned === 0) {
+        return json({
+          success: false,
+          error: `No usable stock price or put contracts returned for ${ticker}`,
+          stage: 'stock_history_and_contract_discovery',
+          history_status: result.historyStatus || 'empty',
+          history_error: result.historyError || null,
+        });
       }
 
       const analyses = result.analyses || [];
@@ -749,6 +818,8 @@ serve(async (req) => {
         primary_support: Number((result.primarySupport || 0).toFixed(2)),
         secondary_support: Number((result.secondarySupport || 0).toFixed(2)),
         resistance: Number((result.resistance || 0).toFixed(2)),
+        technical_data_available: Boolean(result.technicalDataAvailable),
+        technical_warning: result.technicalDataAvailable ? null : 'Historical price data was unavailable or insufficient; support/trend rules were not used to reject contracts.',
         qualifies: qualifying.length > 0,
         best_contract: bestContract,
         other_qualifying_contracts: qualifying.slice(1),

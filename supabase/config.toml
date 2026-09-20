@@ -1,5 +1,3 @@
 [functions.market-scan]
 verify_jwt = false
 
-[functions.analyze-ticker]
-verify_jwt = false

@@ -2,7 +2,6 @@ export interface StrategyProfile {
   id: string;
   name: string;
   is_default: boolean;
-  order_type: string;
   max_strike: number;
   min_net_croi: number;
   preferred_croi_max: number;
@@ -25,10 +24,8 @@ export interface StrategyProfile {
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
   min_dte: number;
-  max_dte: number;
   minimum_stock_price: number | null;
   maximum_stock_price: number | null;
-  preferred_strikes: number[];
   order_strike_enabled: boolean;
   expiration_enabled: boolean;
   croi_pc_enabled: boolean;

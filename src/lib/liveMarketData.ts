@@ -68,6 +68,8 @@ export interface AnalyzeTickerResponse {
   primary_support: number;
   secondary_support: number;
   resistance: number;
+  technical_data_available?: boolean;
+  technical_warning?: string | null;
   qualifies: boolean;
   best_contract: ContractAnalysis | null;
   other_qualifying_contracts: ContractAnalysis[];
@@ -97,6 +99,7 @@ export interface ContractAnalysis {
   breakeven: number;
   qualified: boolean;
   pass_fail: { rule: string; pass: boolean }[];
+  has_quotes?: boolean;
 }
 
 
