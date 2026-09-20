@@ -30,6 +30,7 @@ export interface StrategyProfile {
   order_strike_enabled: boolean;
   expiration_enabled: boolean;
   croi_pc_enabled: boolean;
+  filter_strikes_croi: boolean;
   cycle_liquidity_enabled: boolean;
   spread_enabled: boolean;
   short_interest_enabled: boolean;

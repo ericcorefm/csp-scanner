@@ -39,6 +39,7 @@ type Profile = {
   order_strike_enabled: boolean;
   expiration_enabled: boolean;
   croi_pc_enabled: boolean;
+  filter_strikes_croi: boolean;
   cycle_liquidity_enabled: boolean;
   spread_enabled: boolean;
   short_interest_enabled: boolean;
@@ -772,6 +773,7 @@ async function scanSymbol(
 
     // Financial calculations only when real bid/ask exist
     let sp = 0, stoPrice = 0, btcPrice = 0, netProfit = 0, netCroi = 0, pc = 0, breakeven = 0;
+    let croiOptimized = false;
     if (hasValidQuote) {
       sp = spreadPct(bid!, ask!);
       stoPrice = mid;
@@ -781,14 +783,24 @@ async function scanSymbol(
         netProfit = best.netProfit;
         netCroi = best.netCroi;
         pc = best.pc;
+        croiOptimized = true;
       }
       breakeven = strike - mid;
+
+      // Filter Strikes by CROI: when ON and a quote is available, reject strikes
+      // where no BTC exit satisfies both Minimum Net CROI and Maximum Premium Capture.
+      // preferred_croi_max is informational only — never used to reject.
+      if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
+        if (!croiOptimized) {
+          reasons.push('CROI too low');
+          if (qualified) { r.qualified--; r.rejected++; }
+        }
+      }
 
       // Spread rule only applies when a quote exists
       if (!noFilterMode && !isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) {
         if (!reasons.includes('Spread too wide')) {
           reasons.push('Spread too wide');
-          // Re-evaluate qualified status
           if (qualified) { r.qualified--; r.rejected++; }
         }
       }
@@ -830,10 +842,18 @@ async function scanSymbol(
         passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: spreadOk, status: spreadOk ? 'pass' : 'fail' });
       }
       if (hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled')) {
-        const croiOk = netCroi >= profile.min_net_croi;
-        const pcOk = pc <= profile.max_premium_capture;
-        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
-        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
+        if (profile.filter_strikes_croi) {
+          const croiOk = croiOptimized;
+          passFail.push({ rule: `Filter Strikes by CROI: Net CROI >= ${profile.min_net_croi}% & PC <= ${profile.max_premium_capture}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
+        } else {
+          const croiOk = netCroi >= profile.min_net_croi;
+          const pcOk = pc <= profile.max_premium_capture;
+          passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
+          passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
+        }
+      }
+      if (!hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
+        passFail.push({ rule: 'Filter Strikes by CROI — Quote required', pass: true, status: 'not_evaluated' });
       }
       if (!hasValidQuote) {
         passFail.push({ rule: 'Quote data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });

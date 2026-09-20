@@ -42,6 +42,7 @@ const sections: SectionDef[] = [
     title: 'CROI & Premium Capture',
     enabledKey: 'croi_pc_enabled',
     fields: [
+      { key: 'filter_strikes_croi', label: 'Filter Strikes by CROI', type: 'boolean' },
       { key: 'min_net_croi', label: 'Minimum Net CROI', type: 'number', unit: '%', step: '0.1' },
       { key: 'preferred_croi_max', label: 'Preferred CROI Maximum', type: 'number', unit: '%', step: '0.1' },
       { key: 'max_premium_capture', label: 'Maximum Premium Capture', type: 'number', unit: '%', step: '1' },
