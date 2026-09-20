@@ -236,11 +236,15 @@ export function CandidatesPage({
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.stock_price != null ? `${formatNum(c.stock_price)}` : <span className="text-slate-600">Unavailable</span>}</td>
                       <td className="px-3 py-2.5">
-                        <Badge variant={trendColors[c.trend_classification] || 'neutral'} dot>
-                          {c.trend_classification}
-                        </Badge>
+                        {c.trend_classification === 'Pending History' ? (
+                          <span className="text-xs text-sky-400">Pending History</span>
+                        ) : (
+                          <Badge variant={trendColors[c.trend_classification] || 'neutral'} dot>
+                            {c.trend_classification}
+                          </Badge>
+                        )}
                       </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.primary_support != null ? `${formatNum(c.primary_support)}` : <span className="text-slate-600">Unavailable</span>}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.primary_support != null ? `${formatNum(c.primary_support)}` : c.trend_classification === 'Pending History' ? <span className="text-slate-600">Pending</span> : <span className="text-slate-600">Unavailable</span>}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-200 font-medium">${formatNum(c.strike)}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_stock != null ? `${c.strike_distance_from_stock}%` : <span className="text-slate-600">--</span>}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>

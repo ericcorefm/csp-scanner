@@ -211,17 +211,17 @@ function AnalyzeResult({
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatBox label="Ticker" value={result.ticker} />
             <StatBox label="Stock Price" value={result.stock_price != null ? `${formatNum(result.stock_price)}` : 'Unavailable'} sub={result.stock_source && result.stock_source !== 'daily_aggregates' && result.stock_source !== 'none' ? 'Latest daily close' : undefined} />
-            <StatBox label="Trend" value={result.trend === 'Unavailable' ? 'Unavailable' : result.trend} />
-            <StatBox label="Primary Support" value={result.primary_support != null ? `${formatNum(result.primary_support)}` : 'Unavailable'} />
-            <StatBox label="Secondary Support" value={result.secondary_support != null ? `${formatNum(result.secondary_support)}` : 'Unavailable'} />
-            <StatBox label="Resistance" value={result.resistance != null ? `${formatNum(result.resistance)}` : 'Unavailable'} />
+            <StatBox label="Trend" value={result.trend === 'Pending History' ? 'Pending History' : result.trend === 'Unavailable' ? 'Unavailable' : result.trend} />
+            <StatBox label="Primary Support" value={result.primary_support != null ? `${formatNum(result.primary_support)}` : result.trend === 'Pending History' ? 'Pending History' : 'Unavailable'} />
+            <StatBox label="Secondary Support" value={result.secondary_support != null ? `${formatNum(result.secondary_support)}` : result.trend === 'Pending History' ? 'Pending History' : 'Unavailable'} />
+            <StatBox label="Resistance" value={result.resistance != null ? `${formatNum(result.resistance)}` : result.trend === 'Pending History' ? 'Pending History' : 'Unavailable'} />
           </div>
         </div>
       </Card>
 
       {result.technical_warning && (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
-          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+        <div className={`flex items-start gap-2 rounded-lg border px-4 py-3 text-sm ${result.trend === 'Pending History' ? 'border-sky-500/30 bg-sky-500/5 text-sky-300' : 'border-amber-500/30 bg-amber-500/5 text-amber-300'}`}>
+          {result.trend === 'Pending History' ? <BarChart3 className="h-4 w-4 shrink-0 mt-0.5" /> : <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />}
           <span>{result.technical_warning}</span>
         </div>
       )}
