@@ -167,6 +167,66 @@ function findResistance(bars: HistoryBar[]): number {
   return max;
 }
 
+function ema(values: number[], period: number): number {
+  if (values.length === 0) return 0;
+  const k = 2 / (period + 1);
+  let emaPrev = values[0];
+  for (let i = 1; i < values.length; i++) {
+    emaPrev = values[i] * k + emaPrev * (1 - k);
+  }
+  return emaPrev;
+}
+
+function macd(values: number[]): { macd: number; signal: number; histogram: number } {
+  if (values.length < 26) return { macd: 0, signal: 0, histogram: 0 };
+  const ema12Arr: number[] = [];
+  const ema26Arr: number[] = [];
+  const k12 = 2 / 13, k26 = 2 / 27;
+  let e12 = values[0], e26 = values[0];
+  for (let i = 0; i < values.length; i++) {
+    e12 = i === 0 ? values[0] : values[i] * k12 + e12 * (1 - k12);
+    e26 = i === 0 ? values[0] : values[i] * k26 + e26 * (1 - k26);
+    ema12Arr.push(e12);
+    ema26Arr.push(e26);
+  }
+  const macdLine = ema12Arr.map((v, i) => v - ema26Arr[i]);
+  const signalLine = ema(macdLine.slice(-Math.min(macdLine.length, 35)), 9);
+  const currentMacd = macdLine.at(-1) || 0;
+  return { macd: Number(currentMacd.toFixed(4)), signal: Number(signalLine.toFixed(4)), histogram: Number((currentMacd - signalLine).toFixed(4)) };
+}
+
+function bollingerBands(values: number[], period = 20, mult = 2): { upper: number; middle: number; lower: number; position: string } {
+  if (values.length < period) return { upper: 0, middle: 0, lower: 0, position: 'Insufficient data' };
+  const slice = values.slice(-period);
+  const mid = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((a, b) => a + (b - mid) ** 2, 0) / period;
+  const sd = Math.sqrt(variance);
+  const upper = mid + mult * sd;
+  const lower = mid - mult * sd;
+  const price = values.at(-1) || 0;
+  let position = 'Middle';
+  if (price >= upper) position = 'Above Upper';
+  else if (price <= lower) position = 'Below Lower';
+  else if (price > mid) position = 'Upper Half';
+  else position = 'Lower Half';
+  return { upper: Number(upper.toFixed(2)), middle: Number(mid.toFixed(2)), lower: Number(lower.toFixed(2)), position };
+}
+
+function volumeTrend(bars: HistoryBar[]): string {
+  if (bars.length < 20) return 'Insufficient data';
+  const recent = bars.slice(-10).map((b) => b.volume);
+  const prior = bars.slice(-20, -10).map((b) => b.volume);
+  const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const priorAvg = prior.reduce((a, b) => a + b, 0) / prior.length;
+  if (priorAvg === 0) return 'No prior volume';
+  const ratio = recentAvg / priorAvg;
+  if (ratio >= 1.5) return 'Surging';
+  if (ratio >= 1.1) return 'Increasing';
+  if (ratio <= 0.5) return 'Fading';
+  if (ratio <= 0.9) return 'Declining';
+  return 'Stable';
+}
+
 function trend(bars: HistoryBar[]) {
   const closes = bars.map((b) => b.close);
   const price = closes.at(-1) || 0;
@@ -327,6 +387,7 @@ type ScanSymbolResult = {
   technicalDataAvailable?: boolean;
   historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
   historyError?: string;
+  technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
 };
 
 async function scanSymbol(
@@ -423,6 +484,26 @@ async function scanSymbol(
   r.secondarySupport = secondarySupport;
   r.resistance = resistance;
   r.trendClass = trendClass;
+
+  if (technicalDataAvailable) {
+    const closes = bars.map((b) => b.close);
+    const m = macd(closes);
+    const bb = bollingerBands(closes);
+    r.technical = {
+      rsi: Number(rsi(closes).toFixed(1)),
+      ma20: Number(sma(closes, 20).toFixed(2)),
+      ma50: Number(sma(closes, 50).toFixed(2)),
+      ma200: Number(sma(closes, 200).toFixed(2)),
+      macd: m.macd,
+      macd_signal: m.signal,
+      macd_histogram: m.histogram,
+      bb_upper: bb.upper,
+      bb_middle: bb.middle,
+      bb_lower: bb.lower,
+      bb_position: bb.position,
+      volume_trend: volumeTrend(bars),
+    };
+  }
 
   // Step 2: Options chain — build URL with server-side filters to reduce pages
   const chainParams = new URLSearchParams();
@@ -699,6 +780,8 @@ async function scanSymbol(
         breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
         qualified: finalQualified, pass_fail: passFail,
         has_quotes: hasValidQuote,
+        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : 0,
+        strike_distance_from_support: primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : 0,
       });
     } else {
       r.candidates.push({
@@ -820,6 +903,7 @@ serve(async (req) => {
         resistance: Number((result.resistance || 0).toFixed(2)),
         technical_data_available: Boolean(result.technicalDataAvailable),
         technical_warning: result.technicalDataAvailable ? null : 'Historical price data was unavailable or insufficient; support/trend rules were not used to reject contracts.',
+        technical: result.technical || null,
         qualifies: qualifying.length > 0,
         best_contract: bestContract,
         other_qualifying_contracts: qualifying.slice(1),

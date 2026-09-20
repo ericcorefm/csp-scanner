@@ -11,12 +11,13 @@ import {
   ChevronLeft,
   Menu,
   X,
+  Search,
   Globe,
 } from 'lucide-react';
 import type { AppState } from '@/lib/store';
 import { Badge } from '@/components/ui';
 
-export type Page = 'candidates' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
+export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -27,6 +28,7 @@ interface LayoutProps {
 
 const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'candidates', label: "Today's Candidates", icon: ScanLine },
+  { id: 'analyze', label: 'Analyze Ticker', icon: Search },
   { id: 'universe', label: 'Scan Universe', icon: Globe },
   { id: 'open', label: 'Open Positions', icon: FolderOpen },
   { id: 'closed', label: 'Closed Positions', icon: CheckCircle2 },

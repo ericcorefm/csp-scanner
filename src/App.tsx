@@ -8,6 +8,7 @@ import { ClosedPositionsPage } from '@/pages/ClosedPositionsPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { DailySummaryPage } from '@/pages/DailySummaryPage';
 import { ScanUniversePage } from '@/pages/ScanUniversePage';
+import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('candidates');
@@ -45,6 +46,9 @@ function App() {
     <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state}>
       {currentPage === 'candidates' && (
         <CandidatesPage state={state} onNavigate={handleNavigate} />
+      )}
+      {currentPage === 'analyze' && (
+        <AnalyzeTickerPage state={state} />
       )}
       {currentPage === 'detail' && selectedTicker && (
         <DetailPage ticker={selectedTicker} state={state} onNavigate={handleNavigate} />

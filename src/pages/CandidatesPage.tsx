@@ -4,7 +4,6 @@ import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
-import { AnalyzeTickerSection } from '@/components/AnalyzeTickerSection';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
@@ -130,8 +129,6 @@ export function CandidatesPage({
           </div>
         </div>
       )}
-
-      <AnalyzeTickerSection state={state} />
 
       {/* Scan Mode Selector */}
       <div className="flex flex-wrap items-center gap-4">

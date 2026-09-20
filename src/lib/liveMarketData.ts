@@ -60,6 +60,21 @@ function formatMassiveError(d: MassiveApiError): string {
   return `Massive ${symbol}${stage} HTTP ${status}:\n${body}`;
 }
 
+export interface TechnicalData {
+  rsi: number;
+  ma20: number;
+  ma50: number;
+  ma200: number;
+  macd: number;
+  macd_signal: number;
+  macd_histogram: number;
+  bb_upper: number;
+  bb_middle: number;
+  bb_lower: number;
+  bb_position: string;
+  volume_trend: string;
+}
+
 export interface AnalyzeTickerResponse {
   success: true;
   ticker: string;
@@ -70,6 +85,7 @@ export interface AnalyzeTickerResponse {
   resistance: number;
   technical_data_available?: boolean;
   technical_warning?: string | null;
+  technical?: TechnicalData | null;
   qualifies: boolean;
   best_contract: ContractAnalysis | null;
   other_qualifying_contracts: ContractAnalysis[];
@@ -100,6 +116,8 @@ export interface ContractAnalysis {
   qualified: boolean;
   pass_fail: { rule: string; pass: boolean }[];
   has_quotes?: boolean;
+  strike_distance_from_stock?: number;
+  strike_distance_from_support?: number;
 }
 
 
