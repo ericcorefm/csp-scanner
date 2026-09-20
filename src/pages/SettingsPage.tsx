@@ -29,6 +29,7 @@ const sections: SectionDef[] = [
       { key: 'minimum_stock_price', label: 'Minimum Stock Price', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no minimum stock price.' },
       { key: 'maximum_stock_price', label: 'Maximum Stock Price', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no maximum stock price.' },
       { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5' },
+      { key: 'max_strikes_per_ticker', label: 'Max Strikes Per Ticker', type: 'integer', help: 'Maximum number of candidate strikes returned per ticker in scan results.' },
     ],
   },
   {
@@ -346,7 +347,7 @@ export function SettingsPage({ state }: { state: AppState }) {
             {state.profiles.length > 1 && !profile.is_default && (
               <button
                 onClick={() => state.deleteProfile(profile.id)}
-                className="flex items-center gap-2 rounded-lg border border-red-900/50 px-3 py-2 text-sm text-red-400 hover:bg-red-900/20 transition-colors"
+                className="flex items-center gap-2 rounded-lg border border-red-900/50 px-4 py-2 text-sm text-red-400 hover:bg-red-900/20 transition-colors"
               >
                 <Trash2 className="h-4 w-4" />
               </button>

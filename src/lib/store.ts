@@ -17,6 +17,7 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   name: 'My CSP Default',
   is_default: true,
   max_strike: 25,
+  max_strikes_per_ticker: 1,
   min_net_croi: 3.5,
   preferred_croi_max: 4.0,
   max_premium_capture: 25,
