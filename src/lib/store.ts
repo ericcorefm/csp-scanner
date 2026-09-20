@@ -245,8 +245,8 @@ export function useAppState() {
         setRawSample(live.raw_sample || null);
       } catch (liveError) {
         const message = liveError instanceof Error
-          ? `Massive API error: ${liveError.message}`
-          : 'Massive API error: scan failed.';
+          ? `Barchart API error: ${liveError.message}`
+          : 'Barchart API error: scan failed.';
         setScanError(message);
         setScanning(false);
         return;
