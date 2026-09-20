@@ -38,7 +38,6 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   exclude_existing_positions: true,
   exclude_downtrend_no_support: true,
   minimum_support_distance_pct: 15,
-  maximum_support_distance_pct: 50,
   min_dte: 365,
   minimum_stock_price: null,
   maximum_stock_price: null,
@@ -245,8 +244,8 @@ export function useAppState() {
         setRawSample(live.raw_sample || null);
       } catch (liveError) {
         const message = liveError instanceof Error
-          ? `Barchart API error: ${liveError.message}`
-          : 'Barchart API error: scan failed.';
+          ? `Massive API error: ${liveError.message}`
+          : 'Massive API error: scan failed.';
         setScanError(message);
         setScanning(false);
         return;

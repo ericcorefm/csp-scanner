@@ -1,9 +1,9 @@
 // Supabase Edge Function: market-scan
-// Requires secret: BARCHART_API_KEY
+// Requires secret: MASSIVE_API_KEY
 // Modes:
-//   "discovery" — scan broad universe via Barchart getOptionsScreener
-//   "universe"  — scan user's enabled scan_universe tickers via getEquityOptions
-//   "analyze"   — deep-analyze a single ticker
+//   "discovery" — scan broad universe from market_universe table
+//   "universe"  — scan user's enabled scan_universe tickers
+//   "analyze"   — deep-analyze a single ticker (replaces analyze-ticker)
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
@@ -13,10 +13,10 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
 
-const BARCHART_BASE = 'https://ondemand.websol.barchart.com';
-const MAX_SCREENER_PAGES = 10;
+const MASSIVE_API = 'https://api.massive.com';
+const MAX_CHAIN_PAGES = 10;
+const MAX_DISCOVERY_SYMBOLS = 250;
 const MAX_CANDIDATES = 50;
-const MAX_HISTORY_TICKERS = 4;
 
 type Profile = {
   id: string;
@@ -36,7 +36,6 @@ type Profile = {
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
   minimum_support_distance_pct: number;
-  maximum_support_distance_pct: number;
   order_strike_enabled: boolean;
   expiration_enabled: boolean;
   croi_pc_enabled: boolean;
@@ -58,56 +57,42 @@ function json(body: unknown, status = 200) {
   });
 }
 
-// ── Barchart API fetch helper ──
-async function barchartFetch(
-  endpoint: string,
+async function massiveFetch(
+  path: string,
   apiKey: string,
-  params: Record<string, string>,
   symbol: string,
   stage: string,
 ): Promise<{ ok: true; data: any } | { ok: false; status: number; body: string }> {
-  const url = new URL(`${BARCHART_BASE}/${endpoint}`);
-  url.searchParams.set('apikey', apiKey);
-  for (const [k, v] of Object.entries(params)) {
-    url.searchParams.set(k, v);
-  }
+  const url = `${MASSIVE_API}${path}`;
   const ts = new Date().toISOString();
-  console.log(`[Barchart] ${symbol} | stage=${stage} | GET ${endpoint} | ts=${ts}`);
+  console.log(`[Massive] ${symbol} | stage=${stage} | GET ${url} | ts=${ts}`);
 
   let response: Response;
   try {
-    response = await fetch(url.toString(), {
-      headers: { Accept: 'application/json' },
+    response = await fetch(url, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` },
     });
   } catch (networkErr) {
     const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
-    console.error(`[Barchart] ${symbol} | stage=${stage} | NETWORK ERROR: ${msg}`);
+    console.error(`[Massive] ${symbol} | stage=${stage} | NETWORK ERROR: ${msg}`);
     return { ok: false, status: 0, body: `Network error: ${msg}` };
   }
 
   if (!response.ok) {
     const bodyText = await response.text();
     const truncated = bodyText.slice(0, 500);
-    console.error(`[Barchart] ${symbol} | stage=${stage} | HTTP ${response.status} | body: ${truncated}`);
+    console.error(`[Massive] ${symbol} | stage=${stage} | HTTP ${response.status} | body: ${truncated}`);
     return { ok: false, status: response.status, body: truncated || response.statusText };
   }
 
-  console.log(`[Barchart] ${symbol} | stage=${stage} | HTTP ${response.status} | OK`);
+  console.log(`[Massive] ${symbol} | stage=${stage} | HTTP ${response.status} | OK`);
 
   try {
     const data = await response.json();
-    const bcStatus = data?.status;
-    if (bcStatus && bcStatus.code && bcStatus.code !== 200) {
-      console.error(`[Barchart] ${symbol} | stage=${stage} | Barchart status ${bcStatus.code}: ${bcStatus.message || ''}`);
-      if (bcStatus.code === 204) {
-        return { ok: true, data: { status: bcStatus, results: [] } };
-      }
-      return { ok: false, status: response.status, body: `Barchart ${bcStatus.code}: ${bcStatus.message || ''}` };
-    }
     return { ok: true, data };
   } catch (parseErr) {
     const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-    console.error(`[Barchart] ${symbol} | stage=${stage} | JSON PARSE ERROR: ${msg}`);
+    console.error(`[Massive] ${symbol} | stage=${stage} | JSON PARSE ERROR: ${msg}`);
     return { ok: false, status: response.status, body: `JSON parse error: ${msg}` };
   }
 }
@@ -127,6 +112,13 @@ async function supabaseSelect(table: string, columns: string, filter?: string): 
 async function fetchScanUniverse(): Promise<{ ticker: string; company_name: string | null }[]> {
   const rows = await supabaseSelect('scan_universe', 'symbol,company_name', 'enabled=eq.true&order=symbol');
   return (rows || []).map((r: any) => ({ ticker: String(r.symbol).toUpperCase(), company_name: r.company_name || null }));
+}
+
+async function fetchMarketUniverse(limit: number): Promise<{ ticker: string; company_name: string | null }[]> {
+  const rows = await supabaseSelect('market_universe', 'ticker,company_name', 'active=eq.true&optionable=eq.true&order=ticker');
+  const mapped = (rows || []).map((r: any) => ({ ticker: String(r.ticker).toUpperCase(), company_name: r.company_name || null }));
+  const shuffled = mapped.sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, limit);
 }
 
 // ── Technical indicators ──
@@ -279,18 +271,8 @@ function isSectionOff(profile: Profile, key: keyof Profile): boolean {
   return profile[key] === false;
 }
 
-// ── Date helpers ──
-function fmtDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
-function fmtBarchartDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}${m}${day}`;
-}
-
+// ── Robust date parsing for expiration_date from Massive ──
+// Handles ISO strings ("2026-09-19"), compact ("20260919"), timestamps, and more.
 function parseExpirationDate(raw: unknown): Date | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw === 'number') {
@@ -299,14 +281,17 @@ function parseExpirationDate(raw: unknown): Date | null {
   }
   const s = String(raw).trim();
   if (!s) return null;
+  // ISO: 2026-09-19 or 2026-09-19T17:00:00-04:00
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
     const d = new Date(s);
     return isNaN(d.getTime()) ? null : d;
   }
+  // Compact: 20260919
   if (/^\d{8}$/.test(s)) {
     const d = new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`);
     return isNaN(d.getTime()) ? null : d;
   }
+  // Slash: 09/19/2026
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
     const parts = s.split('/');
     const d = new Date(`${parts[2]}-${parts[0]}-${parts[1]}`);
@@ -316,6 +301,7 @@ function parseExpirationDate(raw: unknown): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// DTE using date-only comparison (strips time to avoid timezone off-by-one)
 function calcDTE(expRaw: unknown, today: Date): number {
   const exp = parseExpirationDate(expRaw);
   if (!exp) return -1;
@@ -324,528 +310,683 @@ function calcDTE(expRaw: unknown, today: Date): number {
   return Math.round((expDay.getTime() - todayDay.getTime()) / 86400000);
 }
 
-// ── Supabase stock_history_cache helpers ──
-async function supabaseUpsert(ticker: string, bars: HistoryBar[]): Promise<void> {
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!supabaseUrl || !serviceKey || bars.length === 0) return;
-  const rows = bars.map((b) => ({
-    ticker: ticker.toUpperCase(), trade_date: b.date,
-    open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
-    updated_at: new Date().toISOString(),
-  }));
-  for (let i = 0; i < rows.length; i += 500) {
-    const chunk = rows.slice(i, i + 500);
-    try {
-      await fetch(`${supabaseUrl}/rest/v1/stock_history_cache?on_conflict=ticker,trade_date`, {
-        method: 'POST',
-        headers: {
-          apikey: serviceKey, Authorization: `Bearer ${serviceKey}`,
-          'Content-Type': 'application/json',
-          Prefer: 'resolution=merge-duplicates,upsert=true',
-        },
-        body: JSON.stringify(chunk),
-      });
-    } catch (e) {
-      console.error(`[StockCache] upsert failed for ${ticker}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-}
-
-async function supabaseLoadHistory(ticker: string): Promise<HistoryBar[]> {
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!supabaseUrl || !serviceKey) return [];
-  try {
-    const resp = await fetch(
-      `${supabaseUrl}/rest/v1/stock_history_cache?select=trade_date,open,high,low,close,volume&ticker=eq.${ticker.toUpperCase()}&order=trade_date.asc&limit=500`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
-    );
-    if (!resp.ok) return [];
-    const rows = await resp.json();
-    return (rows || []).map((r: any) => ({
-      date: r.trade_date, open: Number(r.open || 0), high: Number(r.high || 0),
-      low: Number(r.low || 0), close: Number(r.close), volume: Number(r.volume || 0),
-    })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-  } catch {
-    return [];
-  }
-}
-
-async function supabaseLoadHistoryBatch(tickers: string[]): Promise<Map<string, HistoryBar[]>> {
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  const result = new Map<string, HistoryBar[]>();
-  if (!supabaseUrl || !serviceKey || tickers.length === 0) return result;
-  try {
-    const tickersCsv = tickers.map((t) => `'${t.toUpperCase()}'`).join(',');
-    const resp = await fetch(
-      `${supabaseUrl}/rest/v1/stock_history_cache?select=ticker,trade_date,open,high,low,close,volume&ticker=in.(${tickersCsv})&order=ticker,trade_date.asc&limit=10000`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
-    );
-    if (!resp.ok) return result;
-    const rows = await resp.json();
-    for (const r of rows || []) {
-      const t = String(r.ticker).toUpperCase();
-      if (!result.has(t)) result.set(t, []);
-      const close = Number(r.close);
-      if (Number.isFinite(close) && close > 0) {
-        result.get(t)!.push({
-          date: r.trade_date, open: Number(r.open || 0), high: Number(r.high || 0),
-          low: Number(r.low || 0), close, volume: Number(r.volume || 0),
-        });
-      }
-    }
-  } catch (e) {
-    console.error(`[StockCache] batch load failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  return result;
-}
-
-// ── Barchart getQuote: batch stock quotes ──
-async function barchartGetQuote(
-  apiKey: string,
-  symbols: string[],
-): Promise<{ priceMap: Map<string, { price: number; name: string | null }>; error: string | null }> {
-  const priceMap = new Map<string, { price: number; name: string | null }>();
-  // Barchart getQuote supports comma-separated symbols
-  const symbolsCsv = symbols.join(',');
-  const result = await barchartFetch('getQuote.json', apiKey, { symbols: symbolsCsv }, 'BATCH', 'getQuote');
-
-  if (!result.ok) {
-    return { priceMap, error: `getQuote HTTP ${result.status}: ${result.body.slice(0, 200)}` };
-  }
-
-  const results = result.data?.results || [];
-  for (const q of results) {
-    const symbol = String(q.symbol || '').toUpperCase();
-    const lastPrice = Number(q.lastPrice);
-    if (symbol && Number.isFinite(lastPrice) && lastPrice > 0) {
-      priceMap.set(symbol, { price: lastPrice, name: q.name || null });
-    }
-  }
-
-  console.log(`[getQuote] ${symbols.length} symbols requested, ${priceMap.size} prices returned`);
-  return { priceMap, error: null };
-}
-
-// ── Barchart getHistory: fetch daily OHLCV bars for one ticker ──
-async function barchartGetHistory(
-  ticker: string,
-  apiKey: string,
-  today: Date,
-): Promise<HistoryBar[]> {
-  const upper = ticker.toUpperCase();
-  const start = new Date(today);
-  start.setDate(start.getDate() - 420); // ~290 trading days for 200 DMA
-  const params = {
-    symbol: upper,
-    type: 'daily',
-    startDate: fmtBarchartDate(start),
-    endDate: fmtBarchartDate(today),
-    order: 'asc',
-    maxRecords: '500',
-  };
-  const result = await barchartFetch('getHistory.json', apiKey, params, upper, 'getHistory');
-
-  if (!result.ok) {
-    console.log(`[History] ${upper} | HTTP ${result.status} — no retry`);
-    return [];
-  }
-
-  const results = result.data?.results || [];
-  const bars: HistoryBar[] = results.map((r: any) => ({
-    date: String(r.tradingDay || r.timestamp || '').slice(0, 10),
-    open: Number(r.open || 0),
-    high: Number(r.high || 0),
-    low: Number(r.low || 0),
-    close: Number(r.close || 0),
-    volume: Number(r.volume || 0),
-  })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0 && b.date.length >= 10);
-
-  supabaseUpsert(upper, bars).catch((e) => console.error(`[History] ${upper} cache save failed: ${e}`));
-  return bars;
-}
-
-// ── Barchart getEquityOptions: fetch put option chain for one underlying ──
-async function barchartGetEquityOptions(
-  ticker: string,
-  apiKey: string,
-  profile: Profile,
-  today: Date,
-  noFilterMode: boolean,
-): Promise<{ contracts: any[]; status: ChainStatus; error: string | null }> {
-  const upper = ticker.toUpperCase();
-  const params: Record<string, string> = {
-    underlying_symbols: upper,
-    type: 'Put',
-    fields: 'bid,bidSize,ask,askSize,volume,openInterest,volatility,delta,gamma,theta,vega',
-  };
-
-  // Server-side expiration filter
-  if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-    const minDte = profile.min_dte ?? 0;
-    const minDate = new Date(today);
-    minDate.setDate(minDate.getDate() + minDte);
-    params.expirationDate = fmtDate(minDate);
-  }
-
-  const result = await barchartFetch('getEquityOptions.json', apiKey, params, upper, 'getEquityOptions');
-
-  if (!result.ok) {
-    const status = result.status === 401 || result.status === 403 ? 'unauthorized'
-      : result.status === 429 ? 'rate_limited'
-      : result.status === 0 ? 'network_error'
-      : 'api_error';
-    return { contracts: [], status, error: result.body };
-  }
-
-  const results = result.data?.results || [];
-  // Barchart returns both calls and puts if type not filtered server-side; ensure puts only
-  const puts = results.filter((r: any) => {
-    const typeStr = String(r.type || '').toLowerCase();
-    return typeStr === 'put' || typeStr === 'p';
-  });
-
-  console.log(`[getEquityOptions] ${upper} | results=${results.length} | puts=${puts.length}`);
-  return { contracts: puts, status: puts.length > 0 ? 'success' : 'no_options', error: null };
-}
-
-// ── Barchart getOptionsScreener: market discovery ──
-async function barchartGetOptionsScreener(
-  apiKey: string,
-  profile: Profile,
-  today: Date,
-  noFilterMode: boolean,
-): Promise<{ options: any[]; error: string | null }> {
-  const allOptions: any[] = [];
-  const params: Record<string, string> = {
-    instrumentType: 'stocks',
-    optionType: 'put',
-    fields: 'bid,ask,volume,openInterest,volatility,delta,gamma,theta,vega',
-  };
-
-  // Server-side DTE filter if Expiration section is ON
-  if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-    const minDte = profile.min_dte ?? 0;
-    params.minDTE = String(minDte);
-  }
-
-  // Server-side liquidity filters if Cycle & Liquidity is ON
-  if (!noFilterMode && !isSectionOff(profile, 'cycle_liquidity_enabled')) {
-    params.minOpenInterest = String(profile.min_target_oi);
-    params.minVolume = '10';
-  }
-
-  params.limit = '100';
-
-  for (let page = 1; page <= MAX_SCREENER_PAGES; page++) {
-    params.page = String(page);
-    const result = await barchartFetch('getOptionsScreener.json', apiKey, params, 'SCREENER', `screener_p${page}`);
-
-    if (!result.ok) {
-      if (allOptions.length > 0) {
-        console.log(`[Screener] Page ${page} failed, returning ${allOptions.length} results so far`);
-        break;
-      }
-      return { options: [], error: `Screener HTTP ${result.status}: ${result.body.slice(0, 200)}` };
-    }
-
-    const results = result.data?.results || [];
-    if (results.length === 0) {
-      console.log(`[Screener] Page ${page} returned 0 results, stopping`);
-      break;
-    }
-
-    allOptions.push(...results);
-    console.log(`[Screener] Page ${page} returned ${results.length} results (total: ${allOptions.length})`);
-
-    if (results.length < 100) {
-      console.log(`[Screener] Page ${page} returned < 100, last page`);
-      break;
-    }
-    if (allOptions.length >= MAX_CANDIDATES * 5) {
-      console.log(`[Screener] Reached ${allOptions.length} options, stopping pagination`);
-      break;
-    }
-  }
-
-  return { options: allOptions, error: null };
-}
-
-// ── Normalize Barchart option contract ──
-function normalizeOptionContract(c: any, today: Date): {
-  ticker: string;
-  optionSymbol: string;
-  strike: number;
-  expiration: string;
-  dte: number;
-  bid: number | null;
-  ask: number | null;
+// ── Quote extraction: precisely categorize what's missing ──
+function extractQuote(c: any): {
+  hasLastQuote: boolean;
+  bid: number | null;  // null = field missing, 0 = illiquid
+  ask: number | null;  // null = field missing, 0 = illiquid
   mid: number;
-  volume: number;
-  openInterest: number;
-  iv: number;
-  delta: number;
-  gamma: number | null;
-  theta: number | null;
-  vega: number | null;
 } {
-  const ticker = String(c.underlyingSymbol || c.symbol || '').toUpperCase();
-  const optionSymbol = String(c.symbol || '');
-  const strike = Number(c.strike || 0);
-  const expiration = String(c.expirationDate || '');
-  const dte = Math.max(0, calcDTE(c.expirationDate, today));
+  const lq = c?.last_quote;
+  const hasLastQuote = lq != null && typeof lq === 'object';
+  const rawBid = hasLastQuote ? lq.bid : undefined;
+  const rawAsk = hasLastQuote ? lq.ask : undefined;
+  const bid = (rawBid === undefined || rawBid === null) ? null : Number(rawBid);
+  const ask = (rawAsk === undefined || rawAsk === null) ? null : Number(rawAsk);
 
-  const rawBid = c.bid;
-  const rawAsk = c.ask;
-  const bid = (rawBid === undefined || rawBid === null || rawBid === '') ? null : Number(rawBid);
-  const ask = (rawAsk === undefined || rawAsk === null || rawAsk === '') ? null : Number(rawAsk);
-
+  // Calculate midpoint: prefer Massive's midpoint, fall back to (bid+ask)/2
   let mid = 0;
-  if (bid !== null && ask !== null && bid > 0 && ask > 0) {
+  const lqMid = hasLastQuote ? Number(lq.midpoint) : 0;
+  if (lqMid > 0) {
+    mid = lqMid;
+  } else if (bid !== null && ask !== null && bid > 0 && ask > 0) {
     mid = (bid + ask) / 2;
   }
-
-  const volume = Number(c.volume || 0);
-  const openInterest = Number(c.openInterest || 0);
-  const iv = Number(c.volatility || 0);
-  const delta = Number(c.delta || 0);
-  const gamma = (c.gamma === undefined || c.gamma === null) ? null : Number(c.gamma);
-  const theta = (c.theta === undefined || c.theta === null) ? null : Number(c.theta);
-  const vega = (c.vega === undefined || c.vega === null) ? null : Number(c.vega);
-
-  return { ticker, optionSymbol, strike, expiration, dte, bid, ask, mid, volume, openInterest, iv, delta, gamma, theta, vega };
+  return { hasLastQuote, bid, ask, mid };
 }
 
-// ── Determine which tickers need history refresh ──
-function needsHistoryRefresh(ticker: string, cachedBars: HistoryBar[] | undefined): boolean {
-  if (!cachedBars || cachedBars.length < 20) return true;
-  const latest = cachedBars.at(-1)!;
-  const latestDate = new Date(latest.date);
-  const twoDaysAgo = new Date();
-  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-  return latestDate < twoDaysAgo;
+// ── Log a sanitized raw contract (no API keys) ──
+function logRawContract(label: string, symbol: string, c: any) {
+  const safe: any = {};
+  for (const k of Object.keys(c || {})) {
+    if (k === 'last_quote' && c[k]) {
+      safe.last_quote = { bid: c[k].bid, ask: c[k].ask, midpoint: c[k].midpoint };
+    } else if (k === 'details' && c[k]) {
+      safe.details = { contract_type: c[k].contract_type, strike_price: c[k].strike_price, expiration_date: c[k].expiration_date };
+    } else if (k === 'greeks' && c[k]) {
+      safe.greeks = { delta: c[k].delta, gamma: c[k].gamma, theta: c[k].theta, vega: c[k].vega };
+    } else if (k === 'day' && c[k]) {
+      safe.day = { volume: c[k].volume, close: c[k].close };
+    } else if (typeof c[k] !== 'object') {
+      safe[k] = c[k];
+    }
+  }
+  console.log(`[RAW ${label}] ${symbol}: ${JSON.stringify(safe)}`);
 }
 
-// ── Evaluate a normalized contract through the CSP rule engine ──
-function evaluateContract(
-  c: ReturnType<typeof normalizeOptionContract>,
-  profile: Profile,
-  noFilterMode: boolean,
-  symbol: string,
-  openTickers: string[],
-  stockPrice: number | null,
-  primarySupport: number | null,
-  trendClass: string,
-  technicalDataAvailable: boolean,
+// ── Per-symbol scan result ──
+type StockSnapshot = {
+  ticker: string;
+  currentPrice: number | null;
+  historicalBars: HistoryBar[];
+  source: 'ticker_snapshot' | 'daily_aggregates' | 'previous_close' | 'underlying_asset' | 'none';
+  error: string | null;
+};
+
+// Per-request cache: ticker -> StockSnapshot. Avoids re-fetching history
+// for symbols that appear multiple times (e.g. HUT with 20 contracts).
+const stockCache = new Map<string, StockSnapshot>();
+
+type ScanSymbolResult = {
+  candidates: any[];
+  chainStatus: ChainStatus;
+  putsReturned: number;
+  filteredByExpiration: number;
+  filteredByStrike: number;
+  missingStrike: number;
+  missingExpiration: number;
+  missingLastQuote: number;
+  missingBid: number;
+  zeroBid: number;
+  missingAsk: number;
+  zeroAsk: number;
+  askLtBid: number;
+  otherInvalid: number;
+  validQuotes: number;
+  contractsAwaitingQuotes: number;
+  evaluated: number;
+  qualified: number;
+  rejected: number;
+  pagesFetched: number;
+  rawSample?: any;
+  analyses?: any[];
+  stockPrice?: number | null;
+  stockSource?: string;
+  primarySupport?: number | null;
+  secondarySupport?: number | null;
+  resistance?: number | null;
+  trendClass?: string;
+  technicalDataAvailable?: boolean;
+  historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
+  historyError?: string;
+  technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
+};
+
+// ── Shared stock snapshot: fetches history + current price with fallback order ──
+// Fallback order:
+//   1. Single-ticker snapshot endpoint (day.close — latest completed daily close)
+//   2. Daily aggregates (range/1/day — historical OHLCV for technicals)
+//   3. Previous-close endpoint
+//   4. Newest valid cached daily close (from any source that returned bars)
+// Only shows Unavailable if all sources fail. Never uses $0.00.
+// Retries once on failure. Cached per-request.
+async function getStockSnapshot(
+  ticker: string,
+  apiKey: string,
   today: Date,
   fmt: (d: Date) => string,
-  companyName: string,
-  analyzeMode: boolean,
-  secondarySupport: number | null,
-  resistance: number | null,
-): { candidate: any; analysis: any | null } {
-  const { strike, expiration, dte, bid, ask, mid, volume, openInterest: oi, iv, delta } = c;
+): Promise<StockSnapshot> {
+  const upper = ticker.toUpperCase();
+  const cached = stockCache.get(upper);
+  if (cached) return cached;
 
-  const hasValidQuote = bid !== null && bid > 0 && ask !== null && ask > 0 && ask >= bid;
+  const start = new Date(today);
+  start.setDate(start.getDate() - 420); // ~290 trading days, enough for 200 DMA
 
-  // ── Non-quote qualification rules ──
-  const reasons: string[] = [];
-  if (!noFilterMode) {
-    if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-    if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
-    if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
-      if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
-      if (primarySupport !== null && primarySupport > 0) {
-        const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-        if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
-        if (supportDistPct > profile.maximum_support_distance_pct) reasons.push('Support distance too high');
-      }
-    }
-    if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
-      if (oi < profile.min_target_oi) reasons.push('OI too low');
-      if (volume < 10) reasons.push('Insufficient liquidity');
-    }
+  let bars: HistoryBar[] = [];
+  let currentPrice: number | null = null;
+  let source: StockSnapshot['source'] = 'none';
+  let error: string | null = null;
+
+  // 1. Single-ticker snapshot — latest completed daily close + prevDay
+  const snapPath = `/v2/snapshot/locale/us/markets/stocks/tickers/${encodeURIComponent(upper)}`;
+  let snapResult = await massiveFetch(snapPath, apiKey, upper, 'stock_ticker_snapshot');
+  if (!snapResult.ok) {
+    snapResult = await massiveFetch(snapPath, apiKey, upper, 'stock_ticker_snapshot_retry');
   }
-  let qualified = reasons.length === 0;
-
-  // ── Financial calculations only when real bid/ask exist ──
-  let sp = 0, stoPrice = 0, btcPrice = 0, netProfit = 0, netCroi = 0, pc = 0, breakeven = 0;
-  let croiOptimized = false;
-  if (hasValidQuote) {
-    sp = spreadPct(bid!, ask!);
-    stoPrice = mid;
-    const best = optimize(mid, strike, profile, true);
-    if (best) {
-      btcPrice = best.btc;
-      netProfit = best.netProfit;
-      netCroi = best.netCroi;
-      pc = best.pc;
-      croiOptimized = true;
+  if (snapResult.ok) {
+    const day = snapResult.data?.ticker?.day;
+    const prevDay = snapResult.data?.ticker?.prevDay;
+    // day.close = latest completed daily close
+    if (day && Number(day.c) > 0) {
+      currentPrice = Number(day.c);
+      source = 'ticker_snapshot';
+    } else if (prevDay && Number(prevDay.c) > 0) {
+      currentPrice = Number(prevDay.c);
+      source = 'ticker_snapshot';
     }
-    breakeven = strike - mid;
-
-    if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-      if (!croiOptimized) {
-        reasons.push('CROI too low');
-        if (qualified) qualified = false;
-      }
+    // Build a minimal bar from the snapshot day for technical fallback if aggregates fail
+    if (day && Number(day.c) > 0) {
+      const d = day;
+      bars = [{
+        date: d.t ? new Date(d.t).toISOString().slice(0, 10) : fmt(today),
+        open: Number(d.o || d.c || 0), high: Number(d.h || d.c || 0),
+        low: Number(d.l || d.c || 0), close: Number(d.c), volume: Number(d.v || 0),
+      }];
     }
-
-    if (!noFilterMode && !isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) {
-      if (!reasons.includes('Spread too wide')) {
-        reasons.push('Spread too wide');
-        if (qualified) qualified = false;
-      }
-    }
+  } else {
+    error = `Snapshot HTTP ${snapResult.status}: ${snapResult.body.slice(0, 200)}`;
   }
 
-  const strikeDistFromStock = stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null;
-  const strikeDistFromSupport = primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null;
-
-  if (analyzeMode) {
-    const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
-    if (!isSectionOff(profile, 'order_strike_enabled')) {
-      passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
-      if (primarySupport !== null && primarySupport > 0) {
-        const belowSupport = strike < primarySupport;
-        passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: belowSupport, status: belowSupport ? 'pass' : 'fail' });
-      } else {
-        passFail.push({ rule: 'Support rule not evaluated — historical data unavailable', pass: true, status: 'not_evaluated' });
+  // 2. Daily aggregates — historical OHLCV for technical calculations
+  const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
+  let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
+  if (!histResult.ok) {
+    histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
+  }
+  if (histResult.ok) {
+    const histBars = (histResult.data?.results || []).map((b: any) => ({
+      date: new Date(b.t).toISOString().slice(0, 10),
+      open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
+    })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+    if (histBars.length) {
+      bars = histBars; // Replace snapshot-only bar with full history
+      // If snapshot didn't give a price, use latest aggregate close
+      if (currentPrice === null) {
+        currentPrice = Number(histBars.at(-1)!.close);
+        source = 'daily_aggregates';
       }
     }
-    if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
-      passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi, status: oi >= profile.min_target_oi ? 'pass' : 'fail' });
-      passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10, status: volume >= 10 ? 'pass' : 'fail' });
+  } else if (!error) {
+    error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+  }
+
+  // 3. Fallback: previous-close endpoint (if still no price or bars)
+  if (currentPrice === null || bars.length < 20) {
+    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
+    let prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
+    if (!prevResult.ok) {
+      prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close_retry');
     }
-    if (!isSectionOff(profile, 'technical_rules_enabled')) {
-      if (technicalDataAvailable) {
-        const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport);
-        passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
-        if (primarySupport !== null && primarySupport > 0) {
-          const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-          const minOk = supportDistPct >= profile.minimum_support_distance_pct;
-          const maxOk = supportDistPct <= profile.maximum_support_distance_pct;
-          passFail.push({ rule: `Minimum support distance >= ${profile.minimum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: minOk, status: minOk ? 'pass' : 'fail' });
-          passFail.push({ rule: `Maximum support distance <= ${profile.maximum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: maxOk, status: maxOk ? 'pass' : 'fail' });
-        } else {
-          passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
+    if (prevResult.ok) {
+      const prevBars = (prevResult.data?.results || []).map((b: any) => ({
+        date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
+        open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
+      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+      if (prevBars.length && currentPrice === null) {
+        currentPrice = Number(prevBars.at(-1)!.close);
+        source = 'previous_close';
+      }
+      // Merge any additional bars (won't help 200 DMA but ensures some data)
+      if (prevBars.length && bars.length < 20) {
+        const existingDates = new Set(bars.map((b) => b.date));
+        for (const pb of prevBars) {
+          if (!existingDates.has(pb.date)) bars.push(pb);
         }
-      } else {
-        passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true, status: 'not_evaluated' });
-        passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
       }
+    } else if (!error) {
+      error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
     }
-    if (hasValidQuote && !isSectionOff(profile, 'spread_enabled')) {
-      const spreadOk = sp <= profile.max_spread_pct;
-      passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: spreadOk, status: spreadOk ? 'pass' : 'fail' });
-    }
-    if (hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled')) {
-      if (profile.filter_strikes_croi) {
-        const croiOk = croiOptimized;
-        passFail.push({ rule: `Filter Strikes by CROI: Net CROI >= ${profile.min_net_croi}% & PC <= ${profile.max_premium_capture}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
-      } else {
-        const croiOk = netCroi >= profile.min_net_croi;
-        const pcOk = pc <= profile.max_premium_capture;
-        passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
-        passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
-      }
-    }
-    if (!hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-      passFail.push({ rule: 'Filter Strikes by CROI — Quote required', pass: true, status: 'not_evaluated' });
-    }
-    if (!hasValidQuote) {
-      passFail.push({ rule: 'Quote data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
-    }
-
-    const analysis = {
-      strike, expiration, dte,
-      bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
-      ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
-      mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
-      spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
-      iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
-      volume, open_interest: oi, volume_classification: volClass(volume),
-      suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
-      suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
-      net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
-      net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
-      premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
-      breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
-      qualified, pass_fail: passFail,
-      has_quotes: hasValidQuote,
-      strike_distance_from_stock: strikeDistFromStock,
-      strike_distance_from_support: strikeDistFromSupport,
-    };
-    return { candidate: null, analysis };
   }
 
-  const candidate = {
-    scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol,
-    stock_price: stockPrice !== null && stockPrice > 0 ? Number(stockPrice.toFixed(2)) : null,
-    stock_source: 'Barchart',
-    strike, expiration, dte,
-    bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
-    ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
-    mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
-    spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
-    iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
-    volume, open_interest: oi, volume_classification: volClass(volume),
-    trend_classification: trendClass, primary_support: primarySupport !== null ? Number(primarySupport.toFixed(2)) : null,
-    suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
-    suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
-    net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
-    net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
-    premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
-    breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
-    qualified, rejection_reasons: reasons,
-    strategy_profile_id: profile.id,
-    strike_distance_from_stock: strikeDistFromStock,
-    strike_distance_from_support: strikeDistFromSupport,
-    has_quotes: hasValidQuote,
-    secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
-    resistance: resistance !== null ? Number(resistance.toFixed(2)) : null,
-  };
-  return { candidate, analysis: null };
+  // 4. Final fallback: newest cached valid daily close (already captured above)
+  if (currentPrice === null && bars.length) {
+    currentPrice = Number(bars.at(-1)!.close);
+    source = source === 'none' ? 'daily_aggregates' : source;
+  }
+
+  const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error };
+  stockCache.set(upper, snapshot);
+  return snapshot;
 }
 
-// ── Compute technicals from bars + stock price ──
-function computeTechnicals(bars: HistoryBar[], stockPrice: number | null) {
-  const technicalDataAvailable = bars.length >= 20;
-  const primarySupport = technicalDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
-  const secondarySupport = technicalDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
-  const resistance = technicalDataAvailable ? findResistance(bars) : null;
-  const trendClass = technicalDataAvailable ? trend(bars) : 'Pending History';
+async function scanSymbol(
+  symbol: string,
+  companyName: string,
+  profile: Profile,
+  apiKey: string,
+  openTickers: string[],
+  noFilterMode: boolean,
+  today: Date,
+  fmt: (d: Date) => string,
+  verbose: boolean,
+  analyzeMode: boolean,
+): Promise<ScanSymbolResult> {
+  const r: ScanSymbolResult = {
+    candidates: [],
+    chainStatus: 'no_options',
+    putsReturned: 0, filteredByExpiration: 0, filteredByStrike: 0,
+    missingStrike: 0, missingExpiration: 0, missingLastQuote: 0,
+    missingBid: 0, zeroBid: 0, missingAsk: 0, zeroAsk: 0, askLtBid: 0, otherInvalid: 0,
+    validQuotes: 0, contractsAwaitingQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pagesFetched: 0,
+  };
 
-  let technical: any = null;
+  // Step 1: Stock snapshot via shared function (cached per ticker)
+  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt);
+  let bars = snapshot.historicalBars;
+  let stockPrice: number | null = snapshot.currentPrice;
+  r.stockSource = snapshot.source;
+
+  if (snapshot.error && !bars.length) {
+    r.historyStatus = 'error';
+    r.historyError = snapshot.error;
+  } else if (bars.length >= 20) {
+    r.historyStatus = 'success';
+  } else if (bars.length > 0) {
+    r.historyStatus = 'fallback';
+  } else {
+    r.historyStatus = 'empty';
+  }
+
+  const technicalDataAvailable = bars.length >= 20;
+  r.technicalDataAvailable = technicalDataAvailable;
+
+  // Stock price filter (if Order & Strike section enabled). If even the previous
+  // close is unavailable, defer this filter until an underlying price can be read
+  // from the option-chain snapshot.
+  // This filters the underlying stock price, independent of put strike price.
+  // A $71 stock with max put strike $25 is still allowed — stock price and
+  // strike price are separate filters.
+  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} < minimum ${profile.minimum_stock_price}, skipping symbol`);
+      r.chainStatus = 'no_options';
+      return r;
+    }
+    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} > maximum ${profile.maximum_stock_price}, skipping symbol`);
+      r.chainStatus = 'no_options';
+      return r;
+    }
+  }
+
+  let primarySupport: number | null = technicalDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
+  let secondarySupport: number | null = technicalDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
+  let resistance: number | null = technicalDataAvailable ? findResistance(bars) : null;
+  let trendClass = technicalDataAvailable ? trend(bars) : 'Unavailable';
+
+  r.stockPrice = stockPrice;
+  r.primarySupport = primarySupport;
+  r.secondarySupport = secondarySupport;
+  r.resistance = resistance;
+  r.trendClass = trendClass;
+
   if (technicalDataAvailable) {
     const closes = bars.map((b) => b.close);
     const m = macd(closes);
     const bb = bollingerBands(closes);
-    technical = {
+    r.technical = {
       rsi: Number(rsi(closes).toFixed(1)),
       ma20: Number(sma(closes, 20).toFixed(2)),
       ma50: Number(sma(closes, 50).toFixed(2)),
       ma200: Number(sma(closes, 200).toFixed(2)),
-      macd: m.macd, macd_signal: m.signal, macd_histogram: m.histogram,
-      bb_upper: bb.upper, bb_middle: bb.middle, bb_lower: bb.lower, bb_position: bb.position,
+      macd: m.macd,
+      macd_signal: m.signal,
+      macd_histogram: m.histogram,
+      bb_upper: bb.upper,
+      bb_middle: bb.middle,
+      bb_lower: bb.lower,
+      bb_position: bb.position,
       volume_trend: volumeTrend(bars),
     };
   }
 
-  return { technicalDataAvailable, primarySupport, secondarySupport, resistance, trendClass, technical };
+  // Step 2: Options chain — build URL with server-side filters to reduce pages
+  const chainParams = new URLSearchParams();
+  chainParams.set('contract_type', 'put');
+
+  // Server-side strike filter (if Order & Strike enabled)
+  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    chainParams.set('strike_price.lte', String(profile.max_strike));
+  }
+
+  // Server-side expiration filter (if Expiration enabled)
+  if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
+    const minDte = profile.min_dte ?? 0;
+    const minDate = new Date(today);
+    minDate.setDate(minDate.getDate() + minDte);
+    chainParams.set('expiration_date.gte', fmt(minDate));
+  }
+
+  const chainPath = `/v3/snapshot/options/${encodeURIComponent(symbol)}?${chainParams.toString()}`;
+  const allRawContracts: any[] = [];
+  let pageCount = 0;
+  let currentPath = chainPath;
+  let chainError: { status: number; body: string } | null = null;
+
+  // Collect representative raw contracts for logging
+  let sampleWithQuote: any = null;
+  let sampleWithoutQuote: any = null;
+  let sampleOtherInvalid: any = null;
+
+  while (currentPath && pageCount < MAX_CHAIN_PAGES) {
+    pageCount++;
+    r.pagesFetched++;
+    const pageResult = await massiveFetch(currentPath, apiKey, symbol, `options_snapshot_p${pageCount}`);
+
+    if (!pageResult.ok) {
+      chainError = { status: pageResult.status, body: pageResult.body };
+      if (verbose) console.log(`[VERBOSE] ${symbol} | options_snapshot FAILED | HTTP ${pageResult.status} | body: ${pageResult.body.slice(0, 200)}`);
+      break;
+    }
+
+    const pageResults = pageResult.data?.results || [];
+    allRawContracts.push(...pageResults);
+
+    if (verbose && pageCount === 1) {
+      console.log(`[VERBOSE] ${symbol} | options_snapshot OK | HTTP 200 | result_count=${pageResults.length}`);
+      console.log(`[VERBOSE] ${symbol} | response keys: ${Object.keys(pageResult.data || {}).join(', ')}`);
+    }
+
+    // Collect representative samples
+    for (const c of pageResults) {
+      if (c?.details?.contract_type !== 'put') continue;
+      if (!sampleWithQuote && c?.last_quote && Number(c.last_quote.bid || 0) > 0) {
+        sampleWithQuote = c;
+        logRawContract('WITH_QUOTE', symbol, c);
+      }
+      if (!sampleWithoutQuote && (!c?.last_quote || typeof c.last_quote !== 'object')) {
+        sampleWithoutQuote = c;
+        logRawContract('WITHOUT_QUOTE', symbol, c);
+      }
+      if (!sampleOtherInvalid && c?.last_quote && Number(c.last_quote.bid || 0) === 0 && Number(c.last_quote.ask || 0) > 0) {
+        sampleOtherInvalid = c;
+        logRawContract('ZERO_BID', symbol, c);
+      }
+    }
+
+    const nextUrl = pageResult.data?.next_url;
+    if (nextUrl && typeof nextUrl === 'string' && nextUrl.length > 0) {
+      try { const parsed = new URL(nextUrl); currentPath = parsed.pathname + parsed.search; }
+      catch { currentPath = ''; }
+    } else { currentPath = ''; }
+  }
+
+  // Determine chain status
+  const contracts = allRawContracts.filter((c: any) => c?.details?.contract_type === 'put');
+  r.putsReturned = contracts.length;
+
+  // Final stock-price fallback from the option snapshot's underlying_asset object.
+  // This is contract-discovery data, not an invented price.
+  if (stockPrice === null && allRawContracts.length) {
+    const underlyingPrice = allRawContracts
+      .map((c: any) => Number(c?.underlying_asset?.price || c?.underlying_asset?.value || 0))
+      .find((v: number) => Number.isFinite(v) && v > 0) || 0;
+    if (underlyingPrice > 0) {
+      stockPrice = underlyingPrice;
+      r.stockPrice = stockPrice;
+      r.stockSource = 'underlying_asset';
+    }
+  }
+
+  // Apply deferred underlying-price filters after all real price fallbacks were tried.
+  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+      r.chainStatus = 'no_options';
+      return r;
+    }
+    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+      r.chainStatus = 'no_options';
+      return r;
+    }
+  }
+
+  if (chainError) {
+    if (chainError.status === 401 || chainError.status === 403) r.chainStatus = 'unauthorized';
+    else if (chainError.status === 429) r.chainStatus = 'rate_limited';
+    else if (chainError.status === 0) r.chainStatus = 'network_error';
+    else r.chainStatus = 'api_error';
+    if (verbose) console.log(`[VERBOSE] ${symbol} | chain_status=${r.chainStatus} | HTTP ${chainError.status} | puts=${contracts.length}`);
+    return r;
+  }
+
+  r.chainStatus = contracts.length > 0 ? 'success' : 'no_options';
+
+  if (verbose) {
+    console.log(`[VERBOSE] ${symbol} | chain_status=${r.chainStatus} | total_contracts=${allRawContracts.length} | puts=${contracts.length} | pages=${pageCount}`);
+  }
+
+  // Store raw sample for response
+  if (sampleWithQuote) r.rawSample = sampleWithQuote;
+
+  // ── Pre-filtering: expiration ──
+  let filteredContracts = contracts;
+  if (noFilterMode || isSectionOff(profile, 'expiration_enabled')) {
+    if (verbose) console.log(`[VERBOSE] ${symbol} | expiration filter: SKIPPED (section off or noFilter)`);
+  } else {
+    const before = filteredContracts.length;
+    const minDte = profile.min_dte ?? 0;
+    filteredContracts = filteredContracts.filter((c: any) => {
+      const dte = calcDTE(c?.details?.expiration_date, today);
+      return dte >= minDte;
+    });
+
+    r.filteredByExpiration = before - filteredContracts.length;
+    if (verbose) {
+      const sampleExp = contracts[0]?.details?.expiration_date;
+      console.log(`[VERBOSE] ${symbol} | raw expiration_date sample: ${JSON.stringify(sampleExp)} | type: ${typeof sampleExp}`);
+      console.log(`[VERBOSE] ${symbol} | expiration filter (DTE >= ${profile.min_dte}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByExpiration})`);
+    }
+  }
+
+  // ── Pre-filtering: strike (client-side safety net, server already filtered) ──
+  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+    const before = filteredContracts.length;
+    filteredContracts = filteredContracts.filter((c: any) => {
+      const s = Number(c.details.strike_price);
+      if (s > profile.max_strike) return false;
+      return true;
+    });
+    r.filteredByStrike = before - filteredContracts.length;
+    if (verbose) console.log(`[VERBOSE] ${symbol} | strike filter (max ${profile.max_strike}): ${before} -> ${filteredContracts.length} (removed ${r.filteredByStrike})`);
+  }
+
+  if (verbose) {
+    console.log(`[VERBOSE] ${symbol} | contracts to evaluate: ${filteredContracts.length}`);
+    console.log(`[VERBOSE] ${symbol} | pipeline: puts=${contracts.length} | filtExp=${r.filteredByExpiration} | filtStrike=${r.filteredByStrike} | remaining=${filteredContracts.length}`);
+  }
+
+  // ── Contract evaluation — Massive is discovery-only, quotes are optional ──
+  // Qualification uses only non-quote rules (strike, DTE, trend, support, OI, existing position).
+  // Quote fields (bid/ask/mid/spread/STO/BTC/CROI/PC) are included when available but
+  // never required — contracts without quotes are still listed as candidates.
+  const analyses: any[] = [];
+
+  for (const c of filteredContracts) {
+    const strike = Number(c?.details?.strike_price || 0);
+    const expiration = c?.details?.expiration_date as string;
+
+    // Skip counting: strike
+    if (!strike || strike <= 0 || !isFinite(strike)) { r.missingStrike++; continue; }
+    // Skip counting: expiration
+    if (!expiration) { r.missingExpiration++; continue; }
+
+    const dte = Math.max(0, calcDTE(expiration, today));
+    const volume = Number(c?.day?.volume || c?.volume || 0);
+    const oi = Number(c?.open_interest || 0);
+    const iv = Number(c?.implied_volatility || 0) * 100;
+    const delta = Number(c?.greeks?.delta || 0);
+
+    // Extract quote data if available (never fabricated)
+    const { hasLastQuote, bid, ask, mid } = extractQuote(c);
+    const hasValidQuote = hasLastQuote && bid !== null && bid > 0 && ask !== null && ask > 0 && ask >= bid;
+
+    // ── Non-quote qualification rules (applied regardless of quote availability) ──
+    const reasons: string[] = [];
+    if (!noFilterMode) {
+      if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
+      if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
+      if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
+        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
+        if (primarySupport !== null && primarySupport > 0) {
+          const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
+          if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
+        }
+      }
+      // OI and volume rules are non-quote — they come from the contract itself
+      if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
+        if (oi < profile.min_target_oi) reasons.push('OI too low');
+        if (volume < 10) reasons.push('Insufficient liquidity');
+      }
+    }
+    const qualified = reasons.length === 0;
+    r.evaluated++;
+    if (qualified) r.qualified++; else r.rejected++;
+
+    // Track quote availability
+    if (hasValidQuote) {
+      r.validQuotes++;
+    } else {
+      r.contractsAwaitingQuotes++;
+    }
+
+    // Financial calculations only when real bid/ask exist
+    let sp = 0, stoPrice = 0, btcPrice = 0, netProfit = 0, netCroi = 0, pc = 0, breakeven = 0;
+    let croiOptimized = false;
+    if (hasValidQuote) {
+      sp = spreadPct(bid!, ask!);
+      stoPrice = mid;
+      const best = optimize(mid, strike, profile, true);
+      if (best) {
+        btcPrice = best.btc;
+        netProfit = best.netProfit;
+        netCroi = best.netCroi;
+        pc = best.pc;
+        croiOptimized = true;
+      }
+      breakeven = strike - mid;
+
+      // Filter Strikes by CROI: when ON and a quote is available, reject strikes
+      // where no BTC exit satisfies both Minimum Net CROI and Maximum Premium Capture.
+      // preferred_croi_max is informational only — never used to reject.
+      if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
+        if (!croiOptimized) {
+          reasons.push('CROI too low');
+          if (qualified) { r.qualified--; r.rejected++; }
+        }
+      }
+
+      // Spread rule only applies when a quote exists
+      if (!noFilterMode && !isSectionOff(profile, 'spread_enabled') && sp > profile.max_spread_pct) {
+        if (!reasons.includes('Spread too wide')) {
+          reasons.push('Spread too wide');
+          if (qualified) { r.qualified--; r.rejected++; }
+        }
+      }
+    }
+
+    if (analyzeMode) {
+      const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
+      if (!isSectionOff(profile, 'order_strike_enabled')) {
+        passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
+        if (primarySupport !== null && primarySupport > 0) {
+          const belowSupport = strike < primarySupport;
+          passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: belowSupport, status: belowSupport ? 'pass' : 'fail' });
+        } else {
+          passFail.push({ rule: 'Support rule not evaluated — historical data unavailable', pass: true, status: 'not_evaluated' });
+        }
+      }
+      if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
+        passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi, status: oi >= profile.min_target_oi ? 'pass' : 'fail' });
+        passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10, status: volume >= 10 ? 'pass' : 'fail' });
+      }
+      if (!isSectionOff(profile, 'technical_rules_enabled')) {
+        if (technicalDataAvailable) {
+          const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport);
+          passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
+          if (primarySupport !== null && primarySupport > 0) {
+            const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
+            const distOk = supportDistPct >= profile.minimum_support_distance_pct;
+            passFail.push({ rule: `Support distance >= ${profile.minimum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
+          }
+        } else {
+          passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true, status: 'not_evaluated' });
+          passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
+        }
+      }
+      if (hasValidQuote && !isSectionOff(profile, 'spread_enabled')) {
+        const spreadOk = sp <= profile.max_spread_pct;
+        passFail.push({ rule: `Spread acceptable (<= ${profile.max_spread_pct}%)`, pass: spreadOk, status: spreadOk ? 'pass' : 'fail' });
+      }
+      if (hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled')) {
+        if (profile.filter_strikes_croi) {
+          const croiOk = croiOptimized;
+          passFail.push({ rule: `Filter Strikes by CROI: Net CROI >= ${profile.min_net_croi}% & PC <= ${profile.max_premium_capture}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
+        } else {
+          const croiOk = netCroi >= profile.min_net_croi;
+          const pcOk = pc <= profile.max_premium_capture;
+          passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
+          passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
+        }
+      }
+      if (!hasValidQuote && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
+        passFail.push({ rule: 'Filter Strikes by CROI — Quote required', pass: true, status: 'not_evaluated' });
+      }
+      if (!hasValidQuote) {
+        passFail.push({ rule: 'Quote data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
+      }
+      // Massive is used for contract discovery. Missing quote data is not a failure.
+      // Quote-dependent rules become pending until the user enters a quote.
+      const finalQualified = reasons.length === 0;
+
+      analyses.push({
+        strike, expiration, dte,
+        bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
+        ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
+        mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
+        spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
+        iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+        volume, open_interest: oi, volume_classification: volClass(volume),
+        suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
+        suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
+        net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
+        net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
+        premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
+        breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
+        qualified: finalQualified, pass_fail: passFail,
+        has_quotes: hasValidQuote,
+        strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
+        strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
+      });
+    } else {
+      r.candidates.push({
+        scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol,
+        stock_price: stockPrice !== null && stockPrice > 0 ? Number(stockPrice.toFixed(2)) : null,
+        stock_source: r.stockSource || 'none',
+        strike, expiration, dte,
+        bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
+        ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
+        mid: hasValidQuote ? Number(mid.toFixed(2)) : 0,
+        spread_pct: hasValidQuote ? Number(sp.toFixed(1)) : 0,
+        iv: Number(iv.toFixed(1)), delta: Number(delta.toFixed(2)),
+        volume, open_interest: oi, volume_classification: volClass(volume),
+        trend_classification: trendClass, primary_support: primarySupport !== null ? Number(primarySupport.toFixed(2)) : null,
+        suggested_sto: hasValidQuote ? Number(stoPrice.toFixed(2)) : 0,
+        suggested_btc: hasValidQuote ? Number(btcPrice.toFixed(2)) : 0,
+        net_profit: hasValidQuote ? Number(netProfit.toFixed(2)) : 0,
+        net_croi: hasValidQuote ? Number(netCroi.toFixed(2)) : 0,
+        premium_capture: hasValidQuote ? Number(pc.toFixed(1)) : 0,
+        breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
+        qualified, rejection_reasons: reasons,
+        strategy_profile_id: profile.id,
+        strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
+        strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
+        has_quotes: hasValidQuote,
+        secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
+        resistance: resistance !== null ? Number(resistance.toFixed(2)) : null,
+      });
+    }
+  }
+
+  // In analyze mode, sort qualifying contracts and pick best
+  if (analyzeMode && analyses.length > 0) {
+    const qualifying = analyses.filter((a) => a.qualified);
+    qualifying.sort((a, b) => {
+      const aBelow = primarySupport !== null && a.strike < primarySupport ? 0 : 1;
+      const bBelow = primarySupport !== null && b.strike < primarySupport ? 0 : 1;
+      if (aBelow !== bBelow) return aBelow - bBelow;
+      if (a.spread_pct !== b.spread_pct) return a.spread_pct - b.spread_pct;
+      if (a.open_interest !== b.open_interest) return b.open_interest - a.open_interest;
+      if (a.volume !== b.volume) return b.volume - a.volume;
+      return Math.abs(a.delta) - Math.abs(b.delta);
+    });
+    r.analyses = analyses;
+  }
+
+  return r;
 }
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
 
   console.log('market-scan started');
-  console.log('BARCHART_API_KEY exists:', Boolean(Deno.env.get('BARCHART_API_KEY')));
+  console.log('MASSIVE_API_KEY exists:', Boolean(Deno.env.get('MASSIVE_API_KEY')));
 
   try {
-    const apiKey = Deno.env.get('BARCHART_API_KEY');
-    if (!apiKey) return json({ success: false, provider: 'Barchart', error: 'Barchart data unavailable — API key not configured.' });
+    const apiKey = Deno.env.get('MASSIVE_API_KEY');
+    if (!apiKey) return json({ success: false, provider: 'Massive', error: 'MASSIVE_API_KEY is not configured.' });
 
     const body = await req.json().catch(() => ({}));
     const profile = body.profile as Profile | undefined;
@@ -876,314 +1017,96 @@ serve(async (req) => {
       if (!ticker) return json({ success: false, error: 'Missing ticker for analyze mode' });
 
       console.log(`[Analyze] Analyzing ${ticker}`);
+      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true);
 
-      // 1. getQuote for stock price
-      let stockPrice: number | null = null;
-      let stockSource = 'none';
-      const { priceMap } = await barchartGetQuote(apiKey, [ticker]);
-      if (priceMap.has(ticker)) {
-        stockPrice = priceMap.get(ticker)!.price;
-        stockSource = 'Barchart';
-      }
-
-      // 2. getHistory for technicals + fallback price
-      let bars: HistoryBar[] = [];
-      try {
-        bars = await barchartGetHistory(ticker, apiKey, today);
-      } catch (e) {
-        console.error(`[Analyze] history fetch failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-
-      if (stockPrice === null && bars.length) {
-        stockPrice = Number(bars.at(-1)!.close);
-        stockSource = 'Barchart';
-      }
-
-      // 3. Try cached history from Supabase if API didn't return enough
-      if (bars.length < 20) {
-        const cachedBars = await supabaseLoadHistory(ticker);
-        if (cachedBars.length > bars.length) {
-          bars = cachedBars;
-          if (stockPrice === null && bars.length) {
-            stockPrice = Number(bars.at(-1)!.close);
-            stockSource = 'cached_history';
-          }
-        }
-      }
-
-      const techData = computeTechnicals(bars, stockPrice);
-
-      // Stock price filter
-      if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-        if (profile.minimum_stock_price !== null && stockPrice < profile.minimum_stock_price) {
-          return json({ success: false, error: `${ticker} stock price $${stockPrice} below minimum $${profile.minimum_stock_price}` });
-        }
-        if (profile.maximum_stock_price !== null && stockPrice > profile.maximum_stock_price) {
-          return json({ success: false, error: `${ticker} stock price $${stockPrice} above maximum $${profile.maximum_stock_price}` });
-        }
-      }
-
-      // 4. getEquityOptions for put chain
-      const chainResult = await barchartGetEquityOptions(ticker, apiKey, profile, today, noFilterMode);
-
-      if (chainResult.status === 'api_error' || chainResult.status === 'unauthorized' || chainResult.status === 'rate_limited' || chainResult.status === 'network_error') {
+      if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') {
         return json({
-          success: false, stage: 'options_chain', provider: 'Barchart', symbol: ticker,
-          barchartStatus: chainResult.status === 'api_error' ? 500 : chainResult.status === 'unauthorized' ? 401 : chainResult.status === 'rate_limited' ? 429 : 0,
-          barchartBody: chainResult.error || `Chain status: ${chainResult.status}`,
+          success: false, stage: 'options_snapshot', provider: 'Massive', symbol: ticker,
+          massiveStatus: result.chainStatus === 'api_error' ? 500 : result.chainStatus === 'unauthorized' ? 401 : result.chainStatus === 'rate_limited' ? 429 : 0,
+          massiveBody: `Chain status: ${result.chainStatus}`,
         });
       }
 
-      if (stockPrice === null && chainResult.contracts.length === 0) {
+      if (result.stockPrice === null && result.putsReturned === 0) {
         return json({
           success: false,
           error: `No usable stock price or put contracts returned for ${ticker}`,
-          stage: 'stock_and_options',
+          stage: 'stock_history_and_contract_discovery',
+          history_status: result.historyStatus || 'empty',
+          history_error: result.historyError || null,
         });
       }
 
-      // 5. Run CSP rule engine on each contract
-      const analyses: any[] = [];
-      for (const rawContract of chainResult.contracts) {
-        const normalized = normalizeOptionContract(rawContract, today);
-        if (!normalized.strike || normalized.strike <= 0 || !normalized.expiration) continue;
-
-        // Client-side DTE filter
-        if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-          const minDte = profile.min_dte ?? 0;
-          if (normalized.dte < minDte) continue;
-        }
-
-        // Client-side strike filter
-        if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-          if (normalized.strike > profile.max_strike) continue;
-        }
-
-        const { analysis } = evaluateContract(
-          normalized, profile, noFilterMode, ticker, openTickers,
-          stockPrice, techData.primarySupport, techData.trendClass, techData.technicalDataAvailable,
-          today, fmt, ticker, true, techData.secondarySupport, techData.resistance,
-        );
-        if (analysis) analyses.push(analysis);
-      }
-
+      const analyses = result.analyses || [];
       const qualifying = analyses.filter((a) => a.qualified);
-      qualifying.sort((a, b) => {
-        const aBelow = techData.primarySupport !== null && a.strike < techData.primarySupport ? 0 : 1;
-        const bBelow = techData.primarySupport !== null && b.strike < techData.primarySupport ? 0 : 1;
-        if (aBelow !== bBelow) return aBelow - bBelow;
-        if (a.spread_pct !== b.spread_pct) return a.spread_pct - b.spread_pct;
-        if (a.open_interest !== b.open_interest) return b.open_interest - a.open_interest;
-        if (a.volume !== b.volume) return b.volume - a.volume;
-        return Math.abs(a.delta) - Math.abs(b.delta);
-      });
+      const bestContract = qualifying[0] || null;
 
-      console.log(`[Analyze] ${ticker} complete — ${analyses.length} analyzed, ${qualifying.length} qualified`);
+      console.log(`[Analyze] ${ticker} complete — ${analyses.length} analyzed, ${qualifying.length} qualified, puts=${result.putsReturned}, validQuotes=${result.validQuotes}`);
 
       return json({
         success: true,
         ticker,
-        stock_price: stockPrice !== null && stockPrice > 0 ? Number(stockPrice.toFixed(2)) : null,
-        stock_source: stockSource,
-        trend: techData.trendClass || 'Unknown',
-        primary_support: techData.primarySupport !== null ? Number(techData.primarySupport.toFixed(2)) : null,
-        secondary_support: techData.secondarySupport !== null ? Number(techData.secondarySupport.toFixed(2)) : null,
-        resistance: techData.resistance !== null ? Number(techData.resistance.toFixed(2)) : null,
-        technical_data_available: Boolean(techData.technicalDataAvailable),
-        technical_warning: techData.technicalDataAvailable ? null : 'Historical price data is still being loaded. Trend and support will show once history is available.',
-        technical: techData.technical || null,
+        stock_price: result.stockPrice !== null && result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
+        stock_source: result.stockSource || 'none',
+        trend: result.trendClass || 'Unknown',
+        primary_support: result.primarySupport !== null ? Number(result.primarySupport.toFixed(2)) : null,
+        secondary_support: result.secondarySupport !== null ? Number(result.secondarySupport.toFixed(2)) : null,
+        resistance: result.resistance !== null ? Number(result.resistance.toFixed(2)) : null,
+        technical_data_available: Boolean(result.technicalDataAvailable),
+        technical_warning: result.technicalDataAvailable ? null : 'Historical price data was unavailable or insufficient; support/trend rules were not used to reject contracts.',
+        technical: result.technical || null,
         qualifies: qualifying.length > 0,
-        best_contract: qualifying[0] || null,
+        best_contract: bestContract,
         other_qualifying_contracts: qualifying.slice(1),
         all_qualifying_contracts: qualifying,
         all_contracts_count: analyses.length,
         qualifying_count: qualifying.length,
+        // Diagnostic counts
+        scan_counts: {
+          puts_returned: result.putsReturned,
+          filtered_by_expiration: result.filteredByExpiration,
+          filtered_by_strike: result.filteredByStrike,
+          valid_quotes: result.validQuotes,
+          contracts_awaiting_quotes: result.contractsAwaitingQuotes,
+          contracts_evaluated: result.evaluated,
+          qualified: result.qualified,
+          rejected: result.rejected,
+        },
       });
     }
 
-    // ── DISCOVERY MODE: use getOptionsScreener ──
-    if (scanMode === 'discovery') {
-      console.log('[Discovery] Fetching options from Barchart screener...');
-      const screenerResult = await barchartGetOptionsScreener(apiKey, profile, today, noFilterMode);
-
-      if (screenerResult.error && screenerResult.options.length === 0) {
-        return json({ success: false, provider: 'Barchart', error: 'Barchart data unavailable' });
-      }
-
-      const rawOptions = screenerResult.options;
-      console.log(`[Discovery] Screener returned ${rawOptions.length} put options`);
-
-      if (rawOptions.length === 0) {
-        const emptyCounts = {
-          symbols_in_universe: 0, symbols_returned: 0, symbols_failed: 0, symbols_with_chains: 0,
-          puts_returned: 0, filtered_by_expiration: 0, filtered_by_strike: 0,
-          valid_quotes: 0, contracts_awaiting_quotes: 0, contracts_evaluated: 0,
-          qualified: 0, rejected: 0, pages_fetched: 0, contracts_found: 0,
-        };
-        return json({ success: true, candidates: [], source: 'barchart', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts });
-      }
-
-      // Extract unique underlying symbols
-      const uniqueTickers = [...new Set(rawOptions.map((o: any) => String(o.underlyingSymbol || '').toUpperCase()).filter(Boolean))];
-      console.log(`[Discovery] ${uniqueTickers.length} unique underlyings`);
-
-      // Batch stock quotes for all underlyings
-      const { priceMap } = await barchartGetQuote(apiKey, uniqueTickers.slice(0, 50));
-      console.log(`[Discovery] Stock quotes: ${priceMap.size} prices returned`);
-
-      // Load cached history batch
-      const historyCache = await supabaseLoadHistoryBatch(uniqueTickers.slice(0, 50));
-
-      // Refresh history for up to MAX_HISTORY_TICKERS tickers that need it
-      const tickersNeedingRefresh = uniqueTickers.slice(0, 50).filter((t) => needsHistoryRefresh(t, historyCache.get(t)));
-      const refreshBatch = tickersNeedingRefresh.slice(0, MAX_HISTORY_TICKERS);
-      console.log(`[Discovery] ${tickersNeedingRefresh.length} tickers need history, refreshing ${refreshBatch.length}`);
-
-      if (refreshBatch.length > 0) {
-        const refreshPromise = (async () => {
-          for (const ticker of refreshBatch) {
-            try {
-              const bars = await barchartGetHistory(ticker, apiKey, today);
-              if (bars.length > 0) historyCache.set(ticker, bars);
-            } catch (e) {
-              console.error(`[Discovery] History refresh failed for ${ticker}: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
-        })();
-        try {
-          await Promise.race([refreshPromise, new Promise((r) => setTimeout(r, 3000))]);
-        } catch { /* timeout is fine */ }
-      }
-
-      // Evaluate each option contract through the CSP rule engine
-      const candidates: any[] = [];
-      let evaluated = 0, qualified = 0, rejected = 0;
-      let validQuotes = 0, awaitingQuotes = 0;
-      let filteredByExp = 0, filteredByStrike = 0;
-
-      for (const rawOption of rawOptions) {
-        const normalized = normalizeOptionContract(rawOption, today);
-        if (!normalized.strike || normalized.strike <= 0 || !normalized.expiration) continue;
-        if (!normalized.ticker) continue;
-
-        // Client-side DTE filter
-        if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-          const minDte = profile.min_dte ?? 0;
-          if (normalized.dte < minDte) { filteredByExp++; continue; }
-        }
-
-        // Client-side strike filter
-        if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-          if (normalized.strike > profile.max_strike) { filteredByStrike++; continue; }
-        }
-
-        const upperTicker = normalized.ticker.toUpperCase();
-        const stockPrice = priceMap.get(upperTicker)?.price ?? null;
-        const bars = historyCache.get(upperTicker) || [];
-        const techData = computeTechnicals(bars, stockPrice);
-
-        // Stock price filter
-        if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-          if (profile.minimum_stock_price !== null && stockPrice < profile.minimum_stock_price) continue;
-          if (profile.maximum_stock_price !== null && stockPrice > profile.maximum_stock_price) continue;
-        }
-
-        const { candidate } = evaluateContract(
-          normalized, profile, noFilterMode, upperTicker, openTickers,
-          stockPrice, techData.primarySupport, techData.trendClass, techData.technicalDataAvailable,
-          today, fmt, priceMap.get(upperTicker)?.name || upperTicker, false, techData.secondarySupport, techData.resistance,
-        );
-
-        if (candidate) {
-          evaluated++;
-          if (candidate.qualified) { qualified++; validQuotes += candidate.has_quotes ? 1 : 0; }
-          else { rejected++; }
-          if (!candidate.has_quotes) awaitingQuotes++;
-          candidates.push(candidate);
-        }
-      }
-
-      candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
-      const capped = candidates.slice(0, MAX_CANDIDATES * 2);
-
-      const scan_counts = {
-        symbols_in_universe: uniqueTickers.length,
-        symbols_returned: uniqueTickers.length,
-        symbols_failed: 0,
-        symbols_with_chains: uniqueTickers.length,
-        puts_returned: rawOptions.length,
-        filtered_by_expiration: filteredByExp,
-        filtered_by_strike: filteredByStrike,
-        valid_quotes: validQuotes,
-        contracts_awaiting_quotes: awaitingQuotes,
-        contracts_evaluated: evaluated,
-        qualified,
-        rejected,
-        pages_fetched: Math.min(MAX_SCREENER_PAGES, Math.ceil(rawOptions.length / 100)),
-        contracts_found: rawOptions.length,
-      };
-
-      console.log(`market-scan complete — discovery mode, ${capped.length} candidates`, JSON.stringify(scan_counts));
-
-      return json({
-        success: true, candidates: capped, source: 'barchart',
-        scanned_at: new Date().toISOString(),
-        scan_mode: scanMode, no_filter_mode: noFilterMode,
-        scan_counts,
-      });
+    // ── DISCOVERY / UNIVERSE MODE ──
+    let symbolList: { ticker: string; company_name: string | null }[];
+    if (scanMode === 'universe') {
+      symbolList = await fetchScanUniverse();
+      console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols`);
+    } else {
+      symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
+      console.log(`[ScanMode=discovery] Loaded ${symbolList.length} optionable symbols (cap ${MAX_DISCOVERY_SYMBOLS})`);
     }
-
-    // ── UNIVERSE MODE: scan user's saved tickers ──
-    const symbolList = await fetchScanUniverse();
-    console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols`);
 
     const emptyCounts = {
-      symbols_in_universe: symbolList.length, symbols_returned: 0, symbols_failed: 0, symbols_with_chains: 0,
+      symbols_in_universe: symbolList.length, symbols_requested: symbolList.length,
+      symbols_returned: 0, symbols_failed: 0, symbols_with_chains: 0,
       puts_returned: 0, filtered_by_expiration: 0, filtered_by_strike: 0,
-      valid_quotes: 0, contracts_awaiting_quotes: 0, contracts_evaluated: 0,
-      qualified: 0, rejected: 0, pages_fetched: 0, contracts_found: 0,
+      valid_quotes: 0, contracts_awaiting_quotes: 0,
+      contracts_evaluated: 0, qualified: 0, rejected: 0, pages_fetched: 0,
+      contracts_found: 0,
     };
 
     if (symbolList.length === 0) {
-      return json({ success: true, candidates: [], source: 'barchart', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts });
+      return json({ success: true, candidates: [], source: 'massive', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts });
     }
 
-    const allTickers = symbolList.map((s) => s.ticker.toUpperCase());
-
-    // Batch stock quotes
-    const { priceMap } = await barchartGetQuote(apiKey, allTickers);
-    console.log(`[Universe] Stock quotes: ${priceMap.size}/${allTickers.length} prices returned`);
-
-    // Load cached history
-    const historyCache = await supabaseLoadHistoryBatch(allTickers);
-
-    // Refresh history for tickers that need it
-    const tickersNeedingRefresh = allTickers.filter((t) => needsHistoryRefresh(t, historyCache.get(t)));
-    const refreshBatch = tickersNeedingRefresh.slice(0, MAX_HISTORY_TICKERS);
-    console.log(`[Universe] ${tickersNeedingRefresh.length} tickers need history, refreshing ${refreshBatch.length}`);
-
-    if (refreshBatch.length > 0) {
-      const refreshPromise = (async () => {
-        for (const ticker of refreshBatch) {
-          try {
-            const bars = await barchartGetHistory(ticker, apiKey, today);
-            if (bars.length > 0) historyCache.set(ticker, bars);
-          } catch (e) {
-            console.error(`[Universe] History refresh failed for ${ticker}: ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
-      })();
-      try {
-        await Promise.race([refreshPromise, new Promise((r) => setTimeout(r, 3000))]);
-      } catch { /* timeout is fine */ }
-    }
-
-    // Scan each ticker: fetch put options + evaluate
+    // ── Main scan ──
     const candidates: any[] = [];
     let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
     let totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
     let totalValidQuotes = 0, totalAwaitingQuotes = 0;
-    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0;
+    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPagesFetched = 0;
+    let totalContractsFound = 0;
+    let rawSample: any = null;
+    let verboseCount = 0;
 
     const BATCH_SIZE = 5;
     for (let i = 0; i < symbolList.length; i += BATCH_SIZE) {
@@ -1191,75 +1114,36 @@ serve(async (req) => {
       console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(symbolList.length / BATCH_SIZE)}: ${batch.map((b) => b.ticker).join(', ')}`);
 
       const batchResults = await Promise.all(
-        batch.map(async (sym) => {
-          const upperTicker = sym.ticker.toUpperCase();
-          const stockPrice = priceMap.get(upperTicker)?.price ?? null;
-          const stockName = priceMap.get(upperTicker)?.name || sym.company_name || upperTicker;
-          const bars = historyCache.get(upperTicker) || [];
-          const techData = computeTechnicals(bars, stockPrice);
-
-          // Stock price filter
-          if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-            if (profile.minimum_stock_price !== null && stockPrice < profile.minimum_stock_price) return { skipped: true, candidates: [], putsReturned: 0 };
-            if (profile.maximum_stock_price !== null && stockPrice > profile.maximum_stock_price) return { skipped: true, candidates: [], putsReturned: 0 };
-          }
-
-          // Fetch put options
-          const chainResult = await barchartGetEquityOptions(upperTicker, apiKey, profile, today, noFilterMode);
-
-          if (chainResult.status !== 'success' && chainResult.status !== 'no_options') {
-            console.error(`[Universe] ${upperTicker} chain status: ${chainResult.status}`);
-            return { skipped: true, candidates: [], putsReturned: 0, chainError: true };
-          }
-
-          const symCandidates: any[] = [];
-          let symFilteredByExp = 0, symFilteredByStrike = 0;
-
-          for (const rawContract of chainResult.contracts) {
-            const normalized = normalizeOptionContract(rawContract, today);
-            if (!normalized.strike || normalized.strike <= 0 || !normalized.expiration) continue;
-
-            if (!noFilterMode && !isSectionOff(profile, 'expiration_enabled')) {
-              const minDte = profile.min_dte ?? 0;
-              if (normalized.dte < minDte) { symFilteredByExp++; continue; }
-            }
-
-            if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-              if (normalized.strike > profile.max_strike) { symFilteredByStrike++; continue; }
-            }
-
-            const { candidate } = evaluateContract(
-              normalized, profile, noFilterMode, upperTicker, openTickers,
-              stockPrice, techData.primarySupport, techData.trendClass, techData.technicalDataAvailable,
-              today, fmt, stockName, false, techData.secondarySupport, techData.resistance,
-            );
-            if (candidate) symCandidates.push(candidate);
-          }
-
-          return {
-            skipped: false, candidates: symCandidates, putsReturned: chainResult.contracts.length,
-            filteredByExp: symFilteredByExp, filteredByStrike: symFilteredByStrike,
-            chainStatus: chainResult.status, techData,
-          };
-        }),
+        batch.map((sym) => {
+          const isVerbose = verboseCount < 3;
+          if (isVerbose) verboseCount++;
+          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false)
+            .catch((err) => {
+              console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
+              return null;
+            });
+        })
       );
 
       for (const result of batchResults) {
-        if (result.skipped) { if ((result as any).chainError) symbolsFailed++; continue; }
+        if (!result) { symbolsFailed++; continue; }
         symbolsScanned++;
         totalPutsReturned += result.putsReturned;
-        totalFilteredByExp += result.filteredByExp || 0;
-        totalFilteredByStrike += result.filteredByStrike || 0;
+        totalFilteredByExp += result.filteredByExpiration;
+        totalFilteredByStrike += result.filteredByStrike;
+        totalValidQuotes += result.validQuotes;
+        totalAwaitingQuotes += result.contractsAwaitingQuotes;
+        totalEvaluated += result.evaluated;
+        totalQualified += result.qualified;
+        totalRejected += result.rejected;
+        totalPagesFetched += result.pagesFetched;
+        totalContractsFound += result.putsReturned;
 
-        if (result.candidates.length > 0 || result.putsReturned > 0) symbolsWithChains++;
+        if (result.chainStatus === 'success') symbolsWithChains++;
+        if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') symbolsFailed++;
 
-        for (const candidate of result.candidates) {
-          totalEvaluated++;
-          if (candidate.qualified) { totalQualified++; totalValidQuotes += candidate.has_quotes ? 1 : 0; }
-          else { totalRejected++; }
-          if (!candidate.has_quotes) totalAwaitingQuotes++;
-          candidates.push(candidate);
-        }
+        if (!rawSample && result.rawSample) rawSample = result.rawSample;
+        candidates.push(...result.candidates);
       }
 
       const qualifiedCount = candidates.filter((c) => c.qualified).length;
@@ -1285,21 +1169,21 @@ serve(async (req) => {
       contracts_evaluated: totalEvaluated,
       qualified: totalQualified,
       rejected: totalRejected,
-      pages_fetched: 0,
-      contracts_found: totalPutsReturned,
+      pages_fetched: totalPagesFetched,
+      contracts_found: totalContractsFound,
     };
 
-    console.log(`market-scan complete — universe mode, ${capped.length} candidates`, JSON.stringify(scan_counts));
+    console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));
 
     return json({
-      success: true, candidates: capped, source: 'barchart',
+      success: true, candidates: capped, source: 'massive',
       scanned_at: new Date().toISOString(),
       scan_mode: scanMode, no_filter_mode: noFilterMode,
-      scan_counts,
+      scan_counts, raw_sample: rawSample,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Market scan failed';
     console.error(`market-scan fatal error: ${msg}`);
-    return json({ success: false, provider: 'Barchart', error: 'Barchart data unavailable' });
+    return json({ success: false, provider: 'Massive', error: msg });
   }
 });

@@ -36,11 +36,11 @@ function volClassColor(cls: string): 'success' | 'warning' | 'error' | 'neutral'
 
 function displayPrice(v: number | null | undefined): string {
   if (v === null || v === undefined || v === 0) return 'Unavailable';
-  return `${formatNum(v)}`;
+  return `$${formatNum(v)}`;
 }
 
 function displayTrend(v: string | null | undefined): string {
-  if (!v || v === 'Unavailable' || v === 'Pending History') return v || 'Unavailable';
+  if (!v || v === 'Unavailable') return 'Unavailable';
   return v;
 }
 
@@ -192,14 +192,7 @@ export function DetailPage({
       {!stockPrice && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
           <BarChart3 className="h-4 w-4 shrink-0" />
-          <span>No stock price available for {ticker}. The grouped market data request did not include this ticker.</span>
-        </div>
-      )}
-
-      {stockPrice && candidate.trend_classification === 'Pending History' && (
-        <div className="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-sky-300">
-          <BarChart3 className="h-4 w-4 shrink-0" />
-          <span>Stock price is available. Historical data is still being loaded for {ticker} — trend and support/resistance will appear once history is cached.</span>
+          <span>Historical price data was unavailable for {ticker}. Technical indicators and support/resistance levels could not be calculated. Contract discovery and strike/expiration rules were still applied.</span>
         </div>
       )}
 
@@ -207,7 +200,7 @@ export function DetailPage({
         {/* Technical card — shows data from the scan, or Unavailable */}
         <Card title="Technical Analysis" action={<BarChart3 className="h-4 w-4 text-slate-500" />}>
           <div className="p-5">
-            {stockPrice && candidate.trend_classification !== 'Pending History' ? (
+            {stockPrice ? (
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <MetricIndicator status={candidate.trend_classification === 'Downtrend' ? 'fail' : 'pass'} />
@@ -220,14 +213,9 @@ export function DetailPage({
                   <StatRow label="Resistance" value={displayPrice(resistance)} />
                 </div>
               </div>
-            ) : stockPrice ? (
-              <div className="py-8 text-center">
-                <p className="text-sm text-sky-400">Pending History</p>
-                <p className="text-xs text-slate-500 mt-1">Historical data is being loaded. Technical indicators will appear once history is cached.</p>
-              </div>
             ) : (
               <div className="py-8 text-center">
-                <p className="text-sm text-slate-500">No stock price available — technical indicators could not be calculated.</p>
+                <p className="text-sm text-slate-500">Historical data unavailable — technical indicators could not be calculated.</p>
               </div>
             )}
           </div>

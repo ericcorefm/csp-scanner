@@ -28,7 +28,7 @@ export interface ScanCounts {
 export interface LiveScanResponse {
   success: true;
   candidates: CandidateScan[];
-  source: 'barchart';
+  source: 'massive';
   scanned_at: string;
   scan_mode: ScanMode;
   no_filter_mode: boolean;
@@ -36,28 +36,28 @@ export interface LiveScanResponse {
   raw_sample?: unknown;
 }
 
-export interface BarchartApiError {
+export interface MassiveApiError {
   success: false;
   provider?: string;
   stage?: string;
   symbol?: string;
   endpoint?: string;
   status?: number;
-  barchartStatus?: number;
-  barchartBody?: string;
+  massiveStatus?: number;
+  massiveBody?: string;
   error?: string;
 }
 
-function isBarchartApiError(data: unknown): data is BarchartApiError {
+function isMassiveApiError(data: unknown): data is MassiveApiError {
   return typeof data === 'object' && data !== null && (data as any).success === false;
 }
 
-function formatBarchartError(d: BarchartApiError): string {
+function formatMassiveError(d: MassiveApiError): string {
   const symbol = d.symbol || 'unknown';
   const stage = d.stage ? ` [${d.stage}]` : '';
-  const status = d.barchartStatus ?? d.status ?? 0;
-  const body = d.barchartBody || d.error || 'Unknown error';
-  return `Barchart ${symbol}${stage} HTTP ${status}:\n${body}`;
+  const status = d.massiveStatus ?? d.status ?? 0;
+  const body = d.massiveBody || d.error || 'Unknown error';
+  return `Massive ${symbol}${stage} HTTP ${status}:\n${body}`;
 }
 
 export interface TechnicalData {
@@ -126,6 +126,7 @@ export async function analyzeTicker(
   ticker: string,
   profile: StrategyProfile,
 ): Promise<AnalyzeTickerResponse> {
+  // Route through market-scan edge function with mode=analyze
   const { data, error } = await supabase.functions.invoke('market-scan', {
     body: { mode: 'analyze', ticker, profile },
   });
@@ -138,31 +139,31 @@ export async function analyzeTicker(
         if (body && body.success === false) {
           const symbol = body.symbol || ticker;
           const stage = body.stage ? ` [${body.stage}]` : '';
-          const status = body.barchartStatus || body.status || 0;
-          const msg = body.barchartBody || body.error || 'Unknown error';
-          throw new Error(`Barchart ${symbol}${stage} HTTP ${status}:\n${msg}`);
+          const status = body.massiveStatus || body.status || 0;
+          const msg = body.massiveBody || body.error || 'Unknown error';
+          throw new Error(`Massive ${symbol}${stage} HTTP ${status}:\n${msg}`);
         }
         const msg = (body as any)?.error || (body as any)?.message || JSON.stringify(body);
-        throw new Error(`Barchart HTTP ${ctx.status}:\n${msg}`);
+        throw new Error(`Massive HTTP ${ctx.status}:\n${msg}`);
       } catch (parseErr) {
-        if (parseErr instanceof Error && parseErr.message.startsWith('Barchart ')) throw parseErr;
+        if (parseErr instanceof Error && parseErr.message.startsWith('Massive ')) throw parseErr;
         try {
           const text = await ctx.text();
-          throw new Error(`Barchart HTTP ${ctx.status}:\n${text}`);
+          throw new Error(`Massive HTTP ${ctx.status}:\n${text}`);
         } catch {
-          throw new Error(`Barchart HTTP ${ctx.status}:\n${error.message}`);
+          throw new Error(`Massive HTTP ${ctx.status}:\n${error.message}`);
         }
       }
     }
-    throw new Error(`Barchart HTTP error: ${error.message}`);
+    throw new Error(`Massive HTTP error: ${error.message}`);
   }
 
   if (error instanceof FunctionsRelayError) {
-    throw new Error(`Barchart relay error: ${error.message}`);
+    throw new Error(`Massive relay error: ${error.message}`);
   }
 
   if (error instanceof FunctionsFetchError) {
-    throw new Error(`Barchart fetch error: ${error.message}`);
+    throw new Error(`Massive fetch error: ${error.message}`);
   }
 
   if (error) {
@@ -190,45 +191,53 @@ export async function scanCandidatesLive(
     },
   });
 
+  // FunctionsRelayError — Supabase relay layer failed
   if (error instanceof FunctionsRelayError) {
-    throw new Error(`Barchart relay error: ${error.message}`);
+    throw new Error(`Massive relay error: ${error.message}`);
   }
 
+  // FunctionsFetchError — network-level failure to reach the edge function
   if (error instanceof FunctionsFetchError) {
-    throw new Error(`Barchart fetch error: ${error.message}`);
+    throw new Error(`Massive fetch error: ${error.message}`);
   }
 
+  // FunctionsHttpError — edge function returned a non-2xx status.
+  // Read the actual response body from error.context instead of the generic message.
   if (error instanceof FunctionsHttpError) {
     const ctx = (error as any).context as Response | undefined;
     if (ctx) {
       try {
         const body = await ctx.json();
-        if (isBarchartApiError(body)) {
-          throw new Error(formatBarchartError(body));
+        if (isMassiveApiError(body)) {
+          throw new Error(formatMassiveError(body));
         }
         const msg = (body as any)?.error || (body as any)?.message || JSON.stringify(body);
-        throw new Error(`Barchart HTTP ${ctx.status}:\n${msg}`);
+        throw new Error(`Massive HTTP ${ctx.status}:\n${msg}`);
       } catch (parseErr) {
-        if (parseErr instanceof Error && parseErr.message.startsWith('Barchart ')) {
+        // Re-throw if we already formatted a Massive error above
+        if (parseErr instanceof Error && parseErr.message.startsWith('Massive ')) {
           throw parseErr;
         }
+        // JSON parse failed — try reading as plain text
         try {
           const text = await ctx.text();
-          throw new Error(`Barchart HTTP ${ctx.status}:\n${text}`);
+          throw new Error(`Massive HTTP ${ctx.status}:\n${text}`);
         } catch {
-          throw new Error(`Barchart HTTP ${ctx.status}:\n${error.message}`);
+          throw new Error(`Massive HTTP ${ctx.status}:\n${error.message}`);
         }
       }
     }
-    throw new Error(`Barchart HTTP error: ${error.message}`);
+    throw new Error(`Massive HTTP error: ${error.message}`);
   }
 
+  // Generic error fallback
   if (error) {
     throw new Error(error.message || 'Live market scan failed');
   }
 
-  if (isBarchartApiError(data)) {
-    throw new Error(formatBarchartError(data));
+  // Edge function always returns HTTP 200 now, so errors come through as data.
+  if (isMassiveApiError(data)) {
+    throw new Error(formatMassiveError(data));
   }
 
   if (!data || !Array.isArray(data.candidates)) {
