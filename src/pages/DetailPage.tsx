@@ -153,6 +153,9 @@ export function DetailPage({
                 <div className={`text-xl font-semibold tabular-nums ${stockPrice ? 'text-slate-100' : 'text-slate-600'}`}>
                   {displayPrice(stockPrice)}
                 </div>
+                {candidate.stock_source && candidate.stock_source !== 'daily_aggregates' && candidate.stock_source !== 'none' && (
+                  <div className="text-[10px] text-slate-500 mt-0.5">Latest daily close</div>
+                )}
               </div>
               <div>
                 <div className="text-xs text-slate-500">Primary Support</div>

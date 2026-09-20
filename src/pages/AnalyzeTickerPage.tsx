@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import {
   Search,
   Plus,
@@ -13,6 +13,7 @@ import {
   Crosshair,
   BarChart3,
   MinusCircle,
+  X,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
@@ -22,6 +23,7 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
   const [ticker, setTicker] = useState('');
   const [filterExpiration, setFilterExpiration] = useState<string>('all');
   const [filterStrike, setFilterStrike] = useState<string>('all');
+  const tickerInputRef = useRef<HTMLInputElement>(null);
   const result = state.analyzeResult;
   const error = state.analyzeError;
   const analyzing = state.analyzing;
@@ -32,6 +34,14 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
     setFilterExpiration('all');
     setFilterStrike('all');
     state.runAnalyzeTicker(sym);
+  };
+
+  const handleClear = () => {
+    setTicker('');
+    setFilterExpiration('all');
+    setFilterStrike('all');
+    state.clearAnalyzeResult();
+    tickerInputRef.current?.focus();
   };
 
   const isInUniverse = (sym: string) =>
@@ -84,14 +94,30 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
             </Badge>
           </div>
           <div className="flex items-center gap-2 ml-auto">
-            <input
-              type="text"
-              value={ticker}
-              onChange={(e) => setTicker(e.target.value.toUpperCase())}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleAnalyze(); }}
-              placeholder="e.g. SOFI"
-              className="w-32 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 uppercase placeholder:text-slate-600 placeholder:normal-case text-center font-medium"
-            />
+            <div className="relative">
+              <input
+                ref={tickerInputRef}
+                type="text"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleAnalyze();
+                  if (e.key === 'Escape') handleClear();
+                }}
+                placeholder="e.g. SOFI"
+                aria-label="Ticker to analyze"
+                className="w-32 bg-slate-800 border border-slate-700 rounded-lg pl-3 pr-8 py-2 text-sm text-slate-100 uppercase placeholder:text-slate-600 placeholder:normal-case text-center font-medium focus:outline-none focus:border-sky-500"
+              />
+              {ticker && (
+                <button
+                  onClick={handleClear}
+                  aria-label="Clear ticker"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors p-0.5"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
             <button
               onClick={handleAnalyze}
               disabled={!ticker.trim() || analyzing}
@@ -184,7 +210,7 @@ function AnalyzeResult({
         <div className="p-5">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatBox label="Ticker" value={result.ticker} />
-            <StatBox label="Stock Price" value={result.stock_price != null ? `${formatNum(result.stock_price)}` : 'Unavailable'} />
+            <StatBox label="Stock Price" value={result.stock_price != null ? `${formatNum(result.stock_price)}` : 'Unavailable'} sub={result.stock_source === 'previous_close' || result.stock_source === 'underlying_asset' ? 'Latest daily close' : undefined} />
             <StatBox label="Trend" value={result.trend === 'Unavailable' ? 'Unavailable' : result.trend} />
             <StatBox label="Primary Support" value={result.primary_support != null ? `${formatNum(result.primary_support)}` : 'Unavailable'} />
             <StatBox label="Secondary Support" value={result.secondary_support != null ? `${formatNum(result.secondary_support)}` : 'Unavailable'} />

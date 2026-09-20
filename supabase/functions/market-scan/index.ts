@@ -354,23 +354,33 @@ function logRawContract(label: string, symbol: string, c: any) {
 }
 
 // ── Per-symbol scan result ──
+type StockSnapshot = {
+  ticker: string;
+  currentPrice: number | null;
+  historicalBars: HistoryBar[];
+  source: 'daily_aggregates' | 'previous_close' | 'underlying_asset' | 'none';
+  error: string | null;
+};
+
+// Per-request cache: ticker -> StockSnapshot. Avoids re-fetching history
+// for symbols that appear multiple times (e.g. HUT with 20 contracts).
+const stockCache = new Map<string, StockSnapshot>();
+
 type ScanSymbolResult = {
   candidates: any[];
   chainStatus: ChainStatus;
   putsReturned: number;
   filteredByExpiration: number;
   filteredByStrike: number;
-  // Granular skip counters (must sum to filteredContracts.length)
   missingStrike: number;
   missingExpiration: number;
   missingLastQuote: number;
-  missingBid: number;   // last_quote exists but bid field absent
-  zeroBid: number;      // bid = 0 (illiquid)
-  missingAsk: number;   // last_quote exists but ask field absent
-  zeroAsk: number;      // ask = 0
+  missingBid: number;
+  zeroBid: number;
+  missingAsk: number;
+  zeroAsk: number;
   askLtBid: number;
   otherInvalid: number;
-  // Valid contracts
   validQuotes: number;
   contractsAwaitingQuotes: number;
   evaluated: number;
@@ -378,9 +388,9 @@ type ScanSymbolResult = {
   rejected: number;
   pagesFetched: number;
   rawSample?: any;
-  // For analyze mode
   analyses?: any[];
-  stockPrice?: number;
+  stockPrice?: number | null;
+  stockSource?: string;
   primarySupport?: number | null;
   secondarySupport?: number | null;
   resistance?: number | null;
@@ -390,6 +400,75 @@ type ScanSymbolResult = {
   historyError?: string;
   technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
 };
+
+// ── Shared stock snapshot: fetches history + current price with fallback order ──
+// Fallback order: 1. latest daily aggregate close, 2. previous-close endpoint,
+// 3. newest valid historical bar close. Retry once on failure. Cached per-request.
+async function getStockSnapshot(
+  ticker: string,
+  apiKey: string,
+  today: Date,
+  fmt: (d: Date) => string,
+): Promise<StockSnapshot> {
+  const upper = ticker.toUpperCase();
+  const cached = stockCache.get(upper);
+  if (cached) return cached;
+
+  const start = new Date(today);
+  start.setDate(start.getDate() - 420);
+
+  // 1. Daily aggregates (~300+ trading days)
+  const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
+  let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
+
+  // Retry once on failure
+  if (!histResult.ok) {
+    console.log(`[StockSnapshot] ${upper} | aggregates failed (HTTP ${histResult.status}), retrying...`);
+    histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
+  }
+
+  let bars: HistoryBar[] = [];
+  let source: StockSnapshot['source'] = 'none';
+  let error: string | null = null;
+
+  if (histResult.ok) {
+    bars = (histResult.data?.results || []).map((b: any) => ({
+      date: new Date(b.t).toISOString().slice(0, 10),
+      open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
+    })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+    if (bars.length) source = 'daily_aggregates';
+  } else {
+    error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+  }
+
+  // 2. Fallback: previous-close endpoint
+  if (!bars.length) {
+    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
+    let prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
+    if (!prevResult.ok) {
+      prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close_retry');
+    }
+    if (prevResult.ok) {
+      bars = (prevResult.data?.results || []).map((b: any) => ({
+        date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
+        open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
+      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+      if (bars.length) source = 'previous_close';
+    } else if (!error) {
+      error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
+    }
+  }
+
+  // 3. Current price: latest bar close (from whichever source succeeded)
+  let currentPrice: number | null = null;
+  if (bars.length) {
+    currentPrice = Number(bars.at(-1)!.close);
+  }
+
+  const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error };
+  stockCache.set(upper, snapshot);
+  return snapshot;
+}
 
 async function scanSymbol(
   symbol: string,
@@ -412,47 +491,23 @@ async function scanSymbol(
     validQuotes: 0, contractsAwaitingQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pagesFetched: 0,
   };
 
-  const start = new Date(today); start.setDate(start.getDate() - 420);
+  // Step 1: Stock snapshot via shared function (cached per ticker)
+  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt);
+  let bars = snapshot.historicalBars;
+  let stockPrice: number | null = snapshot.currentPrice;
+  r.stockSource = snapshot.source;
 
-  // Step 1: Stock aggregates. Analyze Ticker must not fail just because the
-  // history endpoint is temporarily empty. Retry with previous-close data and,
-  // if needed, continue with contract discovery while marking technical data unavailable.
-  const histPath = `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
-  const histResult = await massiveFetch(histPath, apiKey, symbol, 'stock_aggregates');
-
-  let bars: HistoryBar[] = [];
-  if (histResult.ok) {
-    bars = (histResult.data?.results || []).map((b: any) => ({
-      date: new Date(b.t).toISOString().slice(0, 10),
-      open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
-    })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-  } else {
+  if (snapshot.error) {
     r.historyStatus = 'error';
-    r.historyError = `HTTP ${histResult.status}: ${histResult.body}`;
-  }
-
-  // Fallback to Massive previous-close endpoint if the daily history request is empty.
-  // This preserves Analyze Ticker contract discovery and stock-price filtering even
-  // when a historical aggregate request is unavailable. Technical/support fields are
-  // only considered available when sufficient daily history exists.
-  if (!bars.length) {
-    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(symbol)}/prev?adjusted=true`;
-    const prevResult = await massiveFetch(prevPath, apiKey, symbol, 'stock_previous_close');
-    if (prevResult.ok) {
-      bars = (prevResult.data?.results || []).map((b: any) => ({
-        date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
-        open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
-      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-      if (bars.length) r.historyStatus = 'fallback';
-    } else if (!r.historyError) {
-      r.historyStatus = 'error';
-      r.historyError = `HTTP ${prevResult.status}: ${prevResult.body}`;
-    }
-  } else {
+    r.historyError = snapshot.error;
+  } else if (snapshot.source === 'previous_close') {
+    r.historyStatus = 'fallback';
+  } else if (snapshot.source === 'daily_aggregates') {
     r.historyStatus = 'success';
+  } else {
+    r.historyStatus = 'empty';
   }
 
-  let stockPrice = bars.length ? Number(bars.at(-1)!.close) : 0;
   const technicalDataAvailable = bars.length >= 20;
   r.technicalDataAvailable = technicalDataAvailable;
 
@@ -462,7 +517,7 @@ async function scanSymbol(
   // This filters the underlying stock price, independent of put strike price.
   // A $71 stock with max put strike $25 is still allowed — stock price and
   // strike price are separate filters.
-  if (stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
     if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
       if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} < minimum ${profile.minimum_stock_price}, skipping symbol`);
       r.chainStatus = 'no_options';
@@ -475,8 +530,8 @@ async function scanSymbol(
     }
   }
 
-  let primarySupport: number | null = technicalDataAvailable ? calcPrimarySupport(bars, stockPrice) : null;
-  let secondarySupport: number | null = technicalDataAvailable ? calcSecondarySupport(bars, primarySupport!) : null;
+  let primarySupport: number | null = technicalDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
+  let secondarySupport: number | null = technicalDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
   let resistance: number | null = technicalDataAvailable ? findResistance(bars) : null;
   let trendClass = technicalDataAvailable ? trend(bars) : 'Unavailable';
 
@@ -583,18 +638,19 @@ async function scanSymbol(
 
   // Final stock-price fallback from the option snapshot's underlying_asset object.
   // This is contract-discovery data, not an invented price.
-  if (!stockPrice && allRawContracts.length) {
+  if (stockPrice === null && allRawContracts.length) {
     const underlyingPrice = allRawContracts
       .map((c: any) => Number(c?.underlying_asset?.price || c?.underlying_asset?.value || 0))
       .find((v: number) => Number.isFinite(v) && v > 0) || 0;
     if (underlyingPrice > 0) {
       stockPrice = underlyingPrice;
       r.stockPrice = stockPrice;
+      r.stockSource = 'underlying_asset';
     }
   }
 
   // Apply deferred underlying-price filters after all real price fallbacks were tried.
-  if (stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
     if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
       r.chainStatus = 'no_options';
       return r;
@@ -802,13 +858,14 @@ async function scanSymbol(
         breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
         qualified: finalQualified, pass_fail: passFail,
         has_quotes: hasValidQuote,
-        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
+        strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
       });
     } else {
       r.candidates.push({
         scan_date: fmt(today), ticker: symbol, company_name: companyName || symbol,
-        stock_price: Number(stockPrice.toFixed(2)),
+        stock_price: stockPrice !== null && stockPrice > 0 ? Number(stockPrice.toFixed(2)) : null,
+        stock_source: r.stockSource || 'none',
         strike, expiration, dte,
         bid: hasValidQuote ? Number(bid!.toFixed(2)) : 0,
         ask: hasValidQuote ? Number(ask!.toFixed(2)) : 0,
@@ -825,7 +882,7 @@ async function scanSymbol(
         breakeven: hasValidQuote ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
         strategy_profile_id: profile.id,
-        strike_distance_from_stock: stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
+        strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
         has_quotes: hasValidQuote,
         secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
@@ -901,7 +958,7 @@ serve(async (req) => {
         });
       }
 
-      if (!result.stockPrice && result.putsReturned === 0) {
+      if (result.stockPrice === null && result.putsReturned === 0) {
         return json({
           success: false,
           error: `No usable stock price or put contracts returned for ${ticker}`,
@@ -920,7 +977,8 @@ serve(async (req) => {
       return json({
         success: true,
         ticker,
-        stock_price: result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
+        stock_price: result.stockPrice !== null && result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
+        stock_source: result.stockSource || 'none',
         trend: result.trendClass || 'Unknown',
         primary_support: result.primarySupport !== null ? Number(result.primarySupport.toFixed(2)) : null,
         secondary_support: result.secondarySupport !== null ? Number(result.secondarySupport.toFixed(2)) : null,

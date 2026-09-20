@@ -214,6 +214,11 @@ export function useAppState() {
     }
   }, [activeProfile, analyzing]);
 
+  const clearAnalyzeResult = useCallback(() => {
+    setAnalyzeResult(null);
+    setAnalyzeError(null);
+  }, []);
+
   const runScan = useCallback(async () => {
     if (!activeProfile || scanning || !positionsLoaded) return;
     if (scanMode === 'universe' && scanUniverse.length === 0) {
@@ -279,6 +284,8 @@ export function useAppState() {
         volume_classification: r.volume_classification,
         trend_classification: r.trend_classification,
         primary_support: r.primary_support,
+        secondary_support: r.secondary_support ?? null,
+        resistance: r.resistance ?? null,
         suggested_sto: r.suggested_sto,
         suggested_btc: r.suggested_btc,
         net_profit: r.net_profit,
@@ -288,6 +295,10 @@ export function useAppState() {
         qualified: r.qualified,
         rejection_reasons: r.rejection_reasons,
         strategy_profile_id: activeProfile.id,
+        strike_distance_from_stock: r.strike_distance_from_stock ?? null,
+        strike_distance_from_support: r.strike_distance_from_support ?? null,
+        has_quotes: r.has_quotes,
+        stock_source: r.stock_source ?? null,
       }));
 
       if (insertData.length > 0) {
@@ -526,6 +537,7 @@ export function useAppState() {
     analyzeResult,
     analyzeError,
     runAnalyzeTicker,
+    clearAnalyzeResult,
   };
 }
 

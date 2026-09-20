@@ -79,6 +79,7 @@ export interface AnalyzeTickerResponse {
   success: true;
   ticker: string;
   stock_price: number | null;
+  stock_source?: string;
   trend: string;
   primary_support: number | null;
   secondary_support: number | null;

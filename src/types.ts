@@ -125,6 +125,7 @@ export interface CandidateScan {
   ticker: string;
   company_name: string;
   stock_price: number | null;
+  stock_source?: string;
   strike: number;
   expiration: string;
   dte: number;
