@@ -99,6 +99,24 @@ export interface ContractAnalysis {
   pass_fail: { rule: string; pass: boolean }[];
 }
 
+export async function fetchAvailableExpirations(
+  scanMode: ScanMode,
+): Promise<string[]> {
+  const { data, error } = await supabase.functions.invoke('market-scan', {
+    body: { mode: 'list-expirations', scanMode },
+  });
+
+  if (error) {
+    throw new Error(error.message || 'Failed to fetch expiration dates');
+  }
+
+  if (!data || data.success === false) {
+    throw new Error((data as any)?.error || 'Failed to fetch expiration dates');
+  }
+
+  return (data.expirations as string[]) || [];
+}
+
 export async function analyzeTicker(
   ticker: string,
   profile: StrategyProfile,

@@ -3,6 +3,8 @@ import { Save, RotateCcw, Copy, Plus, Trash2, Check, AlertCircle } from 'lucide-
 import type { AppState } from '@/lib/types';
 import type { StrategyProfile } from '@/types';
 import { Card } from '@/components/ui';
+import { ExpirationSelect } from '@/components/ExpirationSelect';
+import type { ScanMode } from '@/lib/liveMarketData';
 
 interface FieldDef {
   key: keyof StrategyProfile;
@@ -34,9 +36,8 @@ const sections: SectionDef[] = [
     title: 'Expiration',
     enabledKey: 'expiration_enabled',
     fields: [
-      { key: 'min_dte', label: 'Minimum DTE', type: 'integer', unit: 'days', help: 'Minimum days to expiration.' },
-      { key: 'max_dte', label: 'Maximum DTE', type: 'integer', unit: 'days', help: 'Maximum days to expiration.' },
-      { key: 'preferred_expirations', label: 'Preferred Expiration Dates', type: 'date_array', help: 'Specific dates (YYYY-MM-DD). If empty, use DTE range.', placeholder: '2028-01-21' },
+      { key: 'min_dte', label: 'Minimum DTE', type: 'integer', unit: 'days', help: 'Minimum days to expiration. Ignored when specific expiration dates are selected.' },
+      { key: 'max_dte', label: 'Maximum DTE', type: 'integer', unit: 'days', help: 'Maximum days to expiration. Ignored when specific expiration dates are selected.' },
     ],
   },
   {
@@ -111,6 +112,11 @@ export function SettingsPage({ state }: { state: AppState }) {
     setProfile(state.activeProfile);
   }, [state.activeProfile]);
 
+  // Load available expiration dates from Massive when the page mounts
+  useEffect(() => {
+    state.loadAvailableExpirations(state.scanMode as ScanMode);
+  }, [state.scanMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!profile) return <div className="text-slate-400">Loading...</div>;
 
   const updateField = (key: keyof StrategyProfile, value: string | number | boolean | string[] | number[]) => {
@@ -168,35 +174,6 @@ export function SettingsPage({ state }: { state: AppState }) {
   };
 
   const renderField = (field: FieldDef, disabled: boolean) => {
-    if (field.type === 'date_array') {
-      const arr = profile[field.key] as string[];
-      return (
-        <div className="flex flex-col items-end gap-1">
-          <input
-            type="text"
-            value={arr.join(', ')}
-            onChange={(e) => {
-              const vals = e.target.value.split(',').map((v) => v.trim()).filter(Boolean);
-              updateField(field.key, vals);
-            }}
-            placeholder={field.placeholder || 'YYYY-MM-DD, ...'}
-            disabled={disabled}
-            className="w-48 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
-          />
-          {arr.length > 0 && (
-            <div className="flex flex-wrap gap-1 justify-end max-w-48">
-              {arr.map((d) => (
-                <span key={d} className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300">
-                  {d}
-                  <button onClick={() => updateField(field.key, arr.filter((x) => x !== d))} className="text-slate-500 hover:text-red-400" disabled={disabled}>&times;</button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      );
-    }
-
     if (field.type === 'number_array') {
       const arr = profile[field.key] as number[];
       return (
@@ -439,10 +416,28 @@ export function SettingsPage({ state }: { state: AppState }) {
                   const dteSuppressed = preferredDates.length > 0 && enabled;
                   return (
                     <div className={`rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300 ${dteSuppressed ? '' : 'hidden'}`}>
-                      Preferred Expiration Dates is active, so DTE range is ignored.
+                      Specific expiration dates are selected, so DTE range is ignored.
                     </div>
                   );
                 })()}
+                {section.title === 'Expiration' && (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <label className={`text-sm ${enabled ? 'text-slate-300' : 'text-slate-500'}`}>Preferred Expiration Dates</label>
+                        <p className="text-xs text-slate-500 mt-0.5">Select specific dates to filter to, or choose Any Expiration to use DTE range.</p>
+                      </div>
+                    </div>
+                    <ExpirationSelect
+                      availableDates={state.availableExpirations}
+                      selectedDates={profile.preferred_expirations || []}
+                      loading={state.expirationsLoading}
+                      error={state.expirationsError}
+                      onChange={(dates) => updateField('preferred_expirations', dates)}
+                      disabled={!enabled}
+                    />
+                  </div>
+                )}
                 {section.fields.map((field) => {
                   const preferredDates = (profile.preferred_expirations || []).filter(Boolean);
                   const dteSuppressed = section.title === 'Expiration' && preferredDates.length > 0 && enabled && (field.key === 'min_dte' || field.key === 'max_dte');

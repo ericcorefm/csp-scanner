@@ -726,6 +726,49 @@ serve(async (req) => {
 
     console.log(`mode=${mode}, scanMode=${scanMode}, noFilterMode=${noFilterMode}`);
 
+    // ── LIST-EXPIRATIONS MODE: collect all unique PUT expiration dates ──
+    if (mode === 'list-expirations') {
+      let symbolList: { ticker: string; company_name: string | null }[];
+      if (scanMode === 'universe') {
+        symbolList = await fetchScanUniverse();
+      } else {
+        symbolList = await fetchMarketUniverse(50);
+      }
+
+      const today = new Date();
+      const todayStr = fmt(today);
+      const allExpirations = new Set<string>();
+
+      const BATCH = 5;
+      for (let i = 0; i < symbolList.length; i += BATCH) {
+        const batch = symbolList.slice(i, i + BATCH);
+        const results = await Promise.all(
+          batch.map(async (sym) => {
+            const chainParams = new URLSearchParams();
+            chainParams.set('contract_type', 'put');
+            const chainPath = `/v3/snapshot/options/${encodeURIComponent(sym.ticker)}?${chainParams.toString()}`;
+            const pageResult = await massiveFetch(chainPath, apiKey, sym.ticker, 'list_expirations');
+            if (!pageResult.ok) return [];
+            const contracts = (pageResult.data?.results || []).filter((c: any) => c?.details?.contract_type === 'put');
+            return contracts.map((c: any) => {
+              const expRaw = c?.details?.expiration_date;
+              if (!expRaw) return '';
+              const d = parseExpirationDate(expRaw);
+              if (!d) return '';
+              return fmt(d);
+            }).filter(Boolean);
+          }),
+        );
+        for (const exps of results) {
+          for (const e of exps) allExpirations.add(e);
+        }
+      }
+
+      const sorted = [...allExpirations].filter((d) => d >= todayStr).sort();
+      console.log(`[list-expirations] Found ${sorted.length} unique expiration dates`);
+      return json({ success: true, expirations: sorted });
+    }
+
     // ── ANALYZE MODE: deep-analyze a single ticker ──
     if (mode === 'analyze') {
       const ticker = String(body.ticker || '').toUpperCase().trim();
