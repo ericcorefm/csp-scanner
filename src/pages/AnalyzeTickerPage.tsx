@@ -210,7 +210,7 @@ function AnalyzeResult({
         <div className="p-5">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatBox label="Ticker" value={result.ticker} />
-            <StatBox label="Stock Price" value={result.stock_price != null ? `${formatNum(result.stock_price)}` : 'Unavailable'} sub={result.stock_source === 'previous_close' || result.stock_source === 'underlying_asset' ? 'Latest daily close' : undefined} />
+            <StatBox label="Stock Price" value={result.stock_price != null ? `${formatNum(result.stock_price)}` : 'Unavailable'} sub={result.stock_source && result.stock_source !== 'daily_aggregates' && result.stock_source !== 'none' ? 'Latest daily close' : undefined} />
             <StatBox label="Trend" value={result.trend === 'Unavailable' ? 'Unavailable' : result.trend} />
             <StatBox label="Primary Support" value={result.primary_support != null ? `${formatNum(result.primary_support)}` : 'Unavailable'} />
             <StatBox label="Secondary Support" value={result.secondary_support != null ? `${formatNum(result.secondary_support)}` : 'Unavailable'} />

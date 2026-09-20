@@ -359,7 +359,7 @@ type StockSnapshot = {
   ticker: string;
   currentPrice: number | null;
   historicalBars: HistoryBar[];
-  source: 'daily_aggregates' | 'previous_close' | 'underlying_asset' | 'none';
+  source: 'ticker_snapshot' | 'daily_aggregates' | 'previous_close' | 'underlying_asset' | 'none';
   error: string | null;
 };
 
@@ -403,8 +403,13 @@ type ScanSymbolResult = {
 };
 
 // ── Shared stock snapshot: fetches history + current price with fallback order ──
-// Fallback order: 1. latest daily aggregate close, 2. previous-close endpoint,
-// 3. newest valid historical bar close. Retry once on failure. Cached per-request.
+// Fallback order:
+//   1. Single-ticker snapshot endpoint (day.close — latest completed daily close)
+//   2. Daily aggregates (range/1/day — historical OHLCV for technicals)
+//   3. Previous-close endpoint
+//   4. Newest valid cached daily close (from any source that returned bars)
+// Only shows Unavailable if all sources fail. Never uses $0.00.
+// Retries once on failure. Cached per-request.
 async function getStockSnapshot(
   ticker: string,
   apiKey: string,
@@ -416,54 +421,98 @@ async function getStockSnapshot(
   if (cached) return cached;
 
   const start = new Date(today);
-  start.setDate(start.getDate() - 420);
-
-  // 1. Daily aggregates (~300+ trading days)
-  const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
-  let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
-
-  // Retry once on failure
-  if (!histResult.ok) {
-    console.log(`[StockSnapshot] ${upper} | aggregates failed (HTTP ${histResult.status}), retrying...`);
-    histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
-  }
+  start.setDate(start.getDate() - 420); // ~290 trading days, enough for 200 DMA
 
   let bars: HistoryBar[] = [];
+  let currentPrice: number | null = null;
   let source: StockSnapshot['source'] = 'none';
   let error: string | null = null;
 
+  // 1. Single-ticker snapshot — latest completed daily close + prevDay
+  const snapPath = `/v2/snapshot/locale/us/markets/stocks/tickers/${encodeURIComponent(upper)}`;
+  let snapResult = await massiveFetch(snapPath, apiKey, upper, 'stock_ticker_snapshot');
+  if (!snapResult.ok) {
+    snapResult = await massiveFetch(snapPath, apiKey, upper, 'stock_ticker_snapshot_retry');
+  }
+  if (snapResult.ok) {
+    const day = snapResult.data?.ticker?.day;
+    const prevDay = snapResult.data?.ticker?.prevDay;
+    // day.close = latest completed daily close
+    if (day && Number(day.c) > 0) {
+      currentPrice = Number(day.c);
+      source = 'ticker_snapshot';
+    } else if (prevDay && Number(prevDay.c) > 0) {
+      currentPrice = Number(prevDay.c);
+      source = 'ticker_snapshot';
+    }
+    // Build a minimal bar from the snapshot day for technical fallback if aggregates fail
+    if (day && Number(day.c) > 0) {
+      const d = day;
+      bars = [{
+        date: d.t ? new Date(d.t).toISOString().slice(0, 10) : fmt(today),
+        open: Number(d.o || d.c || 0), high: Number(d.h || d.c || 0),
+        low: Number(d.l || d.c || 0), close: Number(d.c), volume: Number(d.v || 0),
+      }];
+    }
+  } else {
+    error = `Snapshot HTTP ${snapResult.status}: ${snapResult.body.slice(0, 200)}`;
+  }
+
+  // 2. Daily aggregates — historical OHLCV for technical calculations
+  const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
+  let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
+  if (!histResult.ok) {
+    histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
+  }
   if (histResult.ok) {
-    bars = (histResult.data?.results || []).map((b: any) => ({
+    const histBars = (histResult.data?.results || []).map((b: any) => ({
       date: new Date(b.t).toISOString().slice(0, 10),
       open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
     })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-    if (bars.length) source = 'daily_aggregates';
-  } else {
+    if (histBars.length) {
+      bars = histBars; // Replace snapshot-only bar with full history
+      // If snapshot didn't give a price, use latest aggregate close
+      if (currentPrice === null) {
+        currentPrice = Number(histBars.at(-1)!.close);
+        source = 'daily_aggregates';
+      }
+    }
+  } else if (!error) {
     error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
   }
 
-  // 2. Fallback: previous-close endpoint
-  if (!bars.length) {
+  // 3. Fallback: previous-close endpoint (if still no price or bars)
+  if (currentPrice === null || bars.length < 20) {
     const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
     let prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
     if (!prevResult.ok) {
       prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close_retry');
     }
     if (prevResult.ok) {
-      bars = (prevResult.data?.results || []).map((b: any) => ({
+      const prevBars = (prevResult.data?.results || []).map((b: any) => ({
         date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
         open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
       })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-      if (bars.length) source = 'previous_close';
+      if (prevBars.length && currentPrice === null) {
+        currentPrice = Number(prevBars.at(-1)!.close);
+        source = 'previous_close';
+      }
+      // Merge any additional bars (won't help 200 DMA but ensures some data)
+      if (prevBars.length && bars.length < 20) {
+        const existingDates = new Set(bars.map((b) => b.date));
+        for (const pb of prevBars) {
+          if (!existingDates.has(pb.date)) bars.push(pb);
+        }
+      }
     } else if (!error) {
       error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
     }
   }
 
-  // 3. Current price: latest bar close (from whichever source succeeded)
-  let currentPrice: number | null = null;
-  if (bars.length) {
+  // 4. Final fallback: newest cached valid daily close (already captured above)
+  if (currentPrice === null && bars.length) {
     currentPrice = Number(bars.at(-1)!.close);
+    source = source === 'none' ? 'daily_aggregates' : source;
   }
 
   const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error };
@@ -498,13 +547,13 @@ async function scanSymbol(
   let stockPrice: number | null = snapshot.currentPrice;
   r.stockSource = snapshot.source;
 
-  if (snapshot.error) {
+  if (snapshot.error && !bars.length) {
     r.historyStatus = 'error';
     r.historyError = snapshot.error;
-  } else if (snapshot.source === 'previous_close') {
-    r.historyStatus = 'fallback';
-  } else if (snapshot.source === 'daily_aggregates') {
+  } else if (bars.length >= 20) {
     r.historyStatus = 'success';
+  } else if (bars.length > 0) {
+    r.historyStatus = 'fallback';
   } else {
     r.historyStatus = 'empty';
   }
