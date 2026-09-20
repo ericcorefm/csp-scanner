@@ -1,13 +1,9 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Calendar, Check, X, AlertCircle, ChevronDown, RefreshCw } from 'lucide-react';
+import { Calendar, X, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
 
 interface ExpirationSelectProps {
-  availableDates: string[];
   selectedDates: string[];
-  loading: boolean;
-  error: string | null;
   onChange: (dates: string[]) => void;
-  onRefresh: () => void;
   disabled?: boolean;
 }
 
@@ -21,18 +17,23 @@ function isoToday(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+const WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+const MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
 export function ExpirationSelect({
-  availableDates,
   selectedDates,
-  loading,
-  error,
   onChange,
-  onRefresh,
   disabled,
 }: ExpirationSelectProps) {
   const [open, setOpen] = useState(false);
+  const [viewYear, setViewYear] = useState(() => new Date().getFullYear());
+  const [viewMonth, setViewMonth] = useState(() => new Date().getMonth());
   const ref = useRef<HTMLDivElement>(null);
   const today = isoToday();
+  const todayDate = new Date(today + 'T00:00:00');
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -44,20 +45,9 @@ export function ExpirationSelect({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [open]);
 
-  // Sorted available dates (nearest to farthest), filtered to future only
-  const sortedAvailable = useMemo(() => {
-    return [...new Set(availableDates)]
-      .filter((d) => d >= today)
-      .sort((a, b) => a.localeCompare(b));
-  }, [availableDates, today]);
-
-  // Selected dates that are no longer available
-  const unavailableSelected = useMemo(() => {
-    return selectedDates.filter((d) => !sortedAvailable.includes(d));
-  }, [selectedDates, sortedAvailable]);
-
-  // "Any Expiration" = no specific dates selected
-  const isAnyExpiration = selectedDates.length === 0;
+  const sortedSelected = useMemo(() => {
+    return [...selectedDates].sort((a, b) => a.localeCompare(b));
+  }, [selectedDates]);
 
   const toggleDate = (date: string) => {
     if (selectedDates.includes(date)) {
@@ -67,159 +57,195 @@ export function ExpirationSelect({
     }
   };
 
-  const selectAny = () => {
-    onChange([]);
-  };
-
   const removeDate = (date: string, e: React.MouseEvent) => {
     e.stopPropagation();
     onChange(selectedDates.filter((d) => d !== date));
   };
 
+  const clearAll = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onChange([]);
+  };
+
+  const prevMonth = () => {
+    if (viewMonth === 0) {
+      setViewMonth(11);
+      setViewYear((y) => y - 1);
+    } else {
+      setViewMonth((m) => m - 1);
+    }
+  };
+
+  const nextMonth = () => {
+    if (viewMonth === 11) {
+      setViewMonth(0);
+      setViewYear((y) => y + 1);
+    } else {
+      setViewMonth((m) => m + 1);
+    }
+  };
+
+  // Build calendar grid for the current view month
+  const calendarDays = useMemo(() => {
+    const firstOfMonth = new Date(viewYear, viewMonth, 1);
+    const startDayOfWeek = firstOfMonth.getDay();
+    const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+
+    const days: (string | null)[] = [];
+    // Leading blanks for alignment
+    for (let i = 0; i < startDayOfWeek; i++) {
+      days.push(null);
+    }
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iso = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      days.push(iso);
+    }
+    // Trailing blanks to fill the last week
+    while (days.length % 7 !== 0) {
+      days.push(null);
+    }
+    return days;
+  }, [viewYear, viewMonth]);
+
+  const isDateDisabled = (iso: string): boolean => {
+    const d = new Date(iso + 'T00:00:00');
+    return d < todayDate;
+  };
+
+  const isAnyExpiration = selectedDates.length === 0;
+
   return (
     <div className="w-full" ref={ref}>
       {/* Selected chips */}
-      {selectedDates.length > 0 && (
+      {sortedSelected.length > 0 && (
         <div className="flex flex-wrap gap-1 mb-2">
-          {selectedDates.map((d) => {
-            const isUnavailable = !sortedAvailable.includes(d);
-            return (
-              <span
-                key={d}
-                className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${
-                  isUnavailable
-                    ? 'bg-red-900/30 border border-red-700/40 text-red-300'
-                    : 'bg-slate-700/50 text-slate-300'
-                }`}
-              >
-                {isUnavailable && <AlertCircle className="h-3 w-3 shrink-0" />}
-                <span className={isUnavailable ? 'italic' : ''}>{formatReadable(d)}</span>
-                {isUnavailable && <span className="text-red-400/70 text-[10px]">(unavailable)</span>}
-                <button
-                  onClick={(e) => removeDate(d, e)}
-                  className="text-slate-500 hover:text-red-400"
-                  disabled={disabled}
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Dropdown trigger + refresh button */}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => !disabled && !loading && setOpen(!open)}
-          disabled={disabled || loading}
-          className="flex-1 flex items-center justify-between gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed hover:border-slate-600 transition-colors"
-        >
-          <span className="flex items-center gap-2">
-            <Calendar className="h-4 w-4 text-slate-500" />
-            {loading ? (
-              <span className="text-slate-500">Loading expiration dates...</span>
-            ) : isAnyExpiration ? (
-              <span className="text-slate-300">Any Expiration</span>
-            ) : selectedDates.length === 1 ? (
-              <span className="text-slate-200">{formatReadable(selectedDates[0])}</span>
-            ) : (
-              <span className="text-slate-200">{selectedDates.length} dates selected</span>
-            )}
-          </span>
-          <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`} />
-        </button>
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={disabled || loading}
-          title="Refresh expiration dates"
-          className="shrink-0 rounded-lg border border-slate-700 bg-slate-800 p-2 text-slate-400 hover:text-slate-200 hover:border-slate-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
-
-      {/* Error state with retry */}
-      {error && !loading && (
-        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-900/40 bg-red-900/10 px-3 py-2">
-          <span className="text-xs text-red-300">Expiration dates could not be loaded.</span>
-          <button
-            type="button"
-            onClick={onRefresh}
-            disabled={disabled}
-            className="shrink-0 rounded border border-red-700/40 px-2 py-1 text-xs text-red-300 hover:bg-red-900/20 transition-colors disabled:opacity-40"
-          >
-            Retry
-          </button>
-        </div>
-      )}
-
-      {/* Dropdown panel */}
-      {open && (
-        <div className="absolute z-50 mt-1 w-full max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-800 shadow-xl">
-          {/* Any Expiration option */}
-          <button
-            type="button"
-            onClick={selectAny}
-            className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-colors hover:bg-slate-700/50 ${
-              isAnyExpiration ? 'text-sky-400 bg-sky-500/10' : 'text-slate-300'
-            }`}
-          >
-            <span>Any Expiration</span>
-            {isAnyExpiration && <Check className="h-4 w-4" />}
-          </button>
-
-          {sortedAvailable.length > 0 && (
-            <div className="border-t border-slate-700">
-              <div className="px-3 py-1.5 text-xs text-slate-500 font-medium">Available Expiration Dates</div>
-            </div>
-          )}
-
-          {sortedAvailable.map((date) => {
-            const isSelected = selectedDates.includes(date);
-            return (
+          {sortedSelected.map((d) => (
+            <span
+              key={d}
+              className="inline-flex items-center gap-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-xs text-slate-300"
+            >
+              <span>{formatReadable(d)}</span>
               <button
-                key={date}
-                type="button"
-                onClick={() => toggleDate(date)}
-                className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-colors hover:bg-slate-700/50 ${
-                  isSelected ? 'text-sky-400 bg-sky-500/10' : 'text-slate-300'
-                }`}
+                onClick={(e) => removeDate(d, e)}
+                className="text-slate-500 hover:text-red-400"
+                disabled={disabled}
               >
-                <span>{formatReadable(date)}</span>
-                {isSelected && <Check className="h-4 w-4" />}
+                <X className="h-3 w-3" />
               </button>
-            );
-          })}
+            </span>
+          ))}
+          <button
+            onClick={clearAll}
+            disabled={disabled}
+            className="inline-flex items-center gap-1 rounded border border-slate-700 px-1.5 py-0.5 text-xs text-slate-400 hover:text-red-400 hover:border-red-800/40 transition-colors disabled:opacity-40"
+          >
+            <Trash2 className="h-3 w-3" />
+            Clear Dates
+          </button>
+        </div>
+      )}
 
-          {/* Unavailable selected dates */}
-          {unavailableSelected.length > 0 && (
-            <div className="border-t border-slate-700">
-              <div className="px-3 py-1.5 text-xs text-red-400/70 font-medium">No Longer Available</div>
-              {unavailableSelected.map((date) => (
+      {/* Trigger button */}
+      <button
+        type="button"
+        onClick={() => !disabled && setOpen(!open)}
+        disabled={disabled}
+        className="w-full flex items-center justify-between gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed hover:border-slate-600 transition-colors"
+      >
+        <span className="flex items-center gap-2">
+          <Calendar className="h-4 w-4 text-slate-500" />
+          {isAnyExpiration ? (
+            <span className="text-slate-400">Select dates</span>
+          ) : sortedSelected.length === 1 ? (
+            <span className="text-slate-200">{formatReadable(sortedSelected[0])}</span>
+          ) : (
+            <span className="text-slate-200">{sortedSelected.length} dates selected</span>
+          )}
+        </span>
+        <span className="text-xs text-slate-500">
+          {isAnyExpiration ? 'Any Expiration' : ''}
+        </span>
+      </button>
+
+      {/* Calendar panel */}
+      {open && (
+        <div className="absolute z-50 mt-1 w-full max-w-sm rounded-lg border border-slate-700 bg-slate-800 shadow-xl p-3">
+          {/* Month navigation */}
+          <div className="flex items-center justify-between mb-3">
+            <button
+              type="button"
+              onClick={prevMonth}
+              className="rounded p-1 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 transition-colors"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+            <span className="text-sm font-medium text-slate-200">
+              {MONTHS[viewMonth]} {viewYear}
+            </span>
+            <button
+              type="button"
+              onClick={nextMonth}
+              className="rounded p-1 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 transition-colors"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+
+          {/* Weekday headers */}
+          <div className="grid grid-cols-7 gap-1 mb-1">
+            {WEEKDAYS.map((wd) => (
+              <div key={wd} className="text-center text-[10px] font-medium text-slate-500 py-1">
+                {wd}
+              </div>
+            ))}
+          </div>
+
+          {/* Calendar grid */}
+          <div className="grid grid-cols-7 gap-1">
+            {calendarDays.map((iso, i) => {
+              if (iso === null) {
+                return <div key={i} />;
+              }
+              const isSelected = selectedDates.includes(iso);
+              const isDisabled = isDateDisabled(iso);
+              const dayNum = parseInt(iso.slice(8), 10);
+              return (
                 <button
-                  key={date}
+                  key={iso}
                   type="button"
-                  onClick={() => toggleDate(date)}
-                  className="w-full flex items-center justify-between px-3 py-2 text-sm text-red-300 hover:bg-slate-700/50 transition-colors"
+                  onClick={() => !isDisabled && toggleDate(iso)}
+                  disabled={isDisabled}
+                  className={`h-8 w-8 rounded text-xs transition-colors ${
+                    isSelected
+                      ? 'bg-sky-500 text-white font-semibold'
+                      : isDisabled
+                        ? 'text-slate-700 cursor-not-allowed'
+                        : 'text-slate-300 hover:bg-slate-700/50'
+                  }`}
                 >
-                  <span className="italic flex items-center gap-1.5">
-                    <AlertCircle className="h-3.5 w-3.5" />
-                    {formatReadable(date)}
-                  </span>
-                  <Check className="h-4 w-4" />
+                  {dayNum}
                 </button>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
 
-          {sortedAvailable.length === 0 && unavailableSelected.length === 0 && !loading && (
-            <div className="px-3 py-3 text-sm text-slate-500 text-center">
-              No expiration dates available. Run a scan first to populate.
-            </div>
-          )}
+          {/* Footer */}
+          <div className="mt-3 flex items-center justify-between border-t border-slate-700 pt-2">
+            <span className="text-xs text-slate-500">
+              {isAnyExpiration
+                ? 'Any Expiration — using Minimum DTE'
+                : `${sortedSelected.length} date${sortedSelected.length > 1 ? 's' : ''} selected`}
+            </span>
+            {sortedSelected.length > 0 && (
+              <button
+                type="button"
+                onClick={(e) => { clearAll(e); }}
+                className="text-xs text-slate-400 hover:text-red-400 transition-colors"
+              >
+                Clear all
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
