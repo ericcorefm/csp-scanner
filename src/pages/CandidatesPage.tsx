@@ -189,7 +189,7 @@ export function CandidatesPage({
                 <SortHeader k="strike" label="Strike" align="right" />
                 <SortHeader k="expiration" label="Expiration" />
                 <SortHeader k="dte" label="DTE" align="right" />
-                <SortHeader k="suggested_sto" label="STO" align="right" />
+                <SortHeader k="suggested_sto" label="Premium" align="right" />
                 <SortHeader k="suggested_btc" label="BTC" align="right" />
                 <SortHeader k="net_croi" label="Net CROI" align="right" />
                 <SortHeader k="premium_capture" label="PC" align="right" />
