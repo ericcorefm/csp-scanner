@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Calendar, Check, X, AlertCircle, ChevronDown } from 'lucide-react';
+import { Calendar, Check, X, AlertCircle, ChevronDown, RefreshCw } from 'lucide-react';
 
 interface ExpirationSelectProps {
   availableDates: string[];
@@ -7,6 +7,7 @@ interface ExpirationSelectProps {
   loading: boolean;
   error: string | null;
   onChange: (dates: string[]) => void;
+  onRefresh: () => void;
   disabled?: boolean;
 }
 
@@ -26,6 +27,7 @@ export function ExpirationSelect({
   loading,
   error,
   onChange,
+  onRefresh,
   disabled,
 }: ExpirationSelectProps) {
   const [open, setOpen] = useState(false);
@@ -106,29 +108,53 @@ export function ExpirationSelect({
         </div>
       )}
 
-      {/* Dropdown trigger */}
-      <button
-        type="button"
-        onClick={() => !disabled && !loading && setOpen(!open)}
-        disabled={disabled || loading}
-        className="w-full flex items-center justify-between gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed hover:border-slate-600 transition-colors"
-      >
-        <span className="flex items-center gap-2">
-          <Calendar className="h-4 w-4 text-slate-500" />
-          {loading ? (
-            <span className="text-slate-500">Loading expirations...</span>
-          ) : error ? (
-            <span className="text-amber-400">Unable to load — enter manually</span>
-          ) : isAnyExpiration ? (
-            <span className="text-slate-300">Any Expiration</span>
-          ) : selectedDates.length === 1 ? (
-            <span className="text-slate-200">{formatReadable(selectedDates[0])}</span>
-          ) : (
-            <span className="text-slate-200">{selectedDates.length} dates selected</span>
-          )}
-        </span>
-        <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
+      {/* Dropdown trigger + refresh button */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => !disabled && !loading && setOpen(!open)}
+          disabled={disabled || loading}
+          className="flex-1 flex items-center justify-between gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed hover:border-slate-600 transition-colors"
+        >
+          <span className="flex items-center gap-2">
+            <Calendar className="h-4 w-4 text-slate-500" />
+            {loading ? (
+              <span className="text-slate-500">Loading expiration dates...</span>
+            ) : isAnyExpiration ? (
+              <span className="text-slate-300">Any Expiration</span>
+            ) : selectedDates.length === 1 ? (
+              <span className="text-slate-200">{formatReadable(selectedDates[0])}</span>
+            ) : (
+              <span className="text-slate-200">{selectedDates.length} dates selected</span>
+            )}
+          </span>
+          <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={disabled || loading}
+          title="Refresh expiration dates"
+          className="shrink-0 rounded-lg border border-slate-700 bg-slate-800 p-2 text-slate-400 hover:text-slate-200 hover:border-slate-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {/* Error state with retry */}
+      {error && !loading && (
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-900/40 bg-red-900/10 px-3 py-2">
+          <span className="text-xs text-red-300">Expiration dates could not be loaded.</span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={disabled}
+            className="shrink-0 rounded border border-red-700/40 px-2 py-1 text-xs text-red-300 hover:bg-red-900/20 transition-colors disabled:opacity-40"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Dropdown panel */}
       {open && (

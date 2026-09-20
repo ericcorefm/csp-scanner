@@ -727,6 +727,8 @@ serve(async (req) => {
     console.log(`mode=${mode}, scanMode=${scanMode}, noFilterMode=${noFilterMode}`);
 
     // ── LIST-EXPIRATIONS MODE: collect all unique PUT expiration dates ──
+    // Uses contract metadata only (details.expiration_date). No quote/IV/OI/volume
+    // data required. No DTE/strike/CROI/liquidity/technical filters applied.
     if (mode === 'list-expirations') {
       let symbolList: { ticker: string; company_name: string | null }[];
       if (scanMode === 'universe') {
@@ -735,38 +737,72 @@ serve(async (req) => {
         symbolList = await fetchMarketUniverse(50);
       }
 
+      // For analyze mode, use the specific ticker if provided
+      const analyzeTicker = String(body.ticker || '').toUpperCase().trim();
+      if (analyzeTicker) {
+        symbolList = [{ ticker: analyzeTicker, company_name: null }];
+      }
+
+      console.log(`[list-expirations] scanMode=${scanMode}, symbols=${symbolList.length}, ticker=${analyzeTicker || 'none'}`);
+
       const today = new Date();
       const todayStr = fmt(today);
       const allExpirations = new Set<string>();
+      let symbolsWithChains = 0;
+      let symbolsFailed = 0;
 
       const BATCH = 5;
       for (let i = 0; i < symbolList.length; i += BATCH) {
         const batch = symbolList.slice(i, i + BATCH);
         const results = await Promise.all(
           batch.map(async (sym) => {
+            // No filters — just fetch PUT contracts and read expiration_date metadata
             const chainParams = new URLSearchParams();
             chainParams.set('contract_type', 'put');
             const chainPath = `/v3/snapshot/options/${encodeURIComponent(sym.ticker)}?${chainParams.toString()}`;
             const pageResult = await massiveFetch(chainPath, apiKey, sym.ticker, 'list_expirations');
-            if (!pageResult.ok) return [];
+            if (!pageResult.ok) {
+              console.log(`[list-expirations] ${sym.ticker} failed: HTTP ${pageResult.status}`);
+              return { exps: [] as string[], ok: false };
+            }
             const contracts = (pageResult.data?.results || []).filter((c: any) => c?.details?.contract_type === 'put');
-            return contracts.map((c: any) => {
+            // Paginate through all results to collect every expiration date
+            let nextUrl = pageResult.data?.next_url;
+            let allContracts = [...contracts];
+            let pageCount = 1;
+            while (nextUrl && typeof nextUrl === 'string' && pageCount < MAX_CHAIN_PAGES) {
+              pageCount++;
+              let nextPath: string;
+              try { const parsed = new URL(nextUrl); nextPath = parsed.pathname + parsed.search; }
+              catch { break; }
+              const nextPage = await massiveFetch(nextPath, apiKey, sym.ticker, `list_expirations_p${pageCount}`);
+              if (!nextPage.ok) break;
+              const moreContracts = (nextPage.data?.results || []).filter((c: any) => c?.details?.contract_type === 'put');
+              allContracts.push(...moreContracts);
+              nextUrl = nextPage.data?.next_url;
+            }
+            const exps = allContracts.map((c: any) => {
               const expRaw = c?.details?.expiration_date;
               if (!expRaw) return '';
               const d = parseExpirationDate(expRaw);
               if (!d) return '';
               return fmt(d);
             }).filter(Boolean);
+            return { exps, ok: true };
           }),
         );
-        for (const exps of results) {
-          for (const e of exps) allExpirations.add(e);
+        for (const r of results) {
+          if (r.ok) symbolsWithChains++;
+          else symbolsFailed++;
+          for (const e of r.exps) allExpirations.add(e);
         }
       }
 
       const sorted = [...allExpirations].filter((d) => d >= todayStr).sort();
-      console.log(`[list-expirations] Found ${sorted.length} unique expiration dates`);
-      return json({ success: true, expirations: sorted });
+      console.log(`[list-expirations] Found ${sorted.length} unique expiration dates from ${symbolsWithChains} symbols (${symbolsFailed} failed)`);
+
+      // Return success even if empty — the frontend handles empty gracefully
+      return json({ success: true, expirations: sorted, symbols_scanned: symbolList.length, symbols_with_chains: symbolsWithChains, symbols_failed: symbolsFailed });
     }
 
     // ── ANALYZE MODE: deep-analyze a single ticker ──

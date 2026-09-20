@@ -112,9 +112,10 @@ export function SettingsPage({ state }: { state: AppState }) {
     setProfile(state.activeProfile);
   }, [state.activeProfile]);
 
-  // Load available expiration dates from Massive when the page mounts
+  // Load available expiration dates from Massive — cached by scan mode.
+  // Force-refresh when scan mode changes.
   useEffect(() => {
-    state.loadAvailableExpirations(state.scanMode as ScanMode);
+    state.loadAvailableExpirations(state.scanMode as ScanMode, true);
   }, [state.scanMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!profile) return <div className="text-slate-400">Loading...</div>;
@@ -434,6 +435,7 @@ export function SettingsPage({ state }: { state: AppState }) {
                       loading={state.expirationsLoading}
                       error={state.expirationsError}
                       onChange={(dates) => updateField('preferred_expirations', dates)}
+                      onRefresh={() => state.loadAvailableExpirations(state.scanMode as ScanMode, true)}
                       disabled={!enabled}
                     />
                   </div>

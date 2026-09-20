@@ -80,6 +80,7 @@ export function useAppState() {
   const [availableExpirations, setAvailableExpirations] = useState<string[]>([]);
   const [expirationsLoading, setExpirationsLoading] = useState(false);
   const [expirationsError, setExpirationsError] = useState<string | null>(null);
+  const [expirationsCacheKey, setExpirationsCacheKey] = useState<string | null>(null);
 
   const loadProfiles = useCallback(async () => {
     const { data, error } = await supabase
@@ -308,12 +309,18 @@ export function useAppState() {
     }
   }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse.length]);
 
-  const loadAvailableExpirations = useCallback(async (mode: ScanMode) => {
+  const loadAvailableExpirations = useCallback(async (mode: ScanMode, force = false) => {
+    // Cache: skip if already loaded for this scan mode (unless forced)
+    const cacheKey = mode;
+    if (!force && expirationsCacheKey === cacheKey && availableExpirations.length > 0) {
+      return;
+    }
     setExpirationsLoading(true);
     setExpirationsError(null);
     try {
       const exps = await fetchAvailableExpirations(mode);
       setAvailableExpirations(exps);
+      setExpirationsCacheKey(cacheKey);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load expiration dates';
       setExpirationsError(msg);
@@ -321,7 +328,7 @@ export function useAppState() {
     } finally {
       setExpirationsLoading(false);
     }
-  }, []);
+  }, [expirationsCacheKey, availableExpirations.length]);
 
   const loadData = useCallback(async () => {
     try {
