@@ -4,6 +4,7 @@ import type { AppState } from '@/lib/types';
 import type { StrategyProfile } from '@/types';
 import { Card } from '@/components/ui';
 import { ExpirationSelect } from '@/components/ExpirationSelect';
+import type { ScanMode } from '@/lib/liveMarketData';
 
 interface FieldDef {
   key: keyof StrategyProfile;
@@ -115,6 +116,10 @@ export function SettingsPage({ state }: { state: AppState }) {
   useEffect(() => {
     setProfile(state.activeProfile);
   }, [state.activeProfile]);
+
+  useEffect(() => {
+    state.loadAvailableExpirations(state.scanMode as ScanMode, true);
+  }, [state.scanMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!profile) return <div className="text-slate-400">Loading...</div>;
 
@@ -427,8 +432,12 @@ export function SettingsPage({ state }: { state: AppState }) {
                       </div>
                     </div>
                     <ExpirationSelect
+                      availableDates={state.availableExpirations}
                       selectedDates={profile.preferred_expirations || []}
+                      loading={state.expirationsLoading}
+                      error={state.expirationsError}
                       onChange={(dates) => updateField('preferred_expirations', dates)}
+                      onRefresh={() => state.loadAvailableExpirations(state.scanMode as ScanMode, true)}
                       disabled={!enabled}
                     />
                   </div>
