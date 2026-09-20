@@ -35,6 +35,7 @@ type Profile = {
   allow_penny_increments: boolean;
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
+  minimum_support_distance_pct: number;
   order_strike_enabled: boolean;
   expiration_enabled: boolean;
   croi_pc_enabled: boolean;
@@ -691,6 +692,10 @@ async function scanSymbol(
       if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
       if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
         if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
+        if (primarySupport !== null && primarySupport > 0) {
+          const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
+          if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
+        }
       }
       // OI and volume rules are non-quote — they come from the contract itself
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
@@ -752,8 +757,16 @@ async function scanSymbol(
         if (technicalDataAvailable) {
           const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport);
           passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
+          if (primarySupport !== null && primarySupport > 0) {
+            const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
+            const distOk = supportDistPct >= profile.minimum_support_distance_pct;
+            passFail.push({ rule: `Support distance >= ${profile.minimum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
+          }
         } else {
           passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true, status: 'not_evaluated' });
+          passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
         }
       }
       if (hasValidQuote && !isSectionOff(profile, 'spread_enabled')) {

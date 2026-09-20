@@ -23,6 +23,7 @@ export interface StrategyProfile {
   allow_penny_increments: boolean;
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
+  minimum_support_distance_pct: number;
   min_dte: number;
   minimum_stock_price: number | null;
   maximum_stock_price: number | null;
