@@ -4,7 +4,7 @@ import {
   AlertTriangle, TrendingDown,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
-import { Card, Badge } from '@/components/ui';
+import { Card, Badge, formatMoney, formatPercent, formatNum } from '@/components/ui';
 import { calcPositionStatus, calcDaysOpen, calcDaysToReview } from '@/lib/calculations';
 
 export function DailySummaryPage({ state }: { state: AppState }) {
@@ -124,8 +124,8 @@ export function DailySummaryPage({ state }: { state: AppState }) {
                       <span className="text-xs text-slate-500 ml-2">${p.strike} strike</span>
                     </div>
                     <div className="flex items-center gap-3 text-sm">
-                      <span className="text-slate-400">Mid: ${p.current_mid.toFixed(2)}</span>
-                      <span className="text-emerald-400">Target: ${p.btc_target.toFixed(2)}</span>
+                      <span className="text-slate-400">Mid: {formatMoney(p.current_mid)}</span>
+                      <span className="text-emerald-400">Target: {formatMoney(p.btc_target)}</span>
                     </div>
                   </div>
                 ))}
@@ -171,7 +171,7 @@ export function DailySummaryPage({ state }: { state: AppState }) {
                   <div key={p.id} className="flex items-center justify-between rounded-lg bg-red-900/20 p-3">
                     <div>
                       <span className="font-semibold text-slate-200">{p.ticker}</span>
-                      <span className="text-xs text-slate-500 ml-2">${p.stock_price.toFixed(2)} vs support ${p.primary_support.toFixed(2)}</span>
+                      <span className="text-xs text-slate-500 ml-2">{formatMoney(p.stock_price)} vs support {formatMoney(p.primary_support)}</span>
                     </div>
                     <Badge variant="error" dot>Below Support</Badge>
                   </div>
@@ -221,10 +221,10 @@ export function DailySummaryPage({ state }: { state: AppState }) {
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div><span className="text-slate-500">Strike:</span> <span className="text-slate-300">${c.strike}</span></div>
                     <div><span className="text-slate-500">DTE:</span> <span className="text-slate-300">{c.dte}</span></div>
-                    <div><span className="text-slate-500">CROI:</span> <span className="text-emerald-400">{c.net_croi.toFixed(1)}%</span></div>
-                    <div><span className="text-slate-500">PC:</span> <span className="text-slate-300">{c.premium_capture.toFixed(1)}%</span></div>
-                    <div><span className="text-slate-500">STO:</span> <span className="text-sky-400">${c.suggested_sto}</span></div>
-                    <div><span className="text-slate-500">BTC:</span> <span className="text-sky-300">${c.suggested_btc}</span></div>
+                    <div><span className="text-slate-500">CROI:</span> <span className="text-emerald-400">{formatPercent(c.net_croi)}</span></div>
+                    <div><span className="text-slate-500">PC:</span> <span className="text-slate-300">{formatPercent(c.premium_capture)}</span></div>
+                    <div><span className="text-slate-500">STO:</span> <span className="text-sky-400">{formatMoney(c.suggested_sto)}</span></div>
+                    <div><span className="text-slate-500">BTC:</span> <span className="text-sky-300">{formatMoney(c.suggested_btc)}</span></div>
                   </div>
                 </div>
               ))}

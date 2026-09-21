@@ -170,7 +170,12 @@ export function mergeCandidateWithTechnical<
     candidate.stock_price != null ? candidate.stock_price : snap.stock_price;
 
   let supportDist = candidate.strike_distance_from_support;
-  if (supportDist == null && mergedPrimarySupport != null && mergedPrimarySupport > 0) {
+  if (
+    supportDist == null &&
+    mergedPrimarySupport != null &&
+    mergedPrimarySupport > 0 &&
+    typeof candidate.strike === 'number' && Number.isFinite(candidate.strike)
+  ) {
     supportDist = parseFloat(
       ((mergedPrimarySupport - candidate.strike) / mergedPrimarySupport * 100).toFixed(1),
     );

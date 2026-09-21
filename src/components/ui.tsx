@@ -84,3 +84,20 @@ export function formatNum(v: number | null | undefined, decimals = 2): string {
   if (typeof v !== 'number' || !Number.isFinite(v)) return '--';
   return v.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
+
+export function formatMoney(v: number | null | undefined, decimals = 2): string {
+  return typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(decimals)}` : '--';
+}
+
+export function formatNumber(v: number | null | undefined, decimals = 2): string {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(decimals) : '--';
+}
+
+export function formatPercent(v: number | null | undefined, decimals = 1): string {
+  return typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(decimals)}%` : '--';
+}
+
+export function toNumOrNull(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}

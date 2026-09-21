@@ -111,7 +111,7 @@ export function DetailPage({
       const sd = candidate.strike_distance_from_support;
       if (sd != null) {
         setMergedSupportDist(sd);
-      } else if (cached.primary_support != null && cached.primary_support > 0) {
+      } else if (cached.primary_support != null && cached.primary_support > 0 && typeof candidate.strike === 'number' && Number.isFinite(candidate.strike)) {
         setMergedSupportDist(parseFloat(((cached.primary_support - candidate.strike) / cached.primary_support * 100).toFixed(1)));
       } else {
         setMergedSupportDist(null);
@@ -141,7 +141,7 @@ export function DetailPage({
           const sd = candidate.strike_distance_from_support;
           if (sd != null) {
             setMergedSupportDist(sd);
-          } else if (fresh.primary_support != null && fresh.primary_support > 0) {
+          } else if (fresh.primary_support != null && fresh.primary_support > 0 && typeof candidate.strike === 'number' && Number.isFinite(candidate.strike)) {
             setMergedSupportDist(parseFloat(((fresh.primary_support - candidate.strike) / fresh.primary_support * 100).toFixed(1)));
           } else {
             setMergedSupportDist(null);
