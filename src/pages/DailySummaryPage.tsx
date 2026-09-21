@@ -1,15 +1,17 @@
 import { useMemo } from 'react';
 import {
   CheckCircle2, PlusCircle, MinusCircle, Target, Clock,
-  AlertTriangle, TrendingDown,
+  AlertTriangle, TrendingDown, HelpCircle,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import { Card, Badge, formatMoney, formatPercent, formatNum } from '@/components/ui';
 import { calcPositionStatus, calcDaysOpen, calcDaysToReview } from '@/lib/calculations';
+import { computeQualification, qualificationConfig } from '@/lib/qualification';
 
 export function DailySummaryPage({ state }: { state: AppState }) {
   const summary = useMemo(() => {
-    const qualified = state.candidates.filter((c) => c.qualified);
+    const qualified = state.candidates.filter((c) => computeQualification(c.qualified, c.pass_fail) === 'qualified');
+    const pending = state.candidates.filter((c) => computeQualification(c.qualified, c.pass_fail) === 'pending');
     const openTickers = state.openPositions.map((p) => p.ticker);
     const nearBtc = state.openPositions.filter((p) => {
       const status = calcPositionStatus(
@@ -29,13 +31,15 @@ export function DailySummaryPage({ state }: { state: AppState }) {
 
     return {
       qualifiedCount: qualified.length,
-      newCount: qualified.length,
+      pendingCount: pending.length,
+      newCount: qualified.length + pending.length,
       nearBtc,
       near120,
       supportBreaks,
       trendChanges,
       openTickers,
       qualified,
+      pending,
     };
   }, [state.candidates, state.openPositions, state.activeProfile]);
 
@@ -48,6 +52,13 @@ export function DailySummaryPage({ state }: { state: AppState }) {
       icon: CheckCircle2,
       color: 'text-emerald-400',
       bg: 'bg-emerald-500/10',
+    },
+    {
+      label: 'Pending Candidates',
+      value: summary.pendingCount,
+      icon: HelpCircle,
+      color: 'text-amber-400',
+      bg: 'bg-amber-500/10',
     },
     {
       label: 'New Candidates',
@@ -94,7 +105,7 @@ export function DailySummaryPage({ state }: { state: AppState }) {
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
         {cards.map((card) => {
           const Icon = card.icon;
           return (
@@ -203,31 +214,55 @@ export function DailySummaryPage({ state }: { state: AppState }) {
         </Card>
       </div>
 
-      {/* Qualified candidates list */}
-      <Card title="Qualified Candidates Today">
+      {/* Qualified + Pending candidates list */}
+      <Card title="Candidates Today">
         <div className="p-5">
-          {summary.qualified.length === 0 ? (
-            <p className="text-sm text-slate-500">No qualified candidates today.</p>
+          {summary.qualified.length === 0 && summary.pending.length === 0 ? (
+            <p className="text-sm text-slate-500">No qualified or pending candidates today.</p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {summary.qualified.map((c) => (
-                <div key={`${c.ticker}-${c.strike}-${c.expiration}`} className="rounded-lg border border-slate-800 bg-slate-800/30 p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-semibold text-slate-100">{c.ticker}</span>
-                    <Badge variant={c.trend_classification === 'Downtrend' ? 'error' : 'success'} dot>
-                      {c.trend_classification}
-                    </Badge>
+              {summary.qualified.map((c) => {
+                const cfg = qualificationConfig.qualified;
+                return (
+                  <div key={`q-${c.ticker}-${c.strike}-${c.expiration}`} className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="font-semibold text-slate-100">{c.ticker}</span>
+                      <span className={`inline-flex items-center gap-1 text-xs font-medium ${cfg.textColor}`}>
+                        {cfg.symbol} {cfg.label}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div><span className="text-slate-500">Strike:</span> <span className="text-slate-300">${c.strike}</span></div>
+                      <div><span className="text-slate-500">DTE:</span> <span className="text-slate-300">{c.dte}</span></div>
+                      <div><span className="text-slate-500">CROI:</span> <span className="text-emerald-400">{formatPercent(c.net_croi)}</span></div>
+                      <div><span className="text-slate-500">PC:</span> <span className="text-slate-300">{formatPercent(c.premium_capture)}</span></div>
+                      <div><span className="text-slate-500">STO:</span> <span className="text-sky-400">{formatMoney(c.suggested_sto)}</span></div>
+                      <div><span className="text-slate-500">BTC:</span> <span className="text-sky-300">{formatMoney(c.suggested_btc)}</span></div>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div><span className="text-slate-500">Strike:</span> <span className="text-slate-300">${c.strike}</span></div>
-                    <div><span className="text-slate-500">DTE:</span> <span className="text-slate-300">{c.dte}</span></div>
-                    <div><span className="text-slate-500">CROI:</span> <span className="text-emerald-400">{formatPercent(c.net_croi)}</span></div>
-                    <div><span className="text-slate-500">PC:</span> <span className="text-slate-300">{formatPercent(c.premium_capture)}</span></div>
-                    <div><span className="text-slate-500">STO:</span> <span className="text-sky-400">{formatMoney(c.suggested_sto)}</span></div>
-                    <div><span className="text-slate-500">BTC:</span> <span className="text-sky-300">{formatMoney(c.suggested_btc)}</span></div>
+                );
+              })}
+              {summary.pending.map((c) => {
+                const cfg = qualificationConfig.pending;
+                return (
+                  <div key={`p-${c.ticker}-${c.strike}-${c.expiration}`} className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="font-semibold text-slate-100">{c.ticker}</span>
+                      <span className={`inline-flex items-center gap-1 text-xs font-medium ${cfg.textColor}`}>
+                        {cfg.symbol} {cfg.label}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div><span className="text-slate-500">Strike:</span> <span className="text-slate-300">${c.strike}</span></div>
+                      <div><span className="text-slate-500">DTE:</span> <span className="text-slate-300">{c.dte}</span></div>
+                      <div><span className="text-slate-500">CROI:</span> <span className="text-emerald-400">{formatPercent(c.net_croi)}</span></div>
+                      <div><span className="text-slate-500">PC:</span> <span className="text-slate-300">{formatPercent(c.premium_capture)}</span></div>
+                      <div><span className="text-slate-500">STO:</span> <span className="text-sky-400">{formatMoney(c.suggested_sto)}</span></div>
+                      <div><span className="text-slate-500">BTC:</span> <span className="text-sky-300">{formatMoney(c.suggested_btc)}</span></div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

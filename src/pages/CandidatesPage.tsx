@@ -5,6 +5,7 @@ import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
+import { computeQualification, qualificationConfig, qualificationSortRank, type Qualification } from '@/lib/qualification';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -50,6 +51,22 @@ const ruleStatusSortRank: Record<RuleStatusInfo['overall'], number> = {
   unknown: 3,
 };
 
+function QualificationBadge({ qualification }: { qualification: Qualification }) {
+  const cfg = qualificationConfig[qualification];
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium ${cfg.badgeClass}`}>
+      <span>{cfg.symbol}</span>
+      {cfg.label}
+    </span>
+  );
+}
+
+function QualificationIcon({ qualification }: { qualification: Qualification }) {
+  if (qualification === 'qualified') return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />;
+  if (qualification === 'pending') return <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />;
+  return <XCircle className="h-3.5 w-3.5 text-red-400" />;
+}
+
 function RuleStatusCell({ passFail }: { passFail?: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] }) {
   const info = computeRuleStatus(passFail);
   const tooltipText = passFail && passFail.length > 0
@@ -66,14 +83,18 @@ function RuleStatusCell({ passFail }: { passFail?: { rule: string; pass: boolean
     );
   }
 
-  const badgeVariant = info.overall === 'passes' ? 'success' : info.overall === 'warning' ? 'warning' : 'error';
-  const badgeLabel = info.overall === 'passes' ? 'Passes' : info.overall === 'warning' ? 'Warning' : 'Fails';
-  const badgeIcon = info.overall === 'passes' ? '✔' : info.overall === 'warning' ? '!' : '✖';
+  const passFailSummary = (
+    <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap">
+      <span className="text-emerald-400">{'\u2713'} {info.passCount}</span>
+      {info.warningCount > 0 && <span className="text-amber-400">{'\u26A0'} {info.warningCount}</span>}
+      {info.failCount > 0 && <span className="text-red-400">{'\u2715'} {info.failCount}</span>}
+    </span>
+  );
 
   return (
     <td className="px-3 py-2.5 text-center">
-      <span title={tooltipText} className="inline-flex items-center gap-1.5 cursor-help whitespace-nowrap">
-        <Badge variant={badgeVariant}>{badgeIcon} {badgeLabel}</Badge>
+      <span title={tooltipText} className="cursor-help">
+        {passFailSummary}
       </span>
     </td>
   );
@@ -89,15 +110,26 @@ export function CandidatesPage({
 }) {
   const [showRejected, setShowRejected] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  const [sortKey, setSortKey] = useState<keyof CandidateScan | 'rule_status'>('net_croi');
+  const [sortKey, setSortKey] = useState<keyof CandidateScan | 'rule_status' | 'qualification'>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [quoteModalRow, setQuoteModalRow] = useState<string | null>(null);
 
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
 
+  // Compute qualification for each candidate once
+  const candidatesWithQual = useMemo(() => {
+    return state.candidates.map((c) => ({
+      ...c,
+      qualification: computeQualification(c.qualified, c.pass_fail),
+    }));
+  }, [state.candidates]);
+
   const filtered = useMemo(() => {
-    let list = state.candidates.filter((c) => (showRejected ? true : c.qualified));
+    let list = candidatesWithQual.filter((c) => {
+      if (showRejected) return true;
+      return c.qualification === 'qualified' || c.qualification === 'pending';
+    });
     list = [...list].sort((a, b) => {
       if (sortKey === 'rule_status') {
         const aInfo = computeRuleStatus(a.pass_fail);
@@ -105,8 +137,13 @@ export function CandidatesPage({
         const aRank = ruleStatusSortRank[aInfo.overall];
         const bRank = ruleStatusSortRank[bInfo.overall];
         if (aRank !== bRank) return sortDir === 'asc' ? aRank - bRank : bRank - aRank;
-        // Secondary sort: higher passCount first
         return sortDir === 'asc' ? aInfo.passCount - bInfo.passCount : bInfo.passCount - aInfo.passCount;
+      }
+      if (sortKey === 'qualification') {
+        const aRank = qualificationSortRank[a.qualification];
+        const bRank = qualificationSortRank[b.qualification];
+        if (aRank !== bRank) return sortDir === 'asc' ? aRank - bRank : bRank - aRank;
+        return 0;
       }
       let aVal = a[sortKey as keyof CandidateScan];
       let bVal = b[sortKey as keyof CandidateScan];
@@ -119,14 +156,25 @@ export function CandidatesPage({
       return 0;
     });
     return list;
-  }, [state.candidates, showRejected, sortKey, sortDir]);
+  }, [candidatesWithQual, showRejected, sortKey, sortDir]);
+
+  // Counts based on qualification field (not the old `qualified` boolean)
+  const counts = useMemo(() => {
+    let qualified = 0, pending = 0, rejected = 0;
+    for (const c of candidatesWithQual) {
+      if (c.qualification === 'qualified') qualified++;
+      else if (c.qualification === 'pending') pending++;
+      else rejected++;
+    }
+    return { qualified, pending, rejected };
+  }, [candidatesWithQual]);
 
   const quoteModalCandidate = useMemo(() => {
     if (!quoteModalRow) return null;
     return state.candidates.find((c) => `${c.ticker}-${c.strike}-${c.expiration}` === quoteModalRow) || null;
   }, [quoteModalRow, state.candidates]);
 
-  const handleSort = (key: keyof CandidateScan | 'rule_status') => {
+  const handleSort = (key: keyof CandidateScan | 'rule_status' | 'qualification') => {
     if (sortKey === key) {
       setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
     } else {
@@ -135,11 +183,11 @@ export function CandidatesPage({
     }
   };
 
-  const SortHeader = ({ k, label, align = 'left' }: { k: keyof CandidateScan | 'rule_status'; label: string; align?: 'left' | 'right' }) => (
+  const SortHeader = ({ k, label, align = 'left' }: { k: keyof CandidateScan | 'rule_status' | 'qualification'; label: string; align?: 'left' | 'right' | 'center' }) => (
     <th
       onClick={() => handleSort(k)}
       className={`px-3 py-2.5 text-xs font-medium text-slate-400 cursor-pointer hover:text-slate-200 select-none whitespace-nowrap ${
-        align === 'right' ? 'text-right' : 'text-left'
+        align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'
       }`}
     >
       <span className="inline-flex items-center gap-1">
@@ -153,7 +201,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 16;
+  const colCount = 17;
 
   return (
     <div className="space-y-4">
@@ -177,12 +225,13 @@ export function CandidatesPage({
 
       {state.scanCounts && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
             <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
-            <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
-            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
+            <ScanCountItem label="Qualified" value={counts.qualified} color="text-emerald-400" />
+            <ScanCountItem label="Pending" value={counts.pending} color="text-amber-400" />
+            <ScanCountItem label="Rejected" value={counts.rejected} color="text-red-400" />
             <ScanCountItem
               label="Last Scan"
               value={state.lastScanAt ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '--'}
@@ -230,8 +279,8 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {filtered.filter((c) => c.qualified).length} qualified
-            {showRejected && ` · ${filtered.filter((c) => !c.qualified).length} rejected`}
+            {counts.qualified} qualified · {counts.pending} pending
+            {showRejected && ` · ${counts.rejected} rejected`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -265,6 +314,7 @@ export function CandidatesPage({
                 <SortHeader k="iv" label="IV" align="right" />
                 <SortHeader k="volume" label="Volume" align="right" />
                 <SortHeader k="strike_distance_from_support" label="Support Dist %" align="right" />
+                <SortHeader k="qualification" label="Qualification" align="center" />
                 <th
                   onClick={() => handleSort('rule_status')}
                   className="px-3 py-2.5 text-xs font-medium text-slate-400 cursor-pointer hover:text-slate-200 select-none whitespace-nowrap text-center"
@@ -282,19 +332,16 @@ export function CandidatesPage({
                 const rowKey = `${c.ticker}-${c.strike}-${c.expiration}`;
                 const isExpanded = expandedRow === rowKey;
                 const hasNoPremium = c.suggested_sto === 0 || c.suggested_btc === 0;
+                const rowOpacity = c.qualification === 'qualified' ? 'hover:bg-slate-800/40' : c.qualification === 'pending' ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40';
                 return (
                   <Fragment key={rowKey}>
                     <tr
                       onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
-                      className={`cursor-pointer transition-colors ${
-                        c.qualified && !c.technical_pending ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
-                      }`}
+                      className={`cursor-pointer transition-colors ${rowOpacity}`}
                     >
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
-                          {c.qualified && !c.technical_pending && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
-                          {c.qualified && c.technical_pending && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
-                          {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
+                          <QualificationIcon qualification={c.qualification} />
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
@@ -328,6 +375,9 @@ export function CandidatesPage({
                         {c.volume > 0 ? c.volume : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
+                      <td className="px-3 py-2.5 text-center">
+                        <QualificationBadge qualification={c.qualification} />
+                      </td>
                       <RuleStatusCell passFail={c.pass_fail} />
                       <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
                         <button
@@ -339,7 +389,7 @@ export function CandidatesPage({
                         </button>
                       </td>
                     </tr>
-                    {showRejected && !c.qualified && isExpanded && (
+                    {showRejected && c.qualification === 'rejected' && isExpanded && (
                       <tr key={rowKey + '-detail'}>
                         <td colSpan={colCount} className="px-4 py-3 bg-slate-900/80">
                           <div className="flex flex-wrap gap-2">
@@ -350,7 +400,7 @@ export function CandidatesPage({
                         </td>
                       </tr>
                     )}
-                    {showRejected && !c.qualified && !isExpanded && (
+                    {showRejected && c.qualification === 'rejected' && !isExpanded && (
                       <tr
                         key={rowKey + '-expand'}
                         className="cursor-pointer hover:bg-slate-800/30"
