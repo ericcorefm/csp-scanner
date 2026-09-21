@@ -20,7 +20,19 @@ export function useAuth() {
       '/reset-password': 'reset-password',
     };
     const initialRoute = routeMap[path] ?? null;
-    let inPasswordRecovery = initialRoute === 'reset-password';
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const recoveryFromUrl =
+      initialRoute === 'reset-password' ||
+      hashParams.get('type') === 'recovery' ||
+      new URLSearchParams(window.location.search).get('type') === 'recovery';
+    let inPasswordRecovery = recoveryFromUrl;
+
+    if (recoveryFromUrl) {
+      setAuthRoute('reset-password');
+      if (path !== '/reset-password') {
+        window.history.replaceState(null, '', '/reset-password');
+      }
+    }
 
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       setSession(s);
