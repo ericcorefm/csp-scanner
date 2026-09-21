@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
-import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical } from '@/lib/technicalCache';
+import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, populateStockPricesFromCandidates } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
   StrategyProfile,
@@ -258,6 +258,7 @@ export function useAppState() {
       setCandidates(results);
       setScanSource('live');
       setLastScanAt(scannedAt);
+      populateStockPricesFromCandidates(results);
 
       const today = new Date().toISOString().split('T')[0];
       const { error: deleteError } = await supabase

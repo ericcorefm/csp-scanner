@@ -50,7 +50,7 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
-const DEBUG_TICKERS = new Set(['BLNK', 'RIVN', 'XPEV', 'RUN', 'DKNG', 'SNAP', 'CMCSA', 'MARA']);
+const DEBUG_TICKERS = new Set(['BLNK', 'RIVN', 'XPEV', 'RUN', 'DKNG', 'SNAP', 'CMCSA', 'MARA', 'SOFI', 'CLSK', 'CIFR', 'FCEL', 'RIOT']);
 
 function isRetryableStatus(status: number): boolean {
   // Only retry transient network errors (status 0) or 5xx responses
@@ -1276,7 +1276,14 @@ serve(async (req) => {
       if (!ticker) return json({ success: false, error: 'Missing ticker for analyze mode' });
 
       console.log(`[Analyze] Analyzing ${ticker}`);
-      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, null);
+
+      // Fetch grouped daily price for this ticker — same source as discovery/universe mode.
+      // This ensures analyze mode gets a stock price even if history fetch fails.
+      const { priceMap: analyzePriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+      const analyzeBulkPrice = analyzePriceMap.get(ticker) ?? null;
+      console.log(`[Analyze] ${ticker} | grouped_daily_price=${analyzeBulkPrice}`);
+
+      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, analyzeBulkPrice);
 
       if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') {
         return json({
@@ -1284,6 +1291,11 @@ serve(async (req) => {
           massiveStatus: result.chainStatus === 'api_error' ? 500 : result.chainStatus === 'unauthorized' ? 401 : result.chainStatus === 'rate_limited' ? 429 : 0,
           massiveBody: `Chain status: ${result.chainStatus}`,
         });
+      }
+
+      if (DEBUG_TICKERS.has(ticker)) {
+        const histClose = result.historyStatus === 'success' || result.historyStatus === 'fallback' ? 'available' : 'n/a';
+        console.log(`[Analyze PRICE] ${ticker} | grouped=${analyzeBulkPrice} | historyClose=${histClose} | optionUnderlying=${result.stockSource === 'underlying_asset' ? result.stockPrice : 'n/a'} | final=${result.stockPrice} | source=${result.stockSource}`);
       }
 
       if (result.stockPrice === null && result.putsReturned === 0) {

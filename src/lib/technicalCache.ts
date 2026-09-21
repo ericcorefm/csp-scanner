@@ -1,5 +1,6 @@
 import type { AnalyzeTickerResponse, TechnicalData } from '@/lib/liveMarketData';
 import { analyzeTicker } from '@/lib/liveMarketData';
+import type { CandidateScan } from '@/types';
 
 export interface TechnicalSnapshot {
   ticker: string;
@@ -10,6 +11,43 @@ export interface TechnicalSnapshot {
   stock_price: number | null;
   technical: TechnicalData | null;
   fetchedAt: number;
+}
+
+// ── Shared stock price cache ──
+// Populated by both scan (discovery/universe) and analyze modes.
+// Any page can read from this cache to avoid re-fetching prices.
+export interface StockPriceEntry {
+  price: number | null;
+  source: string;
+  updatedAt: number;
+}
+
+const PRICE_STALE_MS = 6 * 60 * 60 * 1000;
+const stockPriceCache = new Map<string, StockPriceEntry>();
+
+export function getCachedStockPrice(ticker: string): StockPriceEntry | null {
+  const key = ticker.toUpperCase().trim();
+  const entry = stockPriceCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.updatedAt > PRICE_STALE_MS) {
+    stockPriceCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+export function setCachedStockPrice(ticker: string, price: number | null, source: string): void {
+  const key = ticker.toUpperCase().trim();
+  if (price === null || price === undefined || !Number.isFinite(price) || price <= 0) return;
+  stockPriceCache.set(key, { price, source, updatedAt: Date.now() });
+}
+
+export function populateStockPricesFromCandidates(candidates: CandidateScan[]): void {
+  for (const c of candidates) {
+    if (c.stock_price != null && c.stock_price > 0) {
+      setCachedStockPrice(c.ticker, c.stock_price, c.stock_source || 'scan');
+    }
+  }
 }
 
 const STALE_MS = 6 * 60 * 60 * 1000;
@@ -32,6 +70,7 @@ export function setCachedTechnical(snap: TechnicalSnapshot): void {
 }
 
 export function populateFromAnalyzeResponse(resp: AnalyzeTickerResponse): void {
+  setCachedStockPrice(resp.ticker, resp.stock_price, resp.stock_source || 'analyze');
   setCachedTechnical({
     ticker: resp.ticker,
     trend: resp.trend,
