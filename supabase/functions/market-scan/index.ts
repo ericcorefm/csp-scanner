@@ -238,6 +238,47 @@ async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<vo
   }
 }
 
+// ── Weekly / Monthly aggregation from daily bars ──
+function aggregateWeeks(daily: HistoryBar[]): HistoryBar[] {
+  if (daily.length === 0) return [];
+  const weeks = new Map<string, HistoryBar[]>();
+  for (const bar of daily) {
+    const d = new Date(bar.date + 'T00:00:00Z');
+    const dayOfWeek = d.getUTCDay();
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() - ((dayOfWeek + 6) % 7));
+    const key = monday.toISOString().slice(0, 10);
+    if (!weeks.has(key)) weeks.set(key, []);
+    weeks.get(key)!.push(bar);
+  }
+  return Array.from(weeks.entries()).map(([date, bars]) => ({
+    date,
+    open: bars[0].open,
+    high: Math.max(...bars.map((b) => b.high)),
+    low: Math.min(...bars.map((b) => b.low)),
+    close: bars.at(-1)!.close,
+    volume: bars.reduce((sum, b) => sum + b.volume, 0),
+  })).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function aggregateMonths(daily: HistoryBar[]): HistoryBar[] {
+  if (daily.length === 0) return [];
+  const months = new Map<string, HistoryBar[]>();
+  for (const bar of daily) {
+    const key = bar.date.slice(0, 7) + '-01'; // YYYY-MM-01
+    if (!months.has(key)) months.set(key, []);
+    months.get(key)!.push(bar);
+  }
+  return Array.from(months.entries()).map(([date, bars]) => ({
+    date,
+    open: bars[0].open,
+    high: Math.max(...bars.map((b) => b.high)),
+    low: Math.min(...bars.map((b) => b.low)),
+    close: bars.at(-1)!.close,
+    volume: bars.reduce((sum, b) => sum + b.volume, 0),
+  })).sort((a, b) => a.date.localeCompare(b.date));
+}
+
 // ── Technical indicators ──
 function sma(values: number[], n: number) {
   if (!values.length) return 0;
@@ -1289,6 +1330,99 @@ serve(async (req) => {
     const openTickers: string[] = (body.openTickers || []).map((x: string) => x.toUpperCase());
     const mode: string = body.mode || 'discovery';
     const scanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
+
+    // ── CHART-BARS MODE: return OHLCV bars for TradingView charting ──
+    // Does not require a strategy profile — just historical price data.
+    if (mode === 'chart-bars') {
+      const ticker = String(body.ticker || '').toUpperCase().trim();
+      if (!ticker) return json({ success: false, error: 'Missing ticker for chart-bars mode' });
+
+      const resolution: string = body.resolution || '1D';
+      const from: number = Number(body.from) || 0;
+      const to: number = Number(body.to) || 0;
+
+      const rangeMap: Record<string, string> = {
+        '1D': 'day',
+        '1W': 'week',
+        '1M': 'month',
+      };
+      const rangeUnit = rangeMap[resolution] || 'day';
+
+      let bars: HistoryBar[] = [];
+      const cachedBars = await loadCachedHistory(ticker, 500);
+
+      if (cachedBars.length > 0) {
+        if (resolution === '1D') {
+          bars = cachedBars;
+        } else if (resolution === '1W') {
+          bars = aggregateWeeks(cachedBars);
+        } else if (resolution === '1M') {
+          bars = aggregateMonths(cachedBars);
+        }
+      }
+
+      const chartToday = new Date();
+      const chartFmt = (d: Date) => d.toISOString().slice(0, 10);
+      const chartStart = new Date(chartToday);
+      chartStart.setDate(chartStart.getDate() - 548);
+
+      const needsFresh = bars.length < 60 ||
+        (bars.length > 0 && bars.at(-1)!.date < chartFmt(chartToday));
+
+      if (needsFresh || bars.length === 0) {
+        const histPath = `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/${rangeUnit}/${chartFmt(chartStart)}/${chartFmt(chartToday)}?adjusted=true&sort=asc&limit=50000`;
+        const histResult = await massiveFetch(histPath, apiKey, ticker, 'chart_bars');
+
+        if (histResult.ok) {
+          const freshBars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
+            date: new Date(b.t).toISOString().slice(0, 10),
+            open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
+          })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+
+          if (freshBars.length > 0) {
+            if (resolution === '1D') {
+              const barMap = new Map<string, HistoryBar>();
+              for (const b of cachedBars) barMap.set(b.date, b);
+              for (const b of freshBars) barMap.set(b.date, b);
+              bars = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+            } else if (resolution === '1W') {
+              const all = [...cachedBars, ...freshBars];
+              const dedup = new Map<string, HistoryBar>();
+              for (const b of all) dedup.set(b.date, b);
+              bars = aggregateWeeks(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
+            } else if (resolution === '1M') {
+              const all = [...cachedBars, ...freshBars];
+              const dedup = new Map<string, HistoryBar>();
+              for (const b of all) dedup.set(b.date, b);
+              bars = aggregateMonths(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
+            }
+            await saveCachedHistory(ticker, freshBars);
+          }
+        }
+      }
+
+      const tvBars = bars
+        .filter((b) => Number.isFinite(b.close) && b.close > 0)
+        .map((b) => ({
+          time: Math.floor(new Date(b.date + 'T00:00:00Z').getTime() / 1000),
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+          volume: b.volume,
+        }))
+        .sort((a, b) => a.time - b.time);
+
+      const filtered = tvBars.filter((b) => {
+        if (from && b.time < from) return false;
+        if (to && b.time > to) return false;
+        return true;
+      });
+
+      console.log(`[ChartBars] ${ticker} | resolution=${resolution} | bars=${filtered.length}`);
+
+      return json({ success: true, ticker, resolution, bars: filtered });
+    }
 
     if (!profile) return json({ success: false, error: 'Missing strategy profile' });
 

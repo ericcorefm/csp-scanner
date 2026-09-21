@@ -8,6 +8,7 @@ import type { AppState } from '@/lib/types';
 import { calcRecycleDate } from '@/lib/calculations';
 import { Badge, Card, StatRow, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { BackButton } from '@/components/Layout';
+import { TradingViewChart } from '@/components/TradingViewChart';
 import type { Page } from '@/components/Layout';
 import type { TechnicalData } from '@/lib/liveMarketData';
 import { getCachedTechnical } from '@/lib/technicalCache';
@@ -404,6 +405,14 @@ export function DetailPage({
           </div>
         </Card>
       </div>
+
+      {/* Price Chart */}
+      <TradingViewChart
+        ticker={candidate.ticker}
+        primarySupport={effectivePrimarySupport}
+        secondarySupport={effectiveSecondarySupport}
+        resistance={effectiveResistance}
+      />
 
       {candidate && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">

@@ -19,6 +19,7 @@ import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketDa
 import type { ScanUniverseEntry } from '@/types';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 import { getCachedStockPrice } from '@/lib/technicalCache';
+import { TradingViewChart } from '@/components/TradingViewChart';
 
 function getFailedRules(c: ContractAnalysis): string[] {
   if (!c.pass_fail || c.pass_fail.length === 0) return [];
@@ -490,6 +491,14 @@ function AnalyzeResult({
           </div>
         </Card>
       )}
+
+      {/* Price Chart */}
+      <TradingViewChart
+        ticker={result.ticker}
+        primarySupport={result.primary_support}
+        secondarySupport={result.secondary_support}
+        resistance={result.resistance}
+      />
 
       {/* Rule Check for best contract */}
       {result.best_contract && result.best_contract.pass_fail && result.best_contract.pass_fail.length > 0 && (
