@@ -334,7 +334,8 @@ function AnalyzeResult({
         company_name: companyName,
       });
       setUniverseToast({ msg: `${result.ticker} added to Scan Universe`, kind: 'success' });
-    } catch {
+    } catch (err) {
+      console.error('[AddToScanUniverse] Failed:', err);
       setUniverseToast({ msg: 'Could not add ticker to Scan Universe.', kind: 'error' });
     } finally {
       setUniverseBusy(false);

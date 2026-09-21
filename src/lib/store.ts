@@ -194,8 +194,17 @@ export function useAppState() {
           source: options?.source ?? 'manual',
           ...(options?.company_name ? { company_name: options.company_name } : {}),
         },
+        { onConflict: 'symbol' },
       );
-    if (error && error.code !== '23505') throw error;
+    if (error) {
+      console.error('[addToScanUniverse] Supabase error:', {
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+        code: error.code,
+      });
+      throw error;
+    }
     await loadScanUniverse();
   }, [loadScanUniverse]);
 
@@ -221,7 +230,7 @@ export function useAppState() {
     for (const sym of defaults) {
       await supabase
         .from('scan_universe')
-        .upsert({ symbol: sym, source: 'default', enabled: true });
+        .upsert({ symbol: sym, source: 'default', enabled: true }, { onConflict: 'symbol' });
     }
     await loadScanUniverse();
   }, [loadScanUniverse]);
