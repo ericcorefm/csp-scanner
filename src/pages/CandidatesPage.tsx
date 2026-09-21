@@ -20,66 +20,6 @@ const rejectionColors: Record<string, 'error' | 'warning'> = {
 
 const DASH = <span className="text-slate-600">--</span>;
 
-type RuleStatusInfo = {
-  passCount: number;
-  warningCount: number;
-  failCount: number;
-  overall: 'passes' | 'warning' | 'fails' | 'unknown';
-};
-
-function computeRuleStatus(passFail?: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[]): RuleStatusInfo {
-  if (!passFail || passFail.length === 0) {
-    return { passCount: 0, warningCount: 0, failCount: 0, overall: 'unknown' };
-  }
-  let passCount = 0, warningCount = 0, failCount = 0;
-  for (const pf of passFail) {
-    if (pf.status === 'pass') passCount++;
-    else if (pf.status === 'fail') failCount++;
-    else warningCount++;
-  }
-  let overall: RuleStatusInfo['overall'] = 'passes';
-  if (failCount > 0) overall = 'fails';
-  else if (warningCount > 0 && passCount <= warningCount) overall = 'warning';
-  return { passCount, warningCount, failCount, overall };
-}
-
-const ruleStatusSortRank: Record<RuleStatusInfo['overall'], number> = {
-  passes: 0,
-  warning: 1,
-  fails: 2,
-  unknown: 3,
-};
-
-function RuleStatusCell({ passFail }: { passFail?: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] }) {
-  const info = computeRuleStatus(passFail);
-  const tooltipText = passFail && passFail.length > 0
-    ? passFail.map((pf) => `${pf.status === 'pass' ? '✔' : pf.status === 'fail' ? '✖' : '!'} ${pf.rule}`).join('\n')
-    : 'No rule checks available';
-
-  if (info.overall === 'unknown') {
-    return (
-      <td className="px-3 py-2.5 text-center">
-        <span title={tooltipText} className="inline-flex items-center gap-1.5 cursor-help">
-          <Badge variant="neutral">Unknown</Badge>
-        </span>
-      </td>
-    );
-  }
-
-  const badgeVariant = info.overall === 'passes' ? 'success' : info.overall === 'warning' ? 'warning' : 'error';
-  const badgeLabel = info.overall === 'passes' ? 'Passes' : info.overall === 'warning' ? 'Warning' : 'Fails';
-  const badgeIcon = info.overall === 'passes' ? '✔' : info.overall === 'warning' ? '!' : '✖';
-
-  return (
-    <td className="px-3 py-2.5 text-center">
-      <span title={tooltipText} className="inline-flex items-center gap-1.5 cursor-help whitespace-nowrap">
-        <Badge variant={badgeVariant}>{badgeIcon} {badgeLabel}</Badge>
-      </span>
-    </td>
-  );
-}
-
-
 export function CandidatesPage({
   state,
   onNavigate,
@@ -89,7 +29,7 @@ export function CandidatesPage({
 }) {
   const [showRejected, setShowRejected] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  const [sortKey, setSortKey] = useState<keyof CandidateScan | 'rule_status'>('net_croi');
+  const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [quoteModalRow, setQuoteModalRow] = useState<string | null>(null);
 
@@ -99,15 +39,6 @@ export function CandidatesPage({
   const filtered = useMemo(() => {
     let list = state.candidates.filter((c) => (showRejected ? true : c.qualified));
     list = [...list].sort((a, b) => {
-      if (sortKey === 'rule_status') {
-        const aInfo = computeRuleStatus(a.pass_fail);
-        const bInfo = computeRuleStatus(b.pass_fail);
-        const aRank = ruleStatusSortRank[aInfo.overall];
-        const bRank = ruleStatusSortRank[bInfo.overall];
-        if (aRank !== bRank) return sortDir === 'asc' ? aRank - bRank : bRank - aRank;
-        // Secondary sort: higher passCount first
-        return sortDir === 'asc' ? aInfo.passCount - bInfo.passCount : bInfo.passCount - aInfo.passCount;
-      }
       let aVal = a[sortKey as keyof CandidateScan];
       let bVal = b[sortKey as keyof CandidateScan];
       if (aVal === null || aVal === undefined) aVal = 0;
@@ -126,7 +57,7 @@ export function CandidatesPage({
     return state.candidates.find((c) => `${c.ticker}-${c.strike}-${c.expiration}` === quoteModalRow) || null;
   }, [quoteModalRow, state.candidates]);
 
-  const handleSort = (key: keyof CandidateScan | 'rule_status') => {
+  const handleSort = (key: keyof CandidateScan) => {
     if (sortKey === key) {
       setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
     } else {
@@ -135,7 +66,7 @@ export function CandidatesPage({
     }
   };
 
-  const SortHeader = ({ k, label, align = 'left' }: { k: keyof CandidateScan | 'rule_status'; label: string; align?: 'left' | 'right' }) => (
+  const SortHeader = ({ k, label, align = 'left' }: { k: keyof CandidateScan; label: string; align?: 'left' | 'right' }) => (
     <th
       onClick={() => handleSort(k)}
       className={`px-3 py-2.5 text-xs font-medium text-slate-400 cursor-pointer hover:text-slate-200 select-none whitespace-nowrap ${
@@ -153,7 +84,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 16;
+  const colCount = 15;
 
   return (
     <div className="space-y-4">
@@ -265,15 +196,6 @@ export function CandidatesPage({
                 <SortHeader k="iv" label="IV" align="right" />
                 <SortHeader k="volume" label="Volume" align="right" />
                 <SortHeader k="strike_distance_from_support" label="Support Dist %" align="right" />
-                <th
-                  onClick={() => handleSort('rule_status')}
-                  className="px-3 py-2.5 text-xs font-medium text-slate-400 cursor-pointer hover:text-slate-200 select-none whitespace-nowrap text-center"
-                >
-                  <span className="inline-flex items-center gap-1">
-                    Rule Status
-                    {sortKey === 'rule_status' && <ChevronDown className={`h-3 w-3 transition-transform ${sortDir === 'asc' ? 'rotate-180' : ''}`} />}
-                  </span>
-                </th>
                 <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Action</th>
               </tr>
             </thead>
@@ -328,7 +250,6 @@ export function CandidatesPage({
                         {c.volume > 0 ? c.volume : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
-                      <RuleStatusCell passFail={c.pass_fail} />
                       <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
                         <button
                           onClick={() => setQuoteModalRow(rowKey)}
