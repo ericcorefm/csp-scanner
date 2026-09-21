@@ -319,7 +319,7 @@ export function DetailPage({
               <StatRow label="Suggested STO Limit" value={`$${formatNum(candidate.suggested_sto)}`} highlight />
               <StatRow label="Suggested BTC Limit" value={`$${formatNum(candidate.suggested_btc)}`} highlight />
               <StatRow label="Net Profit" value={`$${formatNum(candidate.net_profit)}`} />
-              <StatRow label="Net CROI" value={formatPct(candidate.net_croi)} highlight={candidate.net_croi >= 3.5} />
+              <StatRow label="Net CROI" value={formatPct(candidate.net_croi)} highlight={typeof candidate.net_croi === 'number' && candidate.net_croi >= 3.5} />
               <StatRow label="Premium Capture" value={formatPct(candidate.premium_capture)} />
               <div className="mt-3 border-t border-slate-800 pt-3">
                 <StatRow

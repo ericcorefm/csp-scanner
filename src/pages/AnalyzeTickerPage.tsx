@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, Component, ReactNode } from 'react';
 import {
   Search,
   Plus,
@@ -18,6 +18,25 @@ import {
 import type { AppState, PremiumSource } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
+
+class AnalyzeErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(err: unknown) {
+    console.error('[AnalyzeTicker] render error:', err);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+          <AlertTriangle className="h-4 w-4 inline mr-2" />
+          Some market data is unavailable for this ticker. The analysis could not be fully rendered.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export function AnalyzeTickerPage({ state }: { state: AppState }) {
   const [ticker, setTicker] = useState('');
@@ -137,18 +156,20 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
       )}
 
       {result && (
-        <AnalyzeResult
-          result={result}
-          state={state}
-          isInUniverse={isInUniverse(result.ticker)}
-          expirations={expirations}
-          strikes={strikes}
-          filterExpiration={filterExpiration}
-          filterStrike={filterStrike}
-          setFilterExpiration={setFilterExpiration}
-          setFilterStrike={setFilterStrike}
-          groupedByExpiration={groupedByExpiration}
-        />
+        <AnalyzeErrorBoundary key={result.ticker}>
+          <AnalyzeResult
+            result={result}
+            state={state}
+            isInUniverse={isInUniverse(result.ticker)}
+            expirations={expirations}
+            strikes={strikes}
+            filterExpiration={filterExpiration}
+            filterStrike={filterStrike}
+            setFilterExpiration={setFilterExpiration}
+            setFilterStrike={setFilterStrike}
+            groupedByExpiration={groupedByExpiration}
+          />
+        </AnalyzeErrorBoundary>
       )}
 
       {!result && !error && !analyzing && (

@@ -315,7 +315,7 @@ export function CandidatesPage({
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
                         {hasNoPremium ? DASH : (
-                          <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
+                          <span className={typeof c.net_croi === 'number' && c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
                             {formatPct(c.net_croi)}
                           </span>
                         )}
@@ -327,7 +327,7 @@ export function CandidatesPage({
                         {c.open_interest > 0 ? c.open_interest.toLocaleString() : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {c.iv > 0 ? `${formatNum(c.iv, 0)}%` : DASH}
+                        {typeof c.iv === 'number' && c.iv > 0 ? `${formatNum(c.iv, 0)}%` : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
                         {c.volume > 0 ? c.volume : DASH}

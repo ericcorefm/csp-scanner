@@ -68,16 +68,19 @@ export function StatRow({ label, value, highlight }: { label: string; value: str
   );
 }
 
-export function formatCurrency(v: number): string {
-  if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
-  if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
-  return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export function formatCurrency(v: number | null | undefined): string {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '--';
+  if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  return `${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export function formatPct(v: number): string {
-  return `${v.toFixed(1)}%`;
+export function formatPct(v: number | null | undefined, decimals = 1): string {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '--';
+  return `${v.toFixed(decimals)}%`;
 }
 
-export function formatNum(v: number, decimals = 2): string {
+export function formatNum(v: number | null | undefined, decimals = 2): string {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '--';
   return v.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }

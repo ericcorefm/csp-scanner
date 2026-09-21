@@ -124,6 +124,81 @@ export interface ContractAnalysis {
 }
 
 
+// ── Normalize API responses: convert undefined/NaN numeric fields to null ──
+function num(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  return null;
+}
+
+function normalizeContract(c: any): ContractAnalysis {
+  return {
+    strike: typeof c?.strike === 'number' ? c.strike : 0,
+    expiration: c?.expiration ?? '',
+    dte: typeof c?.dte === 'number' ? c.dte : 0,
+    bid: num(c?.bid) ?? 0,
+    ask: num(c?.ask) ?? 0,
+    mid: num(c?.mid) ?? 0,
+    spread_pct: num(c?.spread_pct) ?? 0,
+    iv: num(c?.iv) ?? 0,
+    delta: num(c?.delta) ?? 0,
+    volume: typeof c?.volume === 'number' ? c.volume : 0,
+    open_interest: typeof c?.open_interest === 'number' ? c.open_interest : 0,
+    volume_classification: c?.volume_classification ?? 'Very Thin',
+    suggested_sto: num(c?.suggested_sto) ?? 0,
+    suggested_btc: num(c?.suggested_btc) ?? 0,
+    net_profit: num(c?.net_profit) ?? 0,
+    net_croi: num(c?.net_croi) ?? 0,
+    premium_capture: num(c?.premium_capture) ?? 0,
+    breakeven: num(c?.breakeven) ?? 0,
+    qualified: !!c?.qualified,
+    technical_pending: c?.technical_pending,
+    pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
+    has_quotes: c?.has_quotes,
+    premium_source: c?.premium_source,
+    strike_distance_from_stock: num(c?.strike_distance_from_stock),
+    strike_distance_from_support: num(c?.strike_distance_from_support),
+  };
+}
+
+function normalizeAnalyzeResponse(data: any): AnalyzeTickerResponse {
+  const technical: TechnicalData | null = data.technical ? {
+    rsi: num(data.technical.rsi) ?? 0,
+    ma20: num(data.technical.ma20) ?? 0,
+    ma50: num(data.technical.ma50) ?? 0,
+    ma200: num(data.technical.ma200) ?? 0,
+    macd: num(data.technical.macd) ?? 0,
+    macd_signal: num(data.technical.macd_signal) ?? 0,
+    macd_histogram: num(data.technical.macd_histogram) ?? 0,
+    bb_upper: num(data.technical.bb_upper) ?? 0,
+    bb_middle: num(data.technical.bb_middle) ?? 0,
+    bb_lower: num(data.technical.bb_lower) ?? 0,
+    bb_position: data.technical.bb_position ?? 'Insufficient data',
+    volume_trend: data.technical.volume_trend ?? 'Insufficient data',
+  } : null;
+
+  return {
+    success: true,
+    ticker: data.ticker ?? '',
+    stock_price: num(data.stock_price),
+    stock_source: data.stock_source,
+    trend: data.trend ?? 'Pending',
+    primary_support: num(data.primary_support),
+    secondary_support: num(data.secondary_support),
+    resistance: num(data.resistance),
+    technical_data_available: data.technical_data_available,
+    technical_warning: data.technical_warning,
+    technical,
+    qualifies: !!data.qualifies,
+    best_contract: data.best_contract ? normalizeContract(data.best_contract) : null,
+    other_qualifying_contracts: Array.isArray(data.other_qualifying_contracts)
+      ? data.other_qualifying_contracts.map(normalizeContract) : [],
+    all_qualifying_contracts: Array.isArray(data.all_qualifying_contracts)
+      ? data.all_qualifying_contracts.map(normalizeContract) : [],
+    all_contracts_count: typeof data.all_contracts_count === 'number' ? data.all_contracts_count : 0,
+    qualifying_count: typeof data.qualifying_count === 'number' ? data.qualifying_count : 0,
+  };
+}
+
 export async function analyzeTicker(
   ticker: string,
   profile: StrategyProfile,
@@ -177,7 +252,49 @@ export async function analyzeTicker(
     throw new Error(msg);
   }
 
-  return data as AnalyzeTickerResponse;
+  return normalizeAnalyzeResponse(data);
+}
+
+function normalizeCandidateScan(c: any): CandidateScan {
+  return {
+    id: c?.id,
+    scan_date: c?.scan_date ?? new Date().toISOString().split('T')[0],
+    ticker: c?.ticker ?? '',
+    company_name: c?.company_name ?? '',
+    stock_price: num(c?.stock_price),
+    stock_source: c?.stock_source,
+    strike: typeof c?.strike === 'number' ? c.strike : 0,
+    expiration: c?.expiration ?? '',
+    dte: typeof c?.dte === 'number' ? c.dte : 0,
+    bid: num(c?.bid) ?? 0,
+    ask: num(c?.ask) ?? 0,
+    mid: num(c?.mid) ?? 0,
+    spread_pct: num(c?.spread_pct) ?? 0,
+    iv: num(c?.iv) ?? 0,
+    delta: num(c?.delta) ?? 0,
+    volume: typeof c?.volume === 'number' ? c.volume : 0,
+    open_interest: typeof c?.open_interest === 'number' ? c.open_interest : 0,
+    volume_classification: c?.volume_classification ?? 'Very Thin',
+    trend_classification: c?.trend_classification ?? 'Pending',
+    primary_support: num(c?.primary_support),
+    secondary_support: num(c?.secondary_support),
+    resistance: num(c?.resistance),
+    suggested_sto: num(c?.suggested_sto) ?? 0,
+    suggested_btc: num(c?.suggested_btc) ?? 0,
+    net_profit: num(c?.net_profit) ?? 0,
+    net_croi: num(c?.net_croi) ?? 0,
+    premium_capture: num(c?.premium_capture) ?? 0,
+    breakeven: num(c?.breakeven) ?? 0,
+    qualified: !!c?.qualified,
+    technical_pending: c?.technical_pending,
+    rejection_reasons: Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [],
+    pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
+    strategy_profile_id: c?.strategy_profile_id,
+    strike_distance_from_stock: num(c?.strike_distance_from_stock),
+    strike_distance_from_support: num(c?.strike_distance_from_support),
+    has_quotes: !!c?.has_quotes,
+    premium_source: c?.premium_source,
+  };
 }
 
 export async function scanCandidatesLive(
@@ -246,5 +363,8 @@ export async function scanCandidatesLive(
     throw new Error('Live market scan returned an invalid response');
   }
 
-  return data as LiveScanResponse;
+  return {
+    ...data,
+    candidates: data.candidates.map(normalizeCandidateScan),
+  } as LiveScanResponse;
 }
