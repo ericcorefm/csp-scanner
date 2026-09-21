@@ -54,7 +54,7 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   technical_rules_enabled: true,
 };
 
-export function useAppState(userId?: string) {
+export function useAppState() {
   const [profiles, setProfiles] = useState<StrategyProfile[]>([]);
   const [activeProfile, setActiveProfile] = useState<StrategyProfile | null>(null);
   const [candidates, setCandidates] = useState<CandidateScan[]>([]);
@@ -174,7 +174,6 @@ export function useAppState(userId?: string) {
           source: options?.source ?? 'manual',
           ...(options?.company_name ? { company_name: options.company_name } : {}),
         },
-        { onConflict: 'user_id,symbol' },
       );
     if (error && error.code !== '23505') throw error;
     await loadScanUniverse();
@@ -202,7 +201,7 @@ export function useAppState(userId?: string) {
     for (const sym of defaults) {
       await supabase
         .from('scan_universe')
-        .upsert({ symbol: sym, source: 'default', enabled: true }, { onConflict: 'user_id,symbol' });
+        .upsert({ symbol: sym, source: 'default', enabled: true });
     }
     await loadScanUniverse();
   }, [loadScanUniverse]);
@@ -280,7 +279,6 @@ export function useAppState(userId?: string) {
           openTickers,
           scanMode,
           scanMode === 'universe' ? universeSymbols : undefined,
-          userId,
         );
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
@@ -360,7 +358,7 @@ export function useAppState(userId?: string) {
     } finally {
       setScanning(false);
     }
-  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse.length, userId]);
+  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse.length]);
 
   const loadData = useCallback(async () => {
     try {
@@ -374,9 +372,8 @@ export function useAppState(userId?: string) {
   }, [loadProfiles]);
 
   useEffect(() => {
-    if (!userId) return;
     loadData();
-  }, [userId, loadData]);
+  }, [loadData]);
 
   useEffect(() => {
     if (activeProfile) {

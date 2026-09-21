@@ -155,10 +155,8 @@ async function supabaseSelect(table: string, columns: string, filter?: string): 
   return await resp.json();
 }
 
-async function fetchScanUniverse(userId?: string): Promise<{ ticker: string; company_name: string | null }[]> {
-  const filter = userId
-    ? `enabled=eq.true&user_id=eq.${encodeURIComponent(userId)}&order=symbol`
-    : 'enabled=eq.true&order=symbol';
+async function fetchScanUniverse(): Promise<{ ticker: string; company_name: string | null }[]> {
+  const filter = 'enabled=eq.true&order=symbol';
   const rows = await supabaseSelect('scan_universe', 'symbol,company_name', filter);
   return (rows || []).map((r: any) => ({ ticker: String(r.symbol).toUpperCase(), company_name: r.company_name || null }));
 }
@@ -1551,8 +1549,8 @@ serve(async (req) => {
         symbolList = clientSymbols.map((t) => ({ ticker: t, company_name: null }));
         console.log(`[UNIVERSE SCAN REQUEST] mode=universe, symbols=${JSON.stringify(clientSymbols)}`);
       } else {
-        symbolList = await fetchScanUniverse(body.userId);
-        console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols from database${body.userId ? ' (user: ' + body.userId + ')' : ''}`);
+        symbolList = await fetchScanUniverse();
+        console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols from database`);
       }
     } else {
       symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
