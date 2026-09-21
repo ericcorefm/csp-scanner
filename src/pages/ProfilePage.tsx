@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Mail, Lock, KeyRound, Loader2, Check, AlertCircle, LogOut, UserCircle, Calendar } from 'lucide-react';
+import { Mail, Lock, KeyRound, Loader2, Check, AlertCircle, LogOut, UserCircle, Calendar, Trash2, AlertTriangle } from 'lucide-react';
 import type { AuthState } from '@/lib/useAuth';
 import { supabase } from '@/lib/supabase';
 import { Card } from '@/components/ui';
@@ -77,6 +77,41 @@ export function ProfilePage({ auth }: { auth: AuthState }) {
       setEmailError(err instanceof Error ? err.message : 'Failed to update email.');
     } finally {
       setEmailLoading(false);
+    }
+  };
+
+  // Delete account
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDeleteAccount = async () => {
+    setDeleteLoading(true);
+    setDeleteError(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setDeleteError('No active session. Please sign in again.');
+        return;
+      }
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/delete-account`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error || `Request failed (${resp.status})`);
+      }
+      await supabase.auth.signOut();
+      auth.setAuthRoute('signin');
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete account.');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -247,6 +282,68 @@ export function ProfilePage({ auth }: { auth: AuthState }) {
           <LogOut className="h-4 w-4" />
           Sign Out
         </button>
+      </Card>
+
+      {/* Delete account — danger zone */}
+      <Card className="p-5 border-red-900/40">
+        <h3 className="text-sm font-semibold text-red-300 mb-1">Delete Account</h3>
+        <p className="text-xs text-slate-500 mb-4">
+          Permanently delete your account and all associated data. This action cannot be undone.
+        </p>
+
+        {!showDeleteConfirm ? (
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            className="flex items-center justify-center gap-2 rounded-lg border border-red-900/50 px-4 py-2.5 text-sm font-medium text-red-400 hover:bg-red-900/20 transition-colors"
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete Account
+          </button>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-start gap-2.5 rounded-lg border border-red-900/40 bg-red-900/10 p-3">
+              <AlertTriangle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-red-300">
+                You are about to permanently delete your account. All your data will be removed and cannot be recovered.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1.5">
+                Type <span className="text-red-400 font-semibold">DELETE</span> to confirm
+              </label>
+              <input
+                type="text"
+                value={deleteConfirmText}
+                onChange={(e) => { setDeleteConfirmText(e.target.value); setDeleteError(null); }}
+                placeholder="DELETE"
+                autoFocus
+                className="w-full max-w-sm rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-red-500/40 focus:border-red-500/50"
+              />
+            </div>
+            {deleteError && (
+              <p className="flex items-center gap-1.5 text-xs text-red-400">
+                <AlertCircle className="h-3.5 w-3.5" /> {deleteError}
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void handleDeleteAccount()}
+                disabled={deleteLoading || deleteConfirmText !== 'DELETE'}
+                className="flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60 transition-colors"
+              >
+                {deleteLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                {deleteLoading ? 'Deleting...' : 'Permanently Delete'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowDeleteConfirm(false); setDeleteConfirmText(''); setDeleteError(null); }}
+                className="rounded-lg border border-slate-700 px-4 py-2.5 text-sm text-slate-400 hover:bg-slate-800 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </Card>
     </div>
   );
