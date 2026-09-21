@@ -207,10 +207,21 @@ function normalizeAnalyzeResponse(data: any): AnalyzeTickerResponse {
 export async function analyzeTicker(
   ticker: string,
   profile: StrategyProfile,
+  knownStockPrice?: number | null,
 ): Promise<AnalyzeTickerResponse> {
-  // Route through market-scan edge function with mode=analyze
+  // Route through market-scan edge function with mode=analyze.
+  // Pass any price already known from Today's Candidates so Analyze does not
+  // need another Stocks Basic request just to rediscover the same daily close.
   const { data, error } = await supabase.functions.invoke('market-scan', {
-    body: { mode: 'analyze', ticker, profile },
+    body: {
+      mode: 'analyze',
+      ticker,
+      profile,
+      knownStockPrice:
+        typeof knownStockPrice === 'number' && Number.isFinite(knownStockPrice) && knownStockPrice > 0
+          ? knownStockPrice
+          : null,
+    },
   });
 
   if (error instanceof FunctionsHttpError) {
