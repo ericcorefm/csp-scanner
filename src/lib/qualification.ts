@@ -34,21 +34,20 @@ export function deriveQualification(
 
 /**
  * Convenience wrapper that pulls all fields from a CandidateScan.
+ * Prefers the server-provided `qualification` field; falls back to
+ * deriving from pass_fail for older cached rows.
  */
 export function deriveCandidateQualification(c: {
+  qualification?: 'qualified' | 'pending' | 'rejected';
   pass_fail?: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
   rejection_reasons?: string[];
   technical_pending?: boolean;
   qualified?: boolean;
 }): QualificationStatus {
-  const status = deriveQualification(c.pass_fail, c.rejection_reasons, c.technical_pending);
-  // If derived status is 'qualified' but the edge function explicitly marked
-  // it not-qualified without recording reasons, treat as pending rather than
-  // over-claiming qualified.
-  if (status === 'qualified' && c.qualified === false && (c.rejection_reasons?.length ?? 0) === 0) {
-    return 'pending';
+  if (c.qualification === 'qualified' || c.qualification === 'pending' || c.qualification === 'rejected') {
+    return c.qualification;
   }
-  return status;
+  return deriveQualification(c.pass_fail, c.rejection_reasons, c.technical_pending);
 }
 
 /**
@@ -94,6 +93,18 @@ export function reevaluatePassFailWithTechnical(
     return pf;
   });
 
+  // Re-derive qualification from the updated pass_fail (same logic as edge function)
+  const failRules = updatedPassFail.filter((r) => r.status === 'fail');
+  const pendingRules = updatedPassFail.filter((r) => r.status === 'not_evaluated');
+  let newQualification: 'qualified' | 'pending' | 'rejected';
+  if (failRules.length > 0) {
+    newQualification = 'rejected';
+  } else if (pendingRules.length > 0) {
+    newQualification = 'pending';
+  } else {
+    newQualification = 'qualified';
+  }
+
   return {
     ...candidate,
     trend_classification: snap.trend !== 'Pending' ? snap.trend : candidate.trend_classification,
@@ -102,7 +113,10 @@ export function reevaluatePassFailWithTechnical(
     resistance: snap.resistance ?? candidate.resistance,
     stock_price: snap.stock_price ?? candidate.stock_price,
     strike_distance_from_support: supportDist ?? candidate.strike_distance_from_support,
-    technical_pending: false,
+    technical_pending: newQualification === 'pending',
+    qualified: newQualification === 'qualified',
+    qualification: newQualification,
+    rejection_reasons: failRules.map((r) => r.rule),
     pass_fail: updatedPassFail,
   };
 }

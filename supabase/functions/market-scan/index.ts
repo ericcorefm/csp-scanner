@@ -656,6 +656,7 @@ type ScanSymbolResult = {
   evaluated: number;
   qualified: number;
   rejected: number;
+  pending: number;
   pagesFetched: number;
   rawSample?: any;
   analyses?: any[];
@@ -852,7 +853,7 @@ async function scanSymbol(
     putsReturned: 0, filteredByExpiration: 0, filteredByStrike: 0,
     missingStrike: 0, missingExpiration: 0, missingLastQuote: 0,
     missingBid: 0, zeroBid: 0, missingAsk: 0, zeroAsk: 0, askLtBid: 0, otherInvalid: 0,
-    validQuotes: 0, contractsAwaitingQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pagesFetched: 0,
+    validQuotes: 0, contractsAwaitingQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pending: 0, pagesFetched: 0,
   };
 
   // Step 1: Stock snapshot via shared function (cached per ticker)
@@ -1125,43 +1126,6 @@ async function scanSymbol(
     const hasBidAsk = bid !== null && ask !== null && bid > 0 && ask > 0 && ask >= bid;
     const sp = hasBidAsk ? spreadPct(bid!, ask!) : 0;
 
-    // ── Non-premium qualification rules (applied regardless of premium availability) ──
-    const reasons: string[] = [];
-    if (!noFilterMode) {
-      if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-      if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
-      if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
-        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
-        if (primarySupport !== null && primarySupport > 0) {
-          const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-          if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
-          if (supportDistPct > profile.maximum_support_distance_pct) reasons.push('Support distance too high');
-        }
-      }
-      // OI and volume rules are non-premium — they come from the contract itself
-      if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
-        if (oi < profile.min_target_oi) reasons.push('OI too low');
-        if (volume < 10) reasons.push('Insufficient liquidity');
-      }
-      // Stock-price filter applied at contract level (not as a symbol-level abort)
-      // so that option chain availability is accurately reflected in scan counts.
-      if (stockPrice !== null && stockPrice > 0 && !isSectionOff(profile, 'order_strike_enabled')) {
-        if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
-          if (!reasons.includes('Stock price below minimum')) reasons.push('Stock price below minimum');
-        }
-        if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
-          if (!reasons.includes('Stock price above maximum')) reasons.push('Stock price above maximum');
-        }
-      }
-    }
-
-    // Track premium availability
-    if (hasPremium) {
-      r.validQuotes++;
-    } else {
-      r.contractsAwaitingQuotes++;
-    }
-
     // Financial calculations only when a suggested STO is available
     let stoPrice = 0, btcPrice: number | null = null, netProfit = 0, netCroi = 0, pc = 0, breakeven = 0;
     let croiOptimized = false;
@@ -1176,36 +1140,17 @@ async function scanSymbol(
         croiOptimized = true;
       }
       breakeven = strike - stoPrice;
-
-      // CROI & Premium Capture qualification (when section ON):
-      // PASS only if netCROI >= min AND premiumCapture <= max AND BTC > 0
-      if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-        if (!croiOptimized || netCroi < profile.min_net_croi || pc > profile.max_premium_capture) {
-          reasons.push('CROI too low');
-        }
-      }
-
-      // Spread rule only applies when bid/ask exist
-      if (!noFilterMode && !isSectionOff(profile, 'spread_enabled') && hasBidAsk && sp > profile.max_spread_pct) {
-        if (!reasons.includes('Spread too wide')) {
-          reasons.push('Spread too wide');
-        }
-      }
-    } else if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-      // No premium available and CROI filter is ON — cannot qualify
-      reasons.push('CROI too low');
     }
-
-    const qualified = reasons.length === 0;
-    const technicalPending = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable;
-    r.evaluated++;
-    if (qualified && !technicalPending) r.qualified++; else r.rejected++;
 
     const premiumSourceOut = premiumSource as string;
 
     // ── Build pass/fail rule checks for both scan and analyze modes ──
+    // This is the SINGLE SOURCE OF TRUTH for qualification.
     const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
     if (!noFilterMode) {
+      if (profile.exclude_existing_positions && openTickers.includes(symbol)) {
+        passFail.push({ rule: 'No existing position', pass: false, status: 'fail' });
+      }
       if (!isSectionOff(profile, 'order_strike_enabled')) {
         passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
         if (primarySupport !== null && primarySupport > 0) {
@@ -1213,6 +1158,14 @@ async function scanSymbol(
           passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: belowSupport, status: belowSupport ? 'pass' : 'fail' });
         } else {
           passFail.push({ rule: 'Support rule not evaluated — historical data unavailable', pass: true, status: 'not_evaluated' });
+        }
+        if (stockPrice !== null && stockPrice > 0) {
+          if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+            passFail.push({ rule: `Stock price >= ${profile.minimum_stock_price}`, pass: false, status: 'fail' });
+          }
+          if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+            passFail.push({ rule: `Stock price <= ${profile.maximum_stock_price}`, pass: false, status: 'fail' });
+          }
         }
       }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
@@ -1253,16 +1206,42 @@ async function scanSymbol(
         }
       }
       if (!hasPremium && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-        passFail.push({ rule: 'Filter Strikes by CROI — Premium required', pass: true, status: 'not_evaluated' });
+        passFail.push({ rule: 'Filter Strikes by CROI — Premium required (CROI too low)', pass: false, status: 'fail' });
       }
       if (!hasPremium) {
         passFail.push({ rule: 'Premium data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
       }
     }
 
-    if (analyzeMode) {
-      const finalQualified = reasons.length === 0 && !technicalPending;
+    // ── Derive final qualification from pass_fail (single source of truth) ──
+    // FAIL always overrides PENDING.
+    const failRules = passFail.filter((r) => r.status === 'fail');
+    const pendingRules = passFail.filter((r) => r.status === 'not_evaluated');
+    let qualification: 'qualified' | 'pending' | 'rejected';
+    if (failRules.length > 0) {
+      qualification = 'rejected';
+    } else if (pendingRules.length > 0) {
+      qualification = 'pending';
+    } else {
+      qualification = 'qualified';
+    }
 
+    const finalQualified = qualification === 'qualified';
+    const technicalPending = qualification === 'pending';
+    const rejectionReasons = failRules.map((r) => r.rule);
+
+    // Track premium availability
+    if (hasPremium) {
+      r.validQuotes++;
+    } else {
+      r.contractsAwaitingQuotes++;
+    }
+    r.evaluated++;
+    if (qualification === 'qualified') r.qualified++;
+    else if (qualification === 'pending') r.pending++;
+    else r.rejected++;
+
+    if (analyzeMode) {
       analyses.push({
         strike, expiration, dte,
         bid: hasBidAsk ? Number(bid!.toFixed(2)) : 0,
@@ -1277,7 +1256,8 @@ async function scanSymbol(
         net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
-        qualified: finalQualified, technical_pending: technicalPending, pass_fail: passFail,
+        qualified: finalQualified, qualification, technical_pending: technicalPending, pass_fail: passFail,
+        rejection_reasons: rejectionReasons,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
@@ -1302,7 +1282,7 @@ async function scanSymbol(
         net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
-        qualified, rejection_reasons: reasons,
+        qualified: finalQualified, qualification, rejection_reasons: rejectionReasons,
         technical_pending: technicalPending,
         pass_fail: passFail,
         strategy_profile_id: profile.id,
@@ -1318,7 +1298,7 @@ async function scanSymbol(
 
   // In analyze mode, sort qualifying contracts and pick best
   if (analyzeMode && analyses.length > 0) {
-    const qualifying = analyses.filter((a) => a.qualified);
+    const qualifying = analyses.filter((a) => a.qualification === 'qualified' || (a.qualified && !a.qualification));
     qualifying.sort((a, b) => {
       const aBelow = primarySupport !== null && a.strike < primarySupport ? 0 : 1;
       const bBelow = primarySupport !== null && b.strike < primarySupport ? 0 : 1;
@@ -1523,10 +1503,11 @@ serve(async (req) => {
       }
 
       const analyses = result.analyses || [];
-      const qualifying = analyses.filter((a) => a.qualified);
+      const qualifying = analyses.filter((a) => a.qualification === 'qualified' || (a.qualified && !a.qualification));
       const bestContract = qualifying[0] || null;
 
-      console.log(`[Analyze] ${ticker} complete — ${analyses.length} analyzed, ${qualifying.length} qualified, puts=${result.putsReturned}, validQuotes=${result.validQuotes}`);
+      const pendingCount = analyses.filter((a) => a.qualification === 'pending').length;
+      console.log(`[Analyze] ${ticker} complete — ${analyses.length} analyzed, ${qualifying.length} qualified, ${pendingCount} pending, puts=${result.putsReturned}, validQuotes=${result.validQuotes}`);
 
       return json({
         success: true,
@@ -1556,6 +1537,7 @@ serve(async (req) => {
           contracts_awaiting_quotes: result.contractsAwaitingQuotes,
           contracts_evaluated: result.evaluated,
           qualified: result.qualified,
+          pending: result.pending,
           rejected: result.rejected,
         },
       });
@@ -1585,7 +1567,7 @@ serve(async (req) => {
       symbols_returned: 0, symbols_failed: 0, symbols_with_chains: 0,
       puts_returned: 0, filtered_by_expiration: 0, filtered_by_strike: 0,
       valid_quotes: 0, contracts_awaiting_quotes: 0,
-      contracts_evaluated: 0, qualified: 0, rejected: 0, pages_fetched: 0,
+      contracts_evaluated: 0, qualified: 0, pending: 0, rejected: 0, pages_fetched: 0,
       contracts_found: 0,
     };
 
@@ -1602,7 +1584,7 @@ serve(async (req) => {
     let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
     let totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
     let totalValidQuotes = 0, totalAwaitingQuotes = 0;
-    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPagesFetched = 0;
+    let totalEvaluated = 0, totalQualified = 0, totalPending = 0, totalRejected = 0, totalPagesFetched = 0;
     let totalContractsFound = 0;
     let rawSample: any = null;
     let verboseCount = 0;
@@ -1634,6 +1616,7 @@ serve(async (req) => {
         totalAwaitingQuotes += result.contractsAwaitingQuotes;
         totalEvaluated += result.evaluated;
         totalQualified += result.qualified;
+        totalPending += result.pending;
         totalRejected += result.rejected;
         totalPagesFetched += result.pagesFetched;
         totalContractsFound += result.putsReturned;
@@ -1645,7 +1628,7 @@ serve(async (req) => {
         candidates.push(...result.candidates);
       }
 
-      const qualifiedCount = candidates.filter((c) => c.qualified).length;
+      const qualifiedCount = candidates.filter((c) => c.qualification === 'qualified' || (c.qualified && !c.qualification)).length;
       if (qualifiedCount >= MAX_CANDIDATES) {
         console.log(`Reached ${MAX_CANDIDATES} qualified candidates, stopping early at ${symbolsScanned} symbols`);
         break;
@@ -1666,7 +1649,8 @@ serve(async (req) => {
       const limited: any[] = [];
       for (const [, arr] of byTicker) {
         arr.sort((a, b) =>
-          Number(b.qualified) - Number(a.qualified) ||
+          (b.qualification === 'qualified' ? 2 : b.qualification === 'pending' ? 1 : 0) -
+          (a.qualification === 'qualified' ? 2 : a.qualification === 'pending' ? 1 : 0) ||
           a.spread_pct - b.spread_pct ||
           b.net_croi - a.net_croi
         );
@@ -1676,7 +1660,11 @@ serve(async (req) => {
       candidates.push(...limited);
     }
 
-    candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
+    candidates.sort((a, b) =>
+      (b.qualification === 'qualified' ? 2 : b.qualification === 'pending' ? 1 : 0) -
+      (a.qualification === 'qualified' ? 2 : a.qualification === 'pending' ? 1 : 0) ||
+      a.spread_pct - b.spread_pct || b.net_croi - a.net_croi
+    );
     const capped = candidates.slice(0, MAX_CANDIDATES * 2);
 
     const scan_counts = {
@@ -1691,6 +1679,7 @@ serve(async (req) => {
       contracts_awaiting_quotes: totalAwaitingQuotes,
       contracts_evaluated: totalEvaluated,
       qualified: totalQualified,
+      pending: totalPending,
       rejected: totalRejected,
       pages_fetched: totalPagesFetched,
       contracts_found: totalContractsFound,

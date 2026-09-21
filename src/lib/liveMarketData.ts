@@ -20,6 +20,7 @@ export interface ScanCounts {
   contracts_awaiting_quotes: number;
   contracts_evaluated: number;
   qualified: number;
+  pending: number;
   rejected: number;
   pages_fetched: number;
   contracts_found: number;
@@ -116,7 +117,9 @@ export interface ContractAnalysis {
   premium_capture: number;
   breakeven: number;
   qualified: boolean;
+  qualification?: 'qualified' | 'pending' | 'rejected';
   technical_pending?: boolean;
+  rejection_reasons?: string[];
   pass_fail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
   has_quotes?: boolean;
   premium_source?: PremiumSource;
@@ -152,7 +155,9 @@ function normalizeContract(c: any): ContractAnalysis {
     premium_capture: num(c?.premium_capture) ?? 0,
     breakeven: num(c?.breakeven) ?? 0,
     qualified: !!c?.qualified,
+    qualification: c?.qualification,
     technical_pending: c?.technical_pending,
+    rejection_reasons: Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [],
     pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
     has_quotes: c?.has_quotes,
     premium_source: c?.premium_source,
@@ -302,6 +307,7 @@ function normalizeCandidateScan(c: any): CandidateScan {
     premium_capture: num(c?.premium_capture) ?? 0,
     breakeven: num(c?.breakeven) ?? 0,
     qualified: !!c?.qualified,
+    qualification: c?.qualification,
     technical_pending: c?.technical_pending,
     rejection_reasons: Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [],
     pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
