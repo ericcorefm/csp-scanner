@@ -156,7 +156,8 @@ async function supabaseSelect(table: string, columns: string, filter?: string): 
 }
 
 async function fetchScanUniverse(): Promise<{ ticker: string; company_name: string | null }[]> {
-  const rows = await supabaseSelect('scan_universe', 'symbol,company_name', 'enabled=eq.true&order=symbol');
+  const filter = 'enabled=eq.true&order=symbol';
+  const rows = await supabaseSelect('scan_universe', 'symbol,company_name', filter);
   return (rows || []).map((r: any) => ({ ticker: String(r.symbol).toUpperCase(), company_name: r.company_name || null }));
 }
 
@@ -236,6 +237,47 @@ async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<vo
   } catch (e) {
     console.log(`[Cache] ${ticker} | save error: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+// ── Weekly / Monthly aggregation from daily bars ──
+function aggregateWeeks(daily: HistoryBar[]): HistoryBar[] {
+  if (daily.length === 0) return [];
+  const weeks = new Map<string, HistoryBar[]>();
+  for (const bar of daily) {
+    const d = new Date(bar.date + 'T00:00:00Z');
+    const dayOfWeek = d.getUTCDay();
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() - ((dayOfWeek + 6) % 7));
+    const key = monday.toISOString().slice(0, 10);
+    if (!weeks.has(key)) weeks.set(key, []);
+    weeks.get(key)!.push(bar);
+  }
+  return Array.from(weeks.entries()).map(([date, bars]) => ({
+    date,
+    open: bars[0].open,
+    high: Math.max(...bars.map((b) => b.high)),
+    low: Math.min(...bars.map((b) => b.low)),
+    close: bars.at(-1)!.close,
+    volume: bars.reduce((sum, b) => sum + b.volume, 0),
+  })).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function aggregateMonths(daily: HistoryBar[]): HistoryBar[] {
+  if (daily.length === 0) return [];
+  const months = new Map<string, HistoryBar[]>();
+  for (const bar of daily) {
+    const key = bar.date.slice(0, 7) + '-01'; // YYYY-MM-01
+    if (!months.has(key)) months.set(key, []);
+    months.get(key)!.push(bar);
+  }
+  return Array.from(months.entries()).map(([date, bars]) => ({
+    date,
+    open: bars[0].open,
+    high: Math.max(...bars.map((b) => b.high)),
+    low: Math.min(...bars.map((b) => b.low)),
+    close: bars.at(-1)!.close,
+    volume: bars.reduce((sum, b) => sum + b.volume, 0),
+  })).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 // ── Technical indicators ──
@@ -807,24 +849,9 @@ async function scanSymbol(
   const technicalDataAvailable = bars.length >= 60;
   r.technicalDataAvailable = technicalDataAvailable;
 
-  // Stock price filter (if Order & Strike section enabled). If even the previous
-  // close is unavailable, defer this filter until an underlying price can be read
-  // from the option-chain snapshot.
-  // This filters the underlying stock price, independent of put strike price.
-  // A $71 stock with max put strike $25 is still allowed — stock price and
-  // strike price are separate filters.
-  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
-      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} < minimum ${profile.minimum_stock_price}, skipping symbol`);
-      r.chainStatus = 'no_options';
-      return r;
-    }
-    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
-      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} > maximum ${profile.maximum_stock_price}, skipping symbol`);
-      r.chainStatus = 'no_options';
-      return r;
-    }
-  }
+  // Stock price filter is NOT applied here as a symbol-level early return.
+  // It is applied as a contract-level rejection reason after option chains are
+  // retrieved, so that "With Option Chains" reflects actual chain availability.
 
   let primarySupport: number | null = technicalDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
   let secondarySupport: number | null = technicalDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
@@ -988,17 +1015,9 @@ async function scanSymbol(
     console.log(`[PRICE] ${symbol} | grouped=${bulkStockPrice} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | historyClose=${bars.length > 0 ? bars.at(-1)!.close : null} | optionUnderlying=${optionUnderlyingPrice} | final=${stockPrice} | source=${r.stockSource}`);
   }
 
-  // Apply deferred underlying-price filters after all real price fallbacks were tried.
-  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
-      r.chainStatus = 'no_options';
-      return r;
-    }
-    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
-      r.chainStatus = 'no_options';
-      return r;
-    }
-  }
+  // Stock-price filter is applied at the contract level (as a rejection reason)
+  // rather than aborting the whole symbol, so option chain availability is
+  // reported accurately in scan counts.
 
   if (chainError) {
     if (chainError.status === 401 || chainError.status === 403) r.chainStatus = 'unauthorized';
@@ -1100,6 +1119,16 @@ async function scanSymbol(
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         if (oi < profile.min_target_oi) reasons.push('OI too low');
         if (volume < 10) reasons.push('Insufficient liquidity');
+      }
+      // Stock-price filter applied at contract level (not as a symbol-level abort)
+      // so that option chain availability is accurately reflected in scan counts.
+      if (stockPrice !== null && stockPrice > 0 && !isSectionOff(profile, 'order_strike_enabled')) {
+        if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+          if (!reasons.includes('Stock price below minimum')) reasons.push('Stock price below minimum');
+        }
+        if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+          if (!reasons.includes('Stock price above maximum')) reasons.push('Stock price above maximum');
+        }
       }
     }
 
@@ -1303,6 +1332,99 @@ serve(async (req) => {
     const mode: string = body.mode || 'discovery';
     const scanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
 
+    // ── CHART-BARS MODE: return OHLCV bars for TradingView charting ──
+    // Does not require a strategy profile — just historical price data.
+    if (mode === 'chart-bars') {
+      const ticker = String(body.ticker || '').toUpperCase().trim();
+      if (!ticker) return json({ success: false, error: 'Missing ticker for chart-bars mode' });
+
+      const resolution: string = body.resolution || '1D';
+      const from: number = Number(body.from) || 0;
+      const to: number = Number(body.to) || 0;
+
+      const rangeMap: Record<string, string> = {
+        '1D': 'day',
+        '1W': 'week',
+        '1M': 'month',
+      };
+      const rangeUnit = rangeMap[resolution] || 'day';
+
+      let bars: HistoryBar[] = [];
+      const cachedBars = await loadCachedHistory(ticker, 500);
+
+      if (cachedBars.length > 0) {
+        if (resolution === '1D') {
+          bars = cachedBars;
+        } else if (resolution === '1W') {
+          bars = aggregateWeeks(cachedBars);
+        } else if (resolution === '1M') {
+          bars = aggregateMonths(cachedBars);
+        }
+      }
+
+      const chartToday = new Date();
+      const chartFmt = (d: Date) => d.toISOString().slice(0, 10);
+      const chartStart = new Date(chartToday);
+      chartStart.setDate(chartStart.getDate() - 548);
+
+      const needsFresh = bars.length < 60 ||
+        (bars.length > 0 && bars.at(-1)!.date < chartFmt(chartToday));
+
+      if (needsFresh || bars.length === 0) {
+        const histPath = `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/${rangeUnit}/${chartFmt(chartStart)}/${chartFmt(chartToday)}?adjusted=true&sort=asc&limit=50000`;
+        const histResult = await massiveFetch(histPath, apiKey, ticker, 'chart_bars');
+
+        if (histResult.ok) {
+          const freshBars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
+            date: new Date(b.t).toISOString().slice(0, 10),
+            open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
+          })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+
+          if (freshBars.length > 0) {
+            if (resolution === '1D') {
+              const barMap = new Map<string, HistoryBar>();
+              for (const b of cachedBars) barMap.set(b.date, b);
+              for (const b of freshBars) barMap.set(b.date, b);
+              bars = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+            } else if (resolution === '1W') {
+              const all = [...cachedBars, ...freshBars];
+              const dedup = new Map<string, HistoryBar>();
+              for (const b of all) dedup.set(b.date, b);
+              bars = aggregateWeeks(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
+            } else if (resolution === '1M') {
+              const all = [...cachedBars, ...freshBars];
+              const dedup = new Map<string, HistoryBar>();
+              for (const b of all) dedup.set(b.date, b);
+              bars = aggregateMonths(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
+            }
+            await saveCachedHistory(ticker, freshBars);
+          }
+        }
+      }
+
+      const tvBars = bars
+        .filter((b) => Number.isFinite(b.close) && b.close > 0)
+        .map((b) => ({
+          time: Math.floor(new Date(b.date + 'T00:00:00Z').getTime() / 1000),
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+          volume: b.volume,
+        }))
+        .sort((a, b) => a.time - b.time);
+
+      const filtered = tvBars.filter((b) => {
+        if (from && b.time < from) return false;
+        if (to && b.time > to) return false;
+        return true;
+      });
+
+      console.log(`[ChartBars] ${ticker} | resolution=${resolution} | bars=${filtered.length}`);
+
+      return json({ success: true, ticker, resolution, bars: filtered });
+    }
+
     if (!profile) return json({ success: false, error: 'Missing strategy profile' });
 
     const today = new Date();
@@ -1419,8 +1541,17 @@ serve(async (req) => {
     // ── DISCOVERY / UNIVERSE MODE ──
     let symbolList: { ticker: string; company_name: string | null }[];
     if (scanMode === 'universe') {
-      symbolList = await fetchScanUniverse();
-      console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols`);
+      // Use client-supplied symbols if provided; otherwise load from database.
+      const clientSymbols: string[] = Array.isArray(body.symbols)
+        ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean)
+        : [];
+      if (clientSymbols.length > 0) {
+        symbolList = clientSymbols.map((t) => ({ ticker: t, company_name: null }));
+        console.log(`[UNIVERSE SCAN REQUEST] mode=universe, symbols=${JSON.stringify(clientSymbols)}`);
+      } else {
+        symbolList = await fetchScanUniverse();
+        console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols from database`);
+      }
     } else {
       symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
       console.log(`[ScanMode=discovery] Loaded ${symbolList.length} optionable symbols (cap ${MAX_DISCOVERY_SYMBOLS})`);

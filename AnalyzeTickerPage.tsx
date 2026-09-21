@@ -1,8 +1,7 @@
-import { useState, useMemo, useRef, useEffect, Component, ReactNode } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Search,
   Plus,
-  Trash2,
   CheckCircle2,
   XCircle,
   Loader2,
@@ -17,27 +16,10 @@ import {
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
+import type { ScanUniverseEntry } from '@/types';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 import { getCachedStockPrice } from '@/lib/technicalCache';
-
-class AnalyzeErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
-  state = { hasError: false };
-  static getDerivedStateFromError() { return { hasError: true }; }
-  componentDidCatch(err: unknown) {
-    console.error('[AnalyzeTicker] render error:', err);
-  }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
-          <AlertTriangle className="h-4 w-4 inline mr-2" />
-          Some market data is unavailable for this ticker. The analysis could not be fully rendered.
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
+import { TradingViewChart } from '@/components/TradingViewChart';
 
 function getFailedRules(c: ContractAnalysis): string[] {
   if (!c.pass_fail || c.pass_fail.length === 0) return [];
@@ -143,8 +125,13 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
     tickerInputRef.current?.focus();
   };
 
-  const isInUniverse = (sym: string) =>
-    state.scanUniverseEntries.some((e) => e.symbol === sym.toUpperCase());
+  const universeEntryFor = (sym: string) =>
+    state.scanUniverseEntries.find((e) => e.symbol === sym.toUpperCase()) ?? null;
+
+  const companyNameFor = (sym: string): string | null => {
+    const c = state.candidates.find((c) => c.ticker.toUpperCase() === sym.toUpperCase());
+    return c?.company_name || null;
+  };
 
   const allContracts = useMemo(() => {
     if (!result) return [];
@@ -255,25 +242,25 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
       )}
 
       {result && (
-        <AnalyzeErrorBoundary key={result.ticker}>
-          <AnalyzeResult
-            result={result}
-            state={state}
-            isInUniverse={isInUniverse(result.ticker)}
-            expirations={expirations}
-            strikes={strikes}
-            filterExpiration={filterExpiration}
-            filterStrike={filterStrike}
-            filterStatus={filterStatus}
-            setFilterExpiration={setFilterExpiration}
-            setFilterStrike={setFilterStrike}
-            setFilterStatus={setFilterStatus}
-            groupedByExpiration={groupedByExpiration}
-            totalContracts={allContracts.length}
-            shownContracts={filteredContracts.length}
-            closestMatch={closestMatch}
-          />
-        </AnalyzeErrorBoundary>
+        <AnalyzeResult
+          result={result}
+          state={state}
+          universeEntry={universeEntryFor(result.ticker)}
+          companyName={companyNameFor(result.ticker)}
+          expirations={expirations}
+          strikes={strikes}
+          filterExpiration={filterExpiration}
+          filterStrike={filterStrike}
+          filterStatus={filterStatus}
+          setFilterExpiration={setFilterExpiration}
+          setFilterStrike={setFilterStrike}
+          setFilterStatus={setFilterStatus}
+          groupedByExpiration={groupedByExpiration}
+          totalContracts={allContracts.length}
+          shownContracts={filteredContracts.length}
+          closestMatch={closestMatch}
+          displayStockPrice={displayStockPrice}
+        />
       )}
 
       {!result && !error && !analyzing && (
@@ -291,7 +278,8 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
 function AnalyzeResult({
   result,
   state,
-  isInUniverse,
+  universeEntry,
+  companyName,
   expirations,
   strikes,
   filterExpiration,
@@ -304,10 +292,12 @@ function AnalyzeResult({
   totalContracts,
   shownContracts,
   closestMatch,
+  displayStockPrice,
 }: {
   result: AnalyzeTickerResponse;
   state: AppState;
-  isInUniverse: boolean;
+  universeEntry: ScanUniverseEntry | null;
+  companyName: string | null;
   expirations: string[];
   strikes: number[];
   filterExpiration: string;
@@ -320,7 +310,49 @@ function AnalyzeResult({
   totalContracts: number;
   shownContracts: number;
   closestMatch: ContractAnalysis | null;
+  displayStockPrice: number | null;
 }) {
+  const dataWarnings: string[] = [];
+  if (displayStockPrice == null) dataWarnings.push('Stock price unavailable.');
+  if (!result.technical) dataWarnings.push('Technical history unavailable.');
+  if (result.primary_support == null) dataWarnings.push('Primary support could not be evaluated.');
+
+  const [universeBusy, setUniverseBusy] = useState(false);
+  const [universeToast, setUniverseToast] = useState<{ msg: string; kind: 'success' | 'error' } | null>(null);
+
+  useEffect(() => {
+    if (!universeToast) return;
+    const t = setTimeout(() => setUniverseToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [universeToast]);
+
+  const handleAddToUniverse = async () => {
+    setUniverseBusy(true);
+    try {
+      await state.addToScanUniverse(result.ticker, {
+        source: 'analyze',
+        company_name: companyName,
+      });
+      setUniverseToast({ msg: `${result.ticker} added to Scan Universe`, kind: 'success' });
+    } catch {
+      setUniverseToast({ msg: 'Could not add ticker to Scan Universe.', kind: 'error' });
+    } finally {
+      setUniverseBusy(false);
+    }
+  };
+
+  const handleEnableInUniverse = async () => {
+    setUniverseBusy(true);
+    try {
+      await state.toggleScanUniverseEnabled(result.ticker, true);
+      setUniverseToast({ msg: `${result.ticker} enabled in Scan Universe`, kind: 'success' });
+    } catch {
+      setUniverseToast({ msg: 'Could not enable ticker in Scan Universe.', kind: 'error' });
+    } finally {
+      setUniverseBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       {/* Qualifies / Does Not Qualify */}
@@ -356,6 +388,50 @@ function AnalyzeResult({
         </div>
       )}
 
+      {/* Scan Universe actions — above Stock Summary */}
+      <div className="flex flex-wrap items-center gap-3">
+        {universeEntry?.enabled ? (
+          <button
+            disabled
+            className="flex items-center gap-2 rounded-lg border border-emerald-700/50 px-4 py-2 text-sm text-emerald-400 cursor-default"
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            In Scan Universe
+          </button>
+        ) : universeEntry ? (
+          <button
+            onClick={handleEnableInUniverse}
+            disabled={universeBusy}
+            className="flex items-center gap-2 rounded-lg border border-emerald-700/50 px-4 py-2 text-sm text-emerald-400 hover:bg-emerald-900/20 transition-colors disabled:opacity-50"
+          >
+            {universeBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            Enable in Scan Universe
+          </button>
+        ) : (
+          <button
+            onClick={handleAddToUniverse}
+            disabled={universeBusy}
+            className="flex items-center gap-2 rounded-lg border border-emerald-700/50 px-4 py-2 text-sm text-emerald-400 hover:bg-emerald-900/20 transition-colors disabled:opacity-50"
+          >
+            {universeBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            Add to Scan Universe
+          </button>
+        )}
+      </div>
+
+      {/* Toast feedback */}
+      {universeToast && (
+        <div
+          className={`fixed bottom-6 right-6 z-50 rounded-lg border px-4 py-3 text-sm shadow-lg ${
+            universeToast.kind === 'success'
+              ? 'border-emerald-500/30 bg-emerald-900/80 text-emerald-300'
+              : 'border-red-500/30 bg-red-900/80 text-red-300'
+          }`}
+        >
+          {universeToast.msg}
+        </div>
+      )}
+
       {/* Stock Summary */}
       <Card title="Stock Summary">
         <div className="p-5">
@@ -369,6 +445,17 @@ function AnalyzeResult({
           </div>
         </div>
       </Card>
+
+      {/* Data warnings — partial data is NOT fatal */}
+      {dataWarnings.length > 0 && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">Partial market data:</span>{' '}
+            {dataWarnings.join(' ')} The analysis below shows all available information.
+          </div>
+        </div>
+      )}
 
       {result.technical_warning && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
@@ -405,8 +492,16 @@ function AnalyzeResult({
         </Card>
       )}
 
+      {/* Price Chart */}
+      <TradingViewChart
+        ticker={result.ticker}
+        primarySupport={result.primary_support}
+        secondarySupport={result.secondary_support}
+        resistance={result.resistance}
+      />
+
       {/* Rule Check for best contract */}
-      {result.best_contract && (
+      {result.best_contract && result.best_contract.pass_fail && result.best_contract.pass_fail.length > 0 && (
         <Card title="Rule Check (Best Contract)">
           <div className="p-5">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -429,30 +524,6 @@ function AnalyzeResult({
           </div>
         </Card>
       )}
-
-      {/* Scan Universe add/remove */}
-      <div className="flex items-center gap-3">
-        {isInUniverse ? (
-          <button
-            onClick={() => state.removeFromScanUniverse(result.ticker)}
-            className="flex items-center gap-2 rounded-lg border border-red-900/50 px-4 py-2 text-sm text-red-400 hover:bg-red-900/20 transition-colors"
-          >
-            <Trash2 className="h-4 w-4" />
-            Remove from Scan Universe
-          </button>
-        ) : (
-          <button
-            onClick={() => state.addToScanUniverse(result.ticker)}
-            className="flex items-center gap-2 rounded-lg border border-emerald-700/50 px-4 py-2 text-sm text-emerald-400 hover:bg-emerald-900/20 transition-colors"
-          >
-            <Plus className="h-4 w-4" />
-            Add to Scan Universe
-          </button>
-        )}
-        <Badge variant={isInUniverse ? 'success' : 'neutral'}>
-          {isInUniverse ? 'In scan universe' : 'Not in scan universe'}
-        </Badge>
-      </div>
 
       {/* Contract filters */}
       {totalContracts > 0 && (

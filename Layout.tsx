@@ -38,6 +38,7 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
 
 export function Layout({ children, currentPage, onNavigate, state }: LayoutProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+
   const qualifiedCount = state.candidates.filter((c) => c.qualified).length;
   const rejectedCount = state.candidates.filter((c) => !c.qualified).length;
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;

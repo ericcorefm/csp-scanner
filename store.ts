@@ -87,15 +87,19 @@ export function useAppState() {
       .order('created_at');
     if (error) throw error;
     if (!data || data.length === 0) {
-      const { data: newProfile } = await supabase
+      const { data: newProfile, error: insertError } = await supabase
         .from('strategy_profiles')
         .insert(DEFAULT_PROFILE)
         .select()
         .single();
-      if (newProfile) {
-        setProfiles([newProfile as StrategyProfile]);
-        setActiveProfile(newProfile as StrategyProfile);
+      if (insertError) {
+        throw new Error(`Unable to create default strategy profile: ${insertError.message}`);
       }
+      if (!newProfile) {
+        throw new Error('Unable to create default strategy profile: no row returned');
+      }
+      setProfiles([newProfile as StrategyProfile]);
+      setActiveProfile(newProfile as StrategyProfile);
     } else {
       setProfiles(data as StrategyProfile[]);
       const def = (data as StrategyProfile[]).find((p) => p.is_default) || data[0];
@@ -162,12 +166,20 @@ export function useAppState() {
     }
   }, []);
 
-  const addToScanUniverse = useCallback(async (symbol: string) => {
+  const addToScanUniverse = useCallback(async (symbol: string, options?: { company_name?: string | null; source?: string }) => {
     const sym = symbol.toUpperCase().trim();
     if (!sym) return;
     const { error } = await supabase
       .from('scan_universe')
-      .insert({ symbol: sym, source: 'manual', enabled: true });
+      .upsert(
+        {
+          symbol: sym,
+          enabled: true,
+          source: options?.source ?? 'manual',
+          ...(options?.company_name ? { company_name: options.company_name } : {}),
+        },
+        { onConflict: 'symbol' },
+      );
     if (error && error.code !== '23505') throw error;
     await loadScanUniverse();
   }, [loadScanUniverse]);
@@ -231,9 +243,31 @@ export function useAppState() {
 
   const runScan = useCallback(async () => {
     if (!activeProfile || scanning || !positionsLoaded) return;
-    if (scanMode === 'universe' && scanUniverse.length === 0) {
-      setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers, or switch to Market Discovery.');
-      return;
+
+    // Reload enabled Scan Universe tickers fresh from the database instead of
+    // relying on potentially stale React state.
+    let universeSymbols: string[] = scanUniverse;
+    if (scanMode === 'universe') {
+      try {
+        const { data: freshData, error: freshError } = await supabase
+          .from('scan_universe')
+          .select('symbol,enabled')
+          .order('symbol');
+        if (!freshError && freshData) {
+          universeSymbols = (freshData as ScanUniverseEntry[])
+            .filter((e) => e.enabled)
+            .map((e) => e.symbol.toUpperCase().trim())
+            .filter(Boolean);
+          setScanUniverse(universeSymbols);
+          setScanUniverseEntries((freshData as ScanUniverseEntry[]));
+        }
+      } catch {
+        // fall back to stale state
+      }
+      if (universeSymbols.length === 0) {
+        setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers, or switch to Market Discovery.');
+        return;
+      }
     }
 
     setScanning(true);
@@ -245,7 +279,12 @@ export function useAppState() {
       let scannedAt = new Date().toISOString();
 
       try {
-        const live = await scanCandidatesLive(activeProfile, openTickers, scanMode);
+        const live = await scanCandidatesLive(
+          activeProfile,
+          openTickers,
+          scanMode,
+          scanMode === 'universe' ? universeSymbols : undefined,
+        );
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
         setScanCounts(live.scan_counts || null);
