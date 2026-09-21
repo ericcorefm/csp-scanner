@@ -25,6 +25,8 @@ const trendColors: Record<string, 'success' | 'warning' | 'error' | 'neutral'> =
   Sideways: 'neutral',
   Stabilizing: 'neutral',
   Downtrend: 'error',
+  Pending: 'warning',
+  Unavailable: 'warning',
 };
 
 function volClassColor(cls: string): 'success' | 'warning' | 'error' | 'neutral' {
@@ -40,7 +42,7 @@ function displayPrice(v: number | null | undefined): string {
 }
 
 function displayTrend(v: string | null | undefined): string {
-  if (!v || v === 'Unavailable') return 'Unavailable';
+  if (!v || v === 'Unavailable' || v === 'Pending') return v || 'Pending';
   return v;
 }
 
@@ -236,7 +238,10 @@ export function DetailPage({
             {stockPrice ? (
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
-                  <MetricIndicator status={candidate.trend_classification === 'Downtrend' ? 'fail' : 'pass'} />
+                  <MetricIndicator status={
+                    candidate.trend_classification === 'Downtrend' ? 'fail' :
+                    candidate.trend_classification === 'Pending' || candidate.trend_classification === 'Unavailable' || !candidate.trend_classification ? 'warn' : 'pass'
+                  } />
                   <span className="text-xs text-slate-500">Trend Classification</span>
                 </div>
                 <div className="text-sm text-slate-200">{displayTrend(candidate.trend_classification)}</div>

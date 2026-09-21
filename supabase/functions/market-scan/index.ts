@@ -50,7 +50,7 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
-const DEBUG_TICKERS = new Set(['BLNK', 'RIVN', 'XPEV', 'RUN', 'DKNG', 'SNAP', 'CMCSA']);
+const DEBUG_TICKERS = new Set(['BLNK', 'RIVN', 'XPEV', 'RUN', 'DKNG', 'SNAP', 'CMCSA', 'MARA']);
 
 function isRetryableStatus(status: number): boolean {
   // Only retry transient network errors (status 0) or 5xx responses
@@ -167,6 +167,65 @@ async function fetchMarketUniverse(limit: number): Promise<{ ticker: string; com
   return shuffled.slice(0, limit);
 }
 
+// ── Stock history cache: load/save daily OHLCV bars in Supabase ──
+async function loadCachedHistory(ticker: string, maxBars = 250): Promise<HistoryBar[]> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey) return [];
+  const url = `${supabaseUrl}/rest/v1/stock_history_cache?select=trade_date,open,high,low,close,volume&ticker=eq.${encodeURIComponent(ticker)}&order=trade_date.desc&limit=${maxBars}`;
+  try {
+    const resp = await fetch(url, { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' } });
+    if (!resp.ok) return [];
+    const rows = await resp.json() as any[];
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    return rows.map((r) => ({
+      date: String(r.trade_date),
+      open: Number(r.open || 0),
+      high: Number(r.high || 0),
+      low: Number(r.low || 0),
+      close: Number(r.close || 0),
+      volume: Number(r.volume || 0),
+    })).filter((b) => Number.isFinite(b.close) && b.close > 0).reverse();
+  } catch {
+    return [];
+  }
+}
+
+async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<void> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey || bars.length === 0) return;
+  const now = new Date().toISOString();
+  const rows = bars.map((b) => ({
+    ticker,
+    trade_date: b.date,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+    volume: b.volume,
+    updated_at: now,
+  }));
+  // Upsert via POST with Prefer: resolution=merge-duplicates
+  try {
+    const resp = await fetch(`${supabaseUrl}/rest/v1/stock_history_cache`, {
+      method: 'POST',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify(rows),
+    });
+    if (!resp.ok) {
+      console.log(`[Cache] ${ticker} | save failed: HTTP ${resp.status}`);
+    }
+  } catch (e) {
+    console.log(`[Cache] ${ticker} | save error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 // ── Technical indicators ──
 function sma(values: number[], n: number) {
   if (!values.length) return 0;
@@ -188,31 +247,62 @@ function rsi(values: number[], period = 14) {
 
 function findSwingLows(bars: HistoryBar[]): number[] {
   const lows: number[] = [];
-  for (let i = 2; i < bars.length - 2; i++) {
-    if (bars[i].low <= bars[i-1].low && bars[i].low <= bars[i-2].low && bars[i].low <= bars[i+1].low && bars[i].low <= bars[i+2].low) {
-      lows.push(bars[i].low);
+  const window = Math.min(3, Math.floor(bars.length / 4));
+  if (window < 1) return bars.length > 0 ? [Math.min(...bars.map(b => b.low))] : [];
+  for (let i = window; i < bars.length - window; i++) {
+    let isLow = true;
+    for (let j = 1; j <= window; j++) {
+      if (bars[i].low > bars[i-j].low || bars[i].low > bars[i+j].low) { isLow = false; break; }
     }
+    if (isLow) lows.push(bars[i].low);
   }
   return lows.sort((a, b) => b - a);
 }
 
+function findSwingHighs(bars: HistoryBar[]): number[] {
+  const highs: number[] = [];
+  const window = Math.min(3, Math.floor(bars.length / 4));
+  if (window < 1) return bars.length > 0 ? [Math.max(...bars.map(b => b.high))] : [];
+  for (let i = window; i < bars.length - window; i++) {
+    let isHigh = true;
+    for (let j = 1; j <= window; j++) {
+      if (bars[i].high < bars[i-j].high || bars[i].high < bars[i+j].high) { isHigh = false; break; }
+    }
+    if (isHigh) highs.push(bars[i].high);
+  }
+  return highs.sort((a, b) => a - b);
+}
+
+// Primary Support = nearest meaningful swing low below current price.
+// Falls back to the 20-bar low if no swing low exists below price.
 function calcPrimarySupport(bars: HistoryBar[], price: number): number {
-  const lows = findSwingLows(bars.slice(-90));
-  const below = lows.filter((x) => x < price);
-  return below[0] || Math.min(...bars.slice(-20).map((b) => b.low));
+  const lookback = Math.min(bars.length, 120);
+  const lows = findSwingLows(bars.slice(-lookback));
+  const below = lows.filter((x) => x < price && x > 0);
+  if (below.length > 0) return below[0];
+  // Fallback: lowest low in recent 20 bars
+  const recent = bars.slice(-Math.min(20, bars.length));
+  return Math.min(...recent.map((b) => b.low));
 }
 
+// Secondary Support = next meaningful swing low below primary support.
 function calcSecondarySupport(bars: HistoryBar[], primarySupport: number): number {
-  const lows = findSwingLows(bars.slice(-90));
-  const below = lows.filter((x) => x < primarySupport);
-  return below[0] || primarySupport * 0.95;
+  const lookback = Math.min(bars.length, 120);
+  const lows = findSwingLows(bars.slice(-lookback));
+  const below = lows.filter((x) => x < primarySupport && x > 0);
+  if (below.length > 0) return below[0];
+  return primarySupport * 0.95;
 }
 
-function findResistance(bars: HistoryBar[]): number {
-  const recent = bars.slice(-50);
-  let max = 0;
-  for (const b of recent) { if (b.high > max) max = b.high; }
-  return max;
+// Resistance = nearest meaningful swing high above current price.
+function findResistance(bars: HistoryBar[], price: number): number {
+  const lookback = Math.min(bars.length, 120);
+  const highs = findSwingHighs(bars.slice(-lookback));
+  const above = highs.filter((x) => x > price && x > 0);
+  if (above.length > 0) return above[0];
+  // Fallback: highest high in recent 50 bars
+  const recent = bars.slice(-Math.min(50, bars.length));
+  return Math.max(...recent.map((b) => b.high));
 }
 
 function ema(values: number[], period: number): number {
@@ -278,9 +368,21 @@ function volumeTrend(bars: HistoryBar[]): string {
 function trend(bars: HistoryBar[]) {
   const closes = bars.map((b) => b.close);
   const price = closes.at(-1) || 0;
-  const ma20 = sma(closes, 20), ma50 = sma(closes, 50), ma200 = sma(closes, 200);
+  const ma20 = sma(closes, 20);
+  const ma50 = sma(closes, 50);
   const rr = rsi(closes);
-  if (price > ma20 && ma20 > ma50 && ma50 > ma200) return 'Bullish';
+  // If we have 200+ bars, use full MA200-based trend
+  if (closes.length >= 200) {
+    const ma200 = sma(closes, 200);
+    if (price > ma20 && ma20 > ma50 && ma50 > ma200) return 'Bullish';
+    if (price > ma20 && ma20 >= ma50) return 'Improving';
+    if (price > ma20 && rr >= 40) return 'Rebound';
+    if (Math.abs(price - ma20) / Math.max(price, 0.01) < 0.03) return 'Stabilizing';
+    if (price >= ma50 * 0.98) return 'Sideways';
+    return 'Downtrend';
+  }
+  // With 60-199 bars: use MA20/MA50 only (no MA200)
+  if (price > ma20 && ma20 > ma50) return 'Bullish';
   if (price > ma20 && ma20 >= ma50) return 'Improving';
   if (price > ma20 && rr >= 40) return 'Rebound';
   if (Math.abs(price - ma20) / Math.max(price, 0.01) < 0.03) return 'Stabilizing';
@@ -492,13 +594,14 @@ type ScanSymbolResult = {
   technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
 };
 
-// ── Shared stock snapshot: fetches history for technicals only ──
-// For market discovery, the bulk grouped daily price is supplied via bulkStockPrice.
-// This function does NOT call the per-ticker snapshot endpoint.
-// It only fetches historical aggregates for technical indicators (DMAs, RSI, etc).
-// If history fails but a bulk price exists, the price is retained.
-// Only retries on transient network errors (status 0) or 5xx.
-// Cached per-request.
+// ── Cache-first stock history fetcher ──
+// 1. Load cached bars from Supabase stock_history_cache
+// 2. If cache has enough recent bars, use them directly
+// 3. If cache is stale or incomplete, fetch from Massive daily aggregates
+// 4. Save new bars back to cache
+// Stock price comes from the bulk grouped daily (passed in) or from the
+// latest historical close. History is only for technicals.
+// No retries on 401/403/429 — only one retry on network error or 5xx.
 async function getStockSnapshot(
   ticker: string,
   apiKey: string,
@@ -510,61 +613,101 @@ async function getStockSnapshot(
   const cached = stockCache.get(upper);
   if (cached) return cached;
 
-  const start = new Date(today);
-  start.setDate(start.getDate() - 420); // ~290 trading days, enough for 200 DMA
-
-  let bars: HistoryBar[] = [];
   let currentPrice: number | null = null;
   let source: StockSnapshot['source'] = 'none';
   let error: string | null = null;
   let historyHttpStatus: number | undefined;
 
-  // 1. Use bulk grouped daily price as the primary stock price
+  // 1. Bulk grouped daily price is the primary stock price
   if (bulkStockPrice !== null && bulkStockPrice > 0) {
     currentPrice = bulkStockPrice;
     source = 'grouped_daily';
-    if (DEBUG_TICKERS.has(upper)) {
-      console.log(`[PRICE] ${upper} | grouped=${bulkStockPrice} | historyStatus=pending`);
+  }
+
+  // 2. Load cached bars from Supabase
+  let bars = await loadCachedHistory(upper, 260);
+
+  // Determine the latest cached date to decide if we need fresh data
+  const latestCachedDate = bars.length > 0 ? bars.at(-1)!.date : null;
+  const todayStr = fmt(today);
+  const needsFresh = latestCachedDate === null || latestCachedDate < todayStr;
+
+  // 3. If cache is insufficient or stale, fetch from Massive daily aggregates
+  // Use ~18 calendar months of history (enough for 200 DMA with holidays)
+  const start = new Date(today);
+  start.setDate(start.getDate() - 548); // ~18 months
+
+  if (needsFresh || bars.length < 60) {
+    const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
+    let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
+
+    // Only retry on network error (status 0) or 5xx — NOT on 401/403/429
+    if (!histResult.ok && isRetryableStatus(histResult.status)) {
+      histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
     }
-  }
+    historyHttpStatus = histResult.ok ? 200 : histResult.status;
 
-  // 2. Daily aggregates — historical OHLCV for technical calculations only
-  const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
-  let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
-  if (!histResult.ok && isRetryableStatus(histResult.status)) {
-    histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
-  }
-  historyHttpStatus = histResult.ok ? 200 : histResult.status;
+    // Explicitly log 403/429 for debug tickers without retrying
+    if (!histResult.ok && (histResult.status === 403 || histResult.status === 429)) {
+      console.log(`[History] ${upper} | HTTP ${histResult.status} — NOT retrying (non-retryable)`);
+    }
 
-  if (histResult.ok) {
-    const histBars = (histResult.data?.results || []).map((b: any) => ({
-      date: new Date(b.t).toISOString().slice(0, 10),
-      open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
-    })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-    if (histBars.length) {
-      bars = histBars;
-      // Only use historical close as price fallback if no bulk price yet
-      if (currentPrice === null) {
-        currentPrice = Number(histBars.at(-1)!.close);
+    if (histResult.ok) {
+      const freshBars = (histResult.data?.results || []).map((b: any) => ({
+        date: new Date(b.t).toISOString().slice(0, 10),
+        open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
+      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+
+      if (freshBars.length > 0) {
+        // Merge fresh bars with cached bars (dedup by date)
+        const barMap = new Map<string, HistoryBar>();
+        for (const b of bars) barMap.set(b.date, b);
+        for (const b of freshBars) barMap.set(b.date, b); // fresh overrides cached
+        bars = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+        // Save fresh bars to cache (only the new ones to minimize writes)
+        const cachedDates = new Set(bars.filter(b => b.date <= (latestCachedDate || '')).map(b => b.date));
+        const newBars = freshBars.filter(b => !cachedDates.has(b.date));
+        if (newBars.length > 0) {
+          await saveCachedHistory(upper, freshBars); // upsert all fresh bars
+          if (DEBUG_TICKERS.has(upper)) {
+            console.log(`[Cache] ${upper} | saved ${freshBars.length} bars to cache`);
+          }
+        }
+
+        // Use latest close as price fallback if no bulk price
+        if (currentPrice === null) {
+          currentPrice = Number(bars.at(-1)!.close);
+          source = 'daily_aggregates';
+        }
+      }
+    } else {
+      if (!error) {
+        error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+      }
+      // If we have cached bars but fresh fetch failed, still use cached bars
+      if (bars.length > 0 && currentPrice === null) {
+        currentPrice = Number(bars.at(-1)!.close);
         source = 'daily_aggregates';
       }
     }
   } else {
-    if (!isRetryableStatus(histResult.status)) {
-      console.log(`[History] ${upper} | HTTP ${histResult.status} — not retryable, using fallback price`);
+    // Cache is sufficient — use cached bars, no Massive call needed
+    historyHttpStatus = 200;
+    if (currentPrice === null && bars.length > 0) {
+      currentPrice = Number(bars.at(-1)!.close);
+      source = 'daily_aggregates';
     }
-    if (!error) {
-      error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+    if (DEBUG_TICKERS.has(upper)) {
+      console.log(`[Cache] ${upper} | using ${bars.length} cached bars (no Massive call needed)`);
     }
   }
 
-  // 3. Fallback: previous-close endpoint — only if we still have NO price at all
+  // 4. Fallback: previous close — only if we still have NO price at all
   if (currentPrice === null) {
     const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
-    let prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
-    if (!prevResult.ok && isRetryableStatus(prevResult.status)) {
-      prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close_retry');
-    }
+    const prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
+    // No retry on 401/403/429
     if (prevResult.ok) {
       const prevBars = (prevResult.data?.results || []).map((b: any) => ({
         date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
@@ -573,22 +716,10 @@ async function getStockSnapshot(
       if (prevBars.length) {
         currentPrice = Number(prevBars.at(-1)!.close);
         source = 'previous_close';
-        if (bars.length < 20) {
-          const existingDates = new Set(bars.map((b) => b.date));
-          for (const pb of prevBars) {
-            if (!existingDates.has(pb.date)) bars.push(pb);
-          }
-        }
       }
     } else if (!error) {
       error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
     }
-  }
-
-  // 4. Final fallback: newest bar close if price somehow still null
-  if (currentPrice === null && bars.length) {
-    currentPrice = Number(bars.at(-1)!.close);
-    source = source === 'none' ? 'daily_aggregates' : source;
   }
 
   const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error, historyHttpStatus };
@@ -635,7 +766,7 @@ async function scanSymbol(
   if (snapshot.error && !bars.length) {
     r.historyStatus = 'error';
     r.historyError = snapshot.error;
-  } else if (bars.length >= 20) {
+  } else if (bars.length >= 60) {
     r.historyStatus = 'success';
   } else if (bars.length > 0) {
     r.historyStatus = 'fallback';
@@ -643,7 +774,7 @@ async function scanSymbol(
     r.historyStatus = 'empty';
   }
 
-  const technicalDataAvailable = bars.length >= 20;
+  const technicalDataAvailable = bars.length >= 60;
   r.technicalDataAvailable = technicalDataAvailable;
 
   // Stock price filter (if Order & Strike section enabled). If even the previous
@@ -667,8 +798,8 @@ async function scanSymbol(
 
   let primarySupport: number | null = technicalDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
   let secondarySupport: number | null = technicalDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
-  let resistance: number | null = technicalDataAvailable ? findResistance(bars) : null;
-  let trendClass = technicalDataAvailable ? trend(bars) : 'Unavailable';
+  let resistance: number | null = technicalDataAvailable && stockPrice !== null && stockPrice > 0 ? findResistance(bars, stockPrice) : null;
+  let trendClass = technicalDataAvailable ? trend(bars) : 'Pending';
 
   r.stockPrice = stockPrice;
   r.primarySupport = primarySupport;
@@ -676,12 +807,12 @@ async function scanSymbol(
   r.resistance = resistance;
   r.trendClass = trendClass;
 
-  // Debug logging for technical data
+  // Debug logging for technical data — comprehensive for debug tickers
   if (DEBUG_TICKERS.has(symbol.toUpperCase())) {
     const supportDistForLog = primarySupport !== null && primarySupport > 0 && stockPrice !== null
       ? ((primarySupport - stockPrice) / primarySupport * 100).toFixed(1)
       : 'n/a';
-    console.log(`[TECH] ${symbol} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | bars=${bars.length} | oldestBar=${bars.length > 0 ? bars[0].date : 'n/a'} | latestBar=${bars.length > 0 ? bars.at(-1)!.date : 'n/a'} | primarySupport=${primarySupport} | trend=${trendClass} | supportDist=${supportDistForLog}`);
+    console.log(`[TECH] ${symbol} | historyHTTP=${snapshot.historyHttpStatus || 'n/a'} | historyResults=${bars.length} | finalBars=${bars.length} | oldestDate=${bars.length > 0 ? bars[0].date : 'n/a'} | latestDate=${bars.length > 0 ? bars.at(-1)!.date : 'n/a'} | stockPrice=${stockPrice} | primarySupport=${primarySupport} | secondarySupport=${secondarySupport} | resistance=${resistance} | trend=${trendClass} | supportDist=${supportDistForLog} | technicalDataAvailable=${technicalDataAvailable}`);
   }
 
   // Debug logging for BTC optimization
@@ -700,11 +831,12 @@ async function scanSymbol(
     const closes = bars.map((b) => b.close);
     const m = macd(closes);
     const bb = bollingerBands(closes);
+    const has200 = closes.length >= 200;
     r.technical = {
       rsi: Number(rsi(closes).toFixed(1)),
       ma20: Number(sma(closes, 20).toFixed(2)),
       ma50: Number(sma(closes, 50).toFixed(2)),
-      ma200: Number(sma(closes, 200).toFixed(2)),
+      ma200: has200 ? Number(sma(closes, 200).toFixed(2)) : 0,
       macd: m.macd,
       macd_signal: m.signal,
       macd_histogram: m.histogram,
