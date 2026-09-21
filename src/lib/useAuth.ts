@@ -25,7 +25,7 @@ export function useAuth() {
       setSession(s);
       setUser(s?.user ?? null);
       setAuthLoading(false);
-      if (initialRoute && !s) setAuthRoute(initialRoute);
+      if (initialRoute && (!s || initialRoute === 'reset-password')) setAuthRoute(initialRoute);
     });
 
     const { data: subscription } = supabase.auth.onAuthStateChange((event, s) => {
