@@ -94,7 +94,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 16;
+  const colCount = 15;
 
   return (
     <div className="space-y-4">
@@ -220,7 +220,6 @@ export function CandidatesPage({
                 <SortHeader k="iv" label="IV" align="right" />
                 <SortHeader k="volume" label="Volume" align="right" />
                 <SortHeader k="strike_distance_from_support" label="Support Dist %" align="right" />
-                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Qualified</th>
                 <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Action</th>
               </tr>
             </thead>
@@ -278,30 +277,6 @@ export function CandidatesPage({
                         {c.volume > 0 ? c.volume : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
-                      <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
-                        {(() => {
-                          const q = qualificationFor(c);
-                          if (q === 'qualified') return (
-                            <span className="inline-flex items-center gap-1 text-emerald-400 text-xs font-medium">
-                              <CheckCircle2 className="h-3.5 w-3.5" /> Yes
-                            </span>
-                          );
-                          if (q === 'pending') return (
-                            <span className="inline-flex items-center gap-1 text-amber-400 text-xs font-medium">
-                              <AlertTriangle className="h-3.5 w-3.5" /> Pending
-                            </span>
-                          );
-                          const reason = firstFailReason(c);
-                          return (
-                            <span
-                              className="inline-flex items-center gap-1 text-red-400 text-xs font-medium"
-                              title={reason ?? undefined}
-                            >
-                              <XCircle className="h-3.5 w-3.5" /> No
-                            </span>
-                          );
-                        })()}
-                      </td>
                       <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
                         <button
                           onClick={() => setQuoteModalRow(rowKey)}
