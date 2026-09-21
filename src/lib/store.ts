@@ -374,8 +374,9 @@ export function useAppState(userId?: string) {
   }, [loadProfiles]);
 
   useEffect(() => {
+    if (!userId) return;
     loadData();
-  }, [loadData]);
+  }, [userId, loadData]);
 
   useEffect(() => {
     if (activeProfile) {
