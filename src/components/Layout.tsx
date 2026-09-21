@@ -20,7 +20,6 @@ import {
 import type { AppState } from '@/lib/store';
 import type { AuthState } from '@/lib/useAuth';
 import { Badge } from '@/components/ui';
-import { computeQualification } from '@/lib/qualification';
 
 export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
 
@@ -58,10 +57,8 @@ export function Layout({ children, currentPage, onNavigate, state, auth }: Layou
     return () => document.removeEventListener('mousedown', handler);
   }, [userMenuOpen]);
 
-  const qualifiedCount = state.candidates.filter((c) => computeQualification(c.qualified, c.pass_fail) === 'qualified').length;
-  const pendingCount = state.candidates.filter((c) => computeQualification(c.qualified, c.pass_fail) === 'pending').length;
-  const rejectedCount = state.candidates.filter((c) => computeQualification(c.qualified, c.pass_fail) === 'rejected').length;
-  const displayedCandidateCount = qualifiedCount + pendingCount;
+  const qualifiedCount = state.candidates.filter((c) => c.qualified).length;
+  const rejectedCount = state.candidates.filter((c) => !c.qualified).length;
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
   const userEmail = auth.user?.email ?? '';
 
@@ -106,7 +103,7 @@ export function Layout({ children, currentPage, onNavigate, state, auth }: Layou
               const Icon = item.icon;
               const active = currentPage === item.id;
               const badge =
-                item.id === 'candidates' ? displayedCandidateCount :
+                item.id === 'candidates' ? qualifiedCount :
                 item.id === 'open' ? state.openPositions.length :
                 item.id === 'closed' ? state.closedPositions.length :
                 undefined;
@@ -168,11 +165,7 @@ export function Layout({ children, currentPage, onNavigate, state, auth }: Layou
                   <span className="text-slate-400">{qualifiedCount} qualified</span>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className="h-2 w-2 rounded-full bg-amber-400" />
-                  <span className="text-slate-400">{pendingCount} pending</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="h-2 w-2 rounded-full bg-red-400" />
+                  <span className="h-2 w-2 rounded-full bg-slate-500" />
                   <span className="text-slate-400">{rejectedCount} rejected</span>
                 </div>
                 {unreadAlerts > 0 && (

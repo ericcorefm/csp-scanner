@@ -20,7 +20,6 @@ import type { ScanUniverseEntry } from '@/types';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 import { getCachedStockPrice } from '@/lib/technicalCache';
 import { TradingViewChart } from '@/components/TradingViewChart';
-import { computeQualification, type Qualification } from '@/lib/qualification';
 
 function getFailedRules(c: ContractAnalysis): string[] {
   if (!c.pass_fail || c.pass_fail.length === 0) return [];
@@ -32,14 +31,9 @@ function getNotEvaluatedRules(c: ContractAnalysis): string[] {
   return c.pass_fail.filter((pf) => pf.status === 'not_evaluated').map((pf) => pf.rule);
 }
 
-function contractQualification(c: ContractAnalysis): Qualification {
-  return computeQualification(c.qualified, c.pass_fail);
-}
-
 function contractStatus(c: ContractAnalysis): 'qualifies' | 'warning' | 'fail' {
-  const q = contractQualification(c);
-  if (q === 'qualified') return 'qualifies';
-  if (q === 'pending') return 'warning';
+  if (c.qualified) return 'qualifies';
+  if (c.technical_pending || getNotEvaluatedRules(c).length > 0) return 'warning';
   return 'fail';
 }
 
@@ -71,7 +65,7 @@ function reasonSummary(c: ContractAnalysis): { primary: string; count: number; a
 }
 
 function findClosestMatch(contracts: ContractAnalysis[]): ContractAnalysis | null {
-  const nonQualifying = contracts.filter((c) => contractQualification(c) !== 'qualified');
+  const nonQualifying = contracts.filter((c) => !c.qualified);
   if (nonQualifying.length === 0) return null;
   nonQualifying.sort((a, b) => {
     const aFailed = getFailedRules(a).length;
@@ -363,7 +357,7 @@ function AnalyzeResult({
     <div className="space-y-5">
       {/* Qualifies / Does Not Qualify */}
       <div className={`rounded-xl border px-5 py-4 ${result.qualifies ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'}`}>
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
           {result.qualifies ? (
             <CheckCircle2 className="h-6 w-6 text-emerald-400" />
           ) : (
@@ -375,19 +369,6 @@ function AnalyzeResult({
           <span className="text-sm text-slate-400 ml-2">
             {result.qualifying_count} of {result.all_contracts_count} contracts qualified
           </span>
-          {(() => {
-            let pCount = 0, rCount = 0;
-            for (const c of allContracts) {
-              const q = contractQualification(c);
-              if (q === 'pending') pCount++;
-              else if (q === 'rejected') rCount++;
-            }
-            return (
-              <span className="text-sm text-slate-400">
-                · {pCount} pending · {rCount} rejected
-              </span>
-            );
-          })()}
         </div>
       </div>
 
