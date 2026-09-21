@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 
@@ -8,10 +8,11 @@ export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authRoute, setAuthRoute] = useState<AuthRoute>(null);
+  const [authRoute, setAuthRouteState] = useState<AuthRoute>(null);
+  const inPasswordRecovery = useRef(false);
 
   useEffect(() => {
-    // Determine initial auth route from URL path
+    // Detect recovery token from URL (path, hash, or query string)
     const path = window.location.pathname;
     const routeMap: Record<string, AuthRoute> = {
       '/signin': 'signin',
@@ -20,27 +21,27 @@ export function useAuth() {
       '/reset-password': 'reset-password',
     };
     const initialRoute = routeMap[path] ?? null;
-    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-    const recoveryFromUrl =
+    const hashStr = window.location.hash.replace(/^#/, '');
+    const hashParams = new URLSearchParams(hashStr);
+    const searchParams = new URLSearchParams(window.location.search);
+    const isRecovery =
       initialRoute === 'reset-password' ||
       hashParams.get('type') === 'recovery' ||
-      new URLSearchParams(window.location.search).get('type') === 'recovery';
-    let inPasswordRecovery = recoveryFromUrl;
+      hashParams.get('token_type') === 'recovery' ||
+      searchParams.get('type') === 'recovery' ||
+      searchParams.get('token_type') === 'recovery';
 
-    if (recoveryFromUrl) {
-      setAuthRoute('reset-password');
+    if (isRecovery) {
+      inPasswordRecovery.current = true;
+      setAuthRouteState('reset-password');
       if (path !== '/reset-password') {
         window.history.replaceState(null, '', '/reset-password');
       }
+    } else if (initialRoute) {
+      setAuthRouteState(initialRoute);
     }
 
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession(s);
-      setUser(s?.user ?? null);
-      setAuthLoading(false);
-      if (initialRoute && (!s || initialRoute === 'reset-password')) setAuthRoute(initialRoute);
-    });
-
+    // Register onAuthStateChange BEFORE getSession() so we don't miss any events
     const { data: subscription } = supabase.auth.onAuthStateChange((event, s) => {
       (async () => {
         setSession(s);
@@ -48,17 +49,34 @@ export function useAuth() {
         setAuthLoading(false);
 
         if (event === 'PASSWORD_RECOVERY') {
-          inPasswordRecovery = true;
-          setAuthRoute('reset-password');
-        } else if (inPasswordRecovery) {
-          // Stay on reset-password until the user submits a new password,
-          // even if Supabase fires session events with a valid recovery session.
+          inPasswordRecovery.current = true;
+          setAuthRouteState('reset-password');
+        } else if (inPasswordRecovery.current) {
+          // Stay on reset-password — ignore session events during recovery
         } else if (event === 'SIGNED_OUT') {
-          setAuthRoute('signin');
+          setAuthRouteState('signin');
+        } else if (event === 'INITIAL_SESSION' && !s && initialRoute) {
+          // No session and we have an initial route — keep it
+          setAuthRouteState(initialRoute);
         } else if (s) {
-          setAuthRoute(null);
+          setAuthRouteState(null);
         }
       })();
+    });
+
+    // Now call getSession()
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
+      setSession(s);
+      setUser(s?.user ?? null);
+      setAuthLoading(false);
+
+      if (inPasswordRecovery.current) {
+        setAuthRouteState('reset-password');
+      } else if (initialRoute && !s) {
+        setAuthRouteState(initialRoute);
+      } else if (s && !initialRoute) {
+        setAuthRouteState(null);
+      }
     });
 
     return () => {
@@ -67,6 +85,11 @@ export function useAuth() {
   }, []);
 
   const navigateToAuthRoute = useCallback((route: AuthRoute) => {
+    if (route === 'reset-password') {
+      inPasswordRecovery.current = true;
+    } else if (route !== null) {
+      inPasswordRecovery.current = false;
+    }
     if (route) {
       const pathMap: Record<NonNullable<AuthRoute>, string> = {
         'signin': '/signin',
@@ -76,16 +99,18 @@ export function useAuth() {
       };
       window.history.replaceState(null, '', pathMap[route]);
     } else {
+      inPasswordRecovery.current = false;
       window.history.replaceState(null, '', '/');
     }
-    setAuthRoute(route);
+    setAuthRouteState(route);
   }, []);
 
   const signOut = useCallback(async () => {
+    inPasswordRecovery.current = false;
     await supabase.auth.signOut();
     setUser(null);
     setSession(null);
-    setAuthRoute('signin');
+    setAuthRouteState('signin');
     window.history.replaceState(null, '', '/signin');
   }, []);
 
