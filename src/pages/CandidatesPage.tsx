@@ -5,7 +5,7 @@ import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
-import { deriveQualification, type QualificationStatus } from '@/lib/qualification';
+import { deriveCandidateQualification, type QualificationStatus } from '@/lib/qualification';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -37,7 +37,14 @@ export function CandidatesPage({
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
 
-  const qualificationFor = (c: CandidateScan): QualificationStatus => deriveQualification(c.pass_fail);
+  const qualificationFor = (c: CandidateScan): QualificationStatus => deriveCandidateQualification(c);
+
+  const firstFailReason = (c: CandidateScan): string | null => {
+    const failed = c.pass_fail?.find((pf) => pf.status === 'fail');
+    if (failed) return failed.rule;
+    if (c.rejection_reasons.length > 0) return c.rejection_reasons[0];
+    return null;
+  };
 
   const filtered = useMemo(() => {
     let list = state.candidates.filter((c) => (showRejected ? true : qualificationFor(c) !== 'rejected'));
@@ -227,7 +234,7 @@ export function CandidatesPage({
                     <tr
                       onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
                       className={`cursor-pointer transition-colors ${
-                        c.qualified && !c.technical_pending ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
+                        qualificationFor(c) === 'qualified' ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">
@@ -284,8 +291,12 @@ export function CandidatesPage({
                               <AlertTriangle className="h-3.5 w-3.5" /> Pending
                             </span>
                           );
+                          const reason = firstFailReason(c);
                           return (
-                            <span className="inline-flex items-center gap-1 text-red-400 text-xs font-medium">
+                            <span
+                              className="inline-flex items-center gap-1 text-red-400 text-xs font-medium"
+                              title={reason ?? undefined}
+                            >
                               <XCircle className="h-3.5 w-3.5" /> No
                             </span>
                           );
@@ -301,18 +312,21 @@ export function CandidatesPage({
                         </button>
                       </td>
                     </tr>
-                    {showRejected && !c.qualified && isExpanded && (
+                    {showRejected && qualificationFor(c) === 'rejected' && isExpanded && (
                       <tr key={rowKey + '-detail'}>
                         <td colSpan={colCount} className="px-4 py-3 bg-slate-900/80">
                           <div className="flex flex-wrap gap-2">
                             {c.rejection_reasons.map((r) => (
                               <Badge key={r} variant={rejectionColors[r] || 'warning'}>{r}</Badge>
                             ))}
+                            {c.pass_fail?.filter((pf) => pf.status === 'fail').map((pf) => (
+                              <Badge key={pf.rule} variant="error">{pf.rule}</Badge>
+                            ))}
                           </div>
                         </td>
                       </tr>
                     )}
-                    {showRejected && !c.qualified && !isExpanded && (
+                    {showRejected && qualificationFor(c) === 'rejected' && !isExpanded && (
                       <tr
                         key={rowKey + '-expand'}
                         className="cursor-pointer hover:bg-slate-800/30"
@@ -321,7 +335,7 @@ export function CandidatesPage({
                         <td colSpan={colCount} className="px-4 py-1.5 bg-slate-900/40">
                           <div className="flex items-center gap-2 text-xs text-slate-500">
                             <Info className="h-3 w-3" />
-                            {c.rejection_reasons.length} rejection reason(s) — click to expand
+                            {firstFailReason(c) ?? `${c.rejection_reasons.length} rejection reason(s)`} — click to expand
                           </div>
                         </td>
                       </tr>

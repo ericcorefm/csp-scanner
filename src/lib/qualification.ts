@@ -4,22 +4,51 @@ import type { TechnicalSnapshot } from '@/lib/technicalCache';
 export type QualificationStatus = 'qualified' | 'pending' | 'rejected';
 
 /**
- * Derive qualification purely from the pass_fail array — the same evaluator
- * result used by Analyze Ticker.
+ * Derive qualification using the same final rule evaluator used by Analyze Ticker.
  *
- * - Any enabled rule with status 'fail'  → rejected
- * - No failures, but some 'not_evaluated' → pending
- * - All evaluated and pass                → qualified
+ * Priority (fail ALWAYS overrides pending):
+ * 1. Any enabled rule with status 'fail' → rejected
+ * 2. Any rejection_reasons entry           → rejected (fallback when pass_fail is empty)
+ * 3. No fails, but some 'not_evaluated'    → pending
+ * 4. technical_pending with no fails       → pending (fallback when pass_fail is empty)
+ * 5. All evaluated and pass                → qualified
  */
 export function deriveQualification(
   passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] | undefined,
+  rejectionReasons?: string[],
+  technicalPending?: boolean,
 ): QualificationStatus {
-  if (!passFail || passFail.length === 0) return 'pending';
-  const hasFail = passFail.some((pf) => pf.status === 'fail');
-  if (hasFail) return 'rejected';
-  const hasNotEvaluated = passFail.some((pf) => pf.status === 'not_evaluated');
-  if (hasNotEvaluated) return 'pending';
+  const failCount = passFail?.filter((pf) => pf.status === 'fail').length ?? 0;
+  const notEvaluatedCount = passFail?.filter((pf) => pf.status === 'not_evaluated').length ?? 0;
+  const rejectionCount = rejectionReasons?.length ?? 0;
+
+  // Step 1-2: any fail (from pass_fail or rejection_reasons) → rejected
+  if (failCount > 0 || rejectionCount > 0) return 'rejected';
+
+  // Step 3-4: no fails, but some not-evaluated or technical_pending → pending
+  if (notEvaluatedCount > 0 || technicalPending) return 'pending';
+
+  // Step 5: all evaluated and passed
   return 'qualified';
+}
+
+/**
+ * Convenience wrapper that pulls all fields from a CandidateScan.
+ */
+export function deriveCandidateQualification(c: {
+  pass_fail?: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
+  rejection_reasons?: string[];
+  technical_pending?: boolean;
+  qualified?: boolean;
+}): QualificationStatus {
+  const status = deriveQualification(c.pass_fail, c.rejection_reasons, c.technical_pending);
+  // If derived status is 'qualified' but the edge function explicitly marked
+  // it not-qualified without recording reasons, treat as pending rather than
+  // over-claiming qualified.
+  if (status === 'qualified' && c.qualified === false && (c.rejection_reasons?.length ?? 0) === 0) {
+    return 'pending';
+  }
+  return status;
 }
 
 /**
