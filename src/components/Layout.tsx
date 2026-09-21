@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Settings,
   CalendarDays,
+  UserCircle,
   LineChart,
   ScanLine,
   AlertTriangle,
@@ -21,7 +22,7 @@ import type { AppState } from '@/lib/store';
 import type { AuthState } from '@/lib/useAuth';
 import { Badge } from '@/components/ui';
 
-export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
+export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe' | 'account';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -39,6 +40,7 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'closed', label: 'Closed Positions', icon: CheckCircle2 },
   { id: 'summary', label: 'Daily Summary', icon: CalendarDays },
   { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'account', label: 'Account', icon: UserCircle },
 ];
 
 export function Layout({ children, currentPage, onNavigate, state, auth }: LayoutProps) {
@@ -211,11 +213,11 @@ export function Layout({ children, currentPage, onNavigate, state, auth }: Layou
                       <div className="text-sm text-slate-200 truncate">{userEmail}</div>
                     </div>
                     <button
-                      onClick={() => handleNav('universe')}
+                      onClick={() => handleNav('account')}
                       className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-700/50 transition-colors"
                     >
-                      <Globe className="h-4 w-4 text-slate-400" />
-                      Scan Universe
+                      <UserCircle className="h-4 w-4 text-slate-400" />
+                      Account
                     </button>
                     <button
                       onClick={() => handleNav('settings')}

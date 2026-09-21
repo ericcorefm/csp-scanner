@@ -8,6 +8,7 @@ import { DetailPage } from '@/pages/DetailPage';
 import { OpenPositionsPage } from '@/pages/OpenPositionsPage';
 import { ClosedPositionsPage } from '@/pages/ClosedPositionsPage';
 import { SettingsPage } from '@/pages/SettingsPage';
+import { AccountPage } from '@/pages/AccountPage';
 import { DailySummaryPage } from '@/pages/DailySummaryPage';
 import { ScanUniversePage } from '@/pages/ScanUniversePage';
 import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
@@ -92,7 +93,8 @@ function App() {
       )}
       {currentPage === 'open' && <OpenPositionsPage state={state} />}
       {currentPage === 'closed' && <ClosedPositionsPage state={state} />}
-      {currentPage === 'settings' && <SettingsPage state={state} auth={auth} />}
+      {currentPage === 'settings' && <SettingsPage state={state} />}
+      {currentPage === 'account' && <AccountPage auth={auth} />}
       {currentPage === 'summary' && <DailySummaryPage state={state} />}
       {currentPage === 'universe' && <ScanUniversePage state={state} />}
     </Layout>
