@@ -17,12 +17,13 @@ import {
   LogOut,
   User as UserIcon,
   ChevronDown,
+  Shield,
 } from 'lucide-react';
 import type { AppState } from '@/lib/store';
 import type { AuthState } from '@/lib/useAuth';
 import { Badge } from '@/components/ui';
 
-export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe' | 'profile';
+export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe' | 'profile' | 'admin';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -32,7 +33,7 @@ interface LayoutProps {
   auth: AuthState;
 }
 
-const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
+const baseNavItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'candidates', label: "Today's Candidates", icon: ScanLine },
   { id: 'analyze', label: 'Analyze Ticker', icon: Search },
   { id: 'universe', label: 'Scan Universe', icon: Globe },
@@ -63,6 +64,8 @@ export function Layout({ children, currentPage, onNavigate, state, auth }: Layou
   const rejectedCount = state.candidates.filter((c) => !c.qualified).length;
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
   const userEmail = auth.user?.email ?? '';
+  const isAdmin = auth.user?.app_metadata?.role === 'admin';
+  const navItems = isAdmin ? [...baseNavItems, { id: 'admin' as Page, label: 'User Management', icon: Shield }] : baseNavItems;
 
   const handleNav = (page: Page) => {
     onNavigate(page);
@@ -233,6 +236,15 @@ export function Layout({ children, currentPage, onNavigate, state, auth }: Layou
                       <Settings className="h-4 w-4 text-slate-400" />
                       Settings
                     </button>
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleNav('admin')}
+                        className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-700/50 transition-colors"
+                      >
+                        <Shield className="h-4 w-4 text-slate-400" />
+                        User Management
+                      </button>
+                    )}
                     <div className="border-t border-slate-700">
                       <button
                         onClick={() => void auth.signOut()}

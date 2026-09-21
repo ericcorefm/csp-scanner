@@ -15,6 +15,7 @@ import { SettingsPage } from '@/pages/SettingsPage';
 import { DailySummaryPage } from '@/pages/DailySummaryPage';
 import { ScanUniversePage } from '@/pages/ScanUniversePage';
 import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
+import { AdminUsersPage } from '@/pages/AdminUsersPage';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('candidates');
@@ -120,6 +121,7 @@ function App() {
       {currentPage === 'profile' && <ProfilePage auth={auth} />}
       {currentPage === 'summary' && <DailySummaryPage state={state} />}
       {currentPage === 'universe' && <ScanUniversePage state={state} />}
+      {currentPage === 'admin' && <AdminUsersPage onNavigate={handleNavigate} />}
     </Layout>
   );
 }
