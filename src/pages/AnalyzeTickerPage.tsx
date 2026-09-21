@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, Component, ReactNode } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Search,
   Plus,
@@ -19,25 +19,6 @@ import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 import { getCachedStockPrice } from '@/lib/technicalCache';
-
-class AnalyzeErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
-  state = { hasError: false };
-  static getDerivedStateFromError() { return { hasError: true }; }
-  componentDidCatch(err: unknown) {
-    console.error('[AnalyzeTicker] render error:', err);
-  }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
-          <AlertTriangle className="h-4 w-4 inline mr-2" />
-          Some market data is unavailable for this ticker. The analysis could not be fully rendered.
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
 
 function getFailedRules(c: ContractAnalysis): string[] {
   if (!c.pass_fail || c.pass_fail.length === 0) return [];
@@ -255,25 +236,24 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
       )}
 
       {result && (
-        <AnalyzeErrorBoundary key={result.ticker}>
-          <AnalyzeResult
-            result={result}
-            state={state}
-            isInUniverse={isInUniverse(result.ticker)}
-            expirations={expirations}
-            strikes={strikes}
-            filterExpiration={filterExpiration}
-            filterStrike={filterStrike}
-            filterStatus={filterStatus}
-            setFilterExpiration={setFilterExpiration}
-            setFilterStrike={setFilterStrike}
-            setFilterStatus={setFilterStatus}
-            groupedByExpiration={groupedByExpiration}
-            totalContracts={allContracts.length}
-            shownContracts={filteredContracts.length}
-            closestMatch={closestMatch}
-          />
-        </AnalyzeErrorBoundary>
+        <AnalyzeResult
+          result={result}
+          state={state}
+          isInUniverse={isInUniverse(result.ticker)}
+          expirations={expirations}
+          strikes={strikes}
+          filterExpiration={filterExpiration}
+          filterStrike={filterStrike}
+          filterStatus={filterStatus}
+          setFilterExpiration={setFilterExpiration}
+          setFilterStrike={setFilterStrike}
+          setFilterStatus={setFilterStatus}
+          groupedByExpiration={groupedByExpiration}
+          totalContracts={allContracts.length}
+          shownContracts={filteredContracts.length}
+          closestMatch={closestMatch}
+          displayStockPrice={displayStockPrice}
+        />
       )}
 
       {!result && !error && !analyzing && (
@@ -304,6 +284,7 @@ function AnalyzeResult({
   totalContracts,
   shownContracts,
   closestMatch,
+  displayStockPrice,
 }: {
   result: AnalyzeTickerResponse;
   state: AppState;
@@ -320,7 +301,13 @@ function AnalyzeResult({
   totalContracts: number;
   shownContracts: number;
   closestMatch: ContractAnalysis | null;
+  displayStockPrice: number | null;
 }) {
+  const dataWarnings: string[] = [];
+  if (displayStockPrice == null) dataWarnings.push('Stock price unavailable.');
+  if (!result.technical) dataWarnings.push('Technical history unavailable.');
+  if (result.primary_support == null) dataWarnings.push('Primary support could not be evaluated.');
+
   return (
     <div className="space-y-5">
       {/* Qualifies / Does Not Qualify */}
@@ -370,6 +357,17 @@ function AnalyzeResult({
         </div>
       </Card>
 
+      {/* Data warnings — partial data is NOT fatal */}
+      {dataWarnings.length > 0 && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">Partial market data:</span>{' '}
+            {dataWarnings.join(' ')} The analysis below shows all available information.
+          </div>
+        </div>
+      )}
+
       {result.technical_warning && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
           <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -406,7 +404,7 @@ function AnalyzeResult({
       )}
 
       {/* Rule Check for best contract */}
-      {result.best_contract && (
+      {result.best_contract && result.best_contract.pass_fail && result.best_contract.pass_fail.length > 0 && (
         <Card title="Rule Check (Best Contract)">
           <div className="p-5">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
