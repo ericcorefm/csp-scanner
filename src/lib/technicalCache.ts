@@ -71,16 +71,29 @@ export function setCachedTechnical(snap: TechnicalSnapshot): void {
 
 export function populateFromAnalyzeResponse(resp: AnalyzeTickerResponse): void {
   setCachedStockPrice(resp.ticker, resp.stock_price, resp.stock_source || 'analyze');
-  setCachedTechnical({
-    ticker: resp.ticker,
-    trend: resp.trend,
-    primary_support: resp.primary_support,
-    secondary_support: resp.secondary_support,
-    resistance: resp.resistance,
-    stock_price: resp.stock_price,
-    technical: resp.technical ?? null,
-    fetchedAt: Date.now(),
-  });
+
+  // Do not cache a "Pending / all-null" technical response for 6 hours.
+  // That previously made Candidate Detail keep showing Unavailable even after
+  // the provider could return history on a later request.
+  const hasTechnicalData =
+    resp.technical_data_available === true ||
+    resp.technical != null ||
+    resp.primary_support != null ||
+    resp.secondary_support != null ||
+    resp.resistance != null;
+
+  if (hasTechnicalData) {
+    setCachedTechnical({
+      ticker: resp.ticker,
+      trend: resp.trend,
+      primary_support: resp.primary_support,
+      secondary_support: resp.secondary_support,
+      resistance: resp.resistance,
+      stock_price: resp.stock_price,
+      technical: resp.technical ?? null,
+      fetchedAt: Date.now(),
+    });
+  }
 }
 
 export async function fetchTechnicalSnapshot(
@@ -96,7 +109,8 @@ export async function fetchTechnicalSnapshot(
 
   const promise = (async () => {
     try {
-      const resp = await analyzeTicker(key, profile);
+      const knownPrice = getCachedStockPrice(key)?.price ?? null;
+      const resp = await analyzeTicker(key, profile, knownPrice);
       const snap: TechnicalSnapshot = {
         ticker: resp.ticker,
         trend: resp.trend,
@@ -107,7 +121,15 @@ export async function fetchTechnicalSnapshot(
         technical: resp.technical ?? null,
         fetchedAt: Date.now(),
       };
-      setCachedTechnical(snap);
+
+      const hasTechnicalData =
+        resp.technical_data_available === true ||
+        resp.technical != null ||
+        resp.primary_support != null ||
+        resp.secondary_support != null ||
+        resp.resistance != null;
+
+      if (hasTechnicalData) setCachedTechnical(snap);
       return snap;
     } catch (err) {
       console.error(`[fetchTechnicalSnapshot] ${key} failed:`, err);
