@@ -152,7 +152,6 @@ export interface CandidateScan {
   premium_capture: number;
   breakeven: number;
   qualified: boolean;
-  qualification?: 'qualified' | 'pending' | 'rejected';
   technical_pending?: boolean;
   rejection_reasons: string[];
   pass_fail?: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];

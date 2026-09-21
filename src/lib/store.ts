@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
-import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates } from '@/lib/technicalCache';
-import { reevaluatePassFailWithTechnical } from '@/lib/qualification';
+import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
   StrategyProfile,
@@ -242,16 +241,6 @@ export function useAppState() {
 
       const result = await analyzeTicker(sym, activeProfile, knownStockPrice);
       populateFromAnalyzeResponse(result);
-
-      // Refresh all candidates for this ticker with fresh technical data so
-      // the Qualified column on Today's Candidates updates automatically.
-      const cached = getCachedTechnical(sym);
-      if (cached && activeProfile) {
-        setCandidates((prev) => prev.map((c) =>
-          c.ticker === sym ? reevaluatePassFailWithTechnical(c, cached, activeProfile) : c,
-        ));
-      }
-
       setAnalyzeResult(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Analyze ticker failed';
@@ -586,7 +575,7 @@ export function useAppState() {
     const cached = getCachedTechnical(sym);
     if (cached) {
       setCandidates((prev) => prev.map((c) =>
-        c.ticker === sym ? reevaluatePassFailWithTechnical(c, cached, activeProfile) : c,
+        c.ticker === sym ? mergeCandidateWithTechnical(c, cached) : c,
       ));
       return true;
     }
@@ -595,7 +584,7 @@ export function useAppState() {
     if (!snap) return false;
 
     setCandidates((prev) => prev.map((c) =>
-      c.ticker === sym ? reevaluatePassFailWithTechnical(c, snap, activeProfile) : c,
+      c.ticker === sym ? mergeCandidateWithTechnical(c, snap) : c,
     ));
     return true;
   }, [activeProfile]);

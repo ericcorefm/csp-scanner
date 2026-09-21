@@ -5,7 +5,6 @@ import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
-import { deriveCandidateQualification, type QualificationStatus } from '@/lib/qualification';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -37,17 +36,8 @@ export function CandidatesPage({
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
 
-  const qualificationFor = (c: CandidateScan): QualificationStatus => deriveCandidateQualification(c);
-
-  const firstFailReason = (c: CandidateScan): string | null => {
-    const failed = c.pass_fail?.find((pf) => pf.status === 'fail');
-    if (failed) return failed.rule;
-    if (c.rejection_reasons.length > 0) return c.rejection_reasons[0];
-    return null;
-  };
-
   const filtered = useMemo(() => {
-    let list = state.candidates.filter((c) => (showRejected ? true : qualificationFor(c) !== 'rejected'));
+    let list = state.candidates.filter((c) => (showRejected ? true : c.qualified));
     list = [...list].sort((a, b) => {
       let aVal = a[sortKey as keyof CandidateScan];
       let bVal = b[sortKey as keyof CandidateScan];
@@ -116,36 +106,22 @@ export function CandidatesPage({
         </div>
       )}
 
-      {(() => {
-        const allCandidates = state.candidates;
-        const qualCounts = allCandidates.reduce(
-          (acc, c) => {
-            const q = qualificationFor(c);
-            if (q === 'qualified') acc.qualified++;
-            else if (q === 'pending') acc.pending++;
-            else acc.rejected++;
-            return acc;
-          },
-          { qualified: 0, pending: 0, rejected: 0 },
-        );
-        const lastScanLabel = state.lastScanAt
-          ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-          : '--';
-        const totalContracts = allCandidates.length;
-        const symbolsCount = new Set(allCandidates.map((c) => c.ticker)).size;
-        return (
-          <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-              <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts?.symbols_in_universe ?? symbolsCount} />
-              <ScanCountItem label="Contracts Found" value={state.scanCounts?.puts_returned ?? totalContracts} color="text-sky-400" />
-              <ScanCountItem label="Qualified" value={qualCounts.qualified} color="text-emerald-400" />
-              <ScanCountItem label="Pending" value={qualCounts.pending} color="text-amber-400" />
-              <ScanCountItem label="Rejected" value={qualCounts.rejected} color="text-slate-400" />
-              <ScanCountItem label="Last Scan" value={lastScanLabel} isText />
-            </div>
+      {state.scanCounts && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
+            <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
+            <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
+            <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
+            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
+            <ScanCountItem
+              label="Last Scan"
+              value={state.lastScanAt ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '--'}
+              isText
+            />
           </div>
-        );
-      })()}
+        </div>
+      )}
 
       {/* Scan Mode Selector */}
       <div className="flex flex-wrap items-center gap-4">
@@ -185,8 +161,8 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {filtered.filter((c) => qualificationFor(c) === 'qualified').length} qualified
-            {showRejected && ` · ${filtered.filter((c) => qualificationFor(c) === 'pending').length} pending · ${filtered.filter((c) => qualificationFor(c) === 'rejected').length} rejected`}
+            {filtered.filter((c) => c.qualified).length} qualified
+            {showRejected && ` · ${filtered.filter((c) => !c.qualified).length} rejected`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -233,17 +209,14 @@ export function CandidatesPage({
                     <tr
                       onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
                       className={`cursor-pointer transition-colors ${
-                        qualificationFor(c) === 'qualified' ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
+                        c.qualified && !c.technical_pending ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
-                          {(() => {
-                            const q = qualificationFor(c);
-                            if (q === 'qualified') return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />;
-                            if (q === 'pending') return <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />;
-                            return <XCircle className="h-3.5 w-3.5 text-red-400" />;
-                          })()}
+                          {c.qualified && !c.technical_pending && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
+                          {c.qualified && c.technical_pending && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
+                          {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
@@ -287,21 +260,18 @@ export function CandidatesPage({
                         </button>
                       </td>
                     </tr>
-                    {showRejected && qualificationFor(c) === 'rejected' && isExpanded && (
+                    {showRejected && !c.qualified && isExpanded && (
                       <tr key={rowKey + '-detail'}>
                         <td colSpan={colCount} className="px-4 py-3 bg-slate-900/80">
                           <div className="flex flex-wrap gap-2">
                             {c.rejection_reasons.map((r) => (
                               <Badge key={r} variant={rejectionColors[r] || 'warning'}>{r}</Badge>
                             ))}
-                            {c.pass_fail?.filter((pf) => pf.status === 'fail').map((pf) => (
-                              <Badge key={pf.rule} variant="error">{pf.rule}</Badge>
-                            ))}
                           </div>
                         </td>
                       </tr>
                     )}
-                    {showRejected && qualificationFor(c) === 'rejected' && !isExpanded && (
+                    {showRejected && !c.qualified && !isExpanded && (
                       <tr
                         key={rowKey + '-expand'}
                         className="cursor-pointer hover:bg-slate-800/30"
@@ -310,7 +280,7 @@ export function CandidatesPage({
                         <td colSpan={colCount} className="px-4 py-1.5 bg-slate-900/40">
                           <div className="flex items-center gap-2 text-xs text-slate-500">
                             <Info className="h-3 w-3" />
-                            {firstFailReason(c) ?? `${c.rejection_reasons.length} rejection reason(s)`} — click to expand
+                            {c.rejection_reasons.length} rejection reason(s) — click to expand
                           </div>
                         </td>
                       </tr>
