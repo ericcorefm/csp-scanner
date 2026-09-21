@@ -11,7 +11,7 @@ import { BackButton } from '@/components/Layout';
 import { TradingViewChart } from '@/components/TradingViewChart';
 import type { Page } from '@/components/Layout';
 import type { TechnicalData } from '@/lib/liveMarketData';
-import { getCachedTechnical } from '@/lib/technicalCache';
+import { getCachedTechnical, type TechFetchError } from '@/lib/technicalCache';
 
 const trendIcons: Record<string, typeof TrendingUp> = {
   Bullish: TrendingUp,
@@ -64,7 +64,7 @@ export function DetailPage({
   onNavigate: (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => void;
 }) {
   const [techLoading, setTechLoading] = useState(false);
-  const [techError, setTechError] = useState(false);
+  const [techError, setTechError] = useState<TechFetchError | null>(null);
   const [extraTech, setExtraTech] = useState<TechnicalData | null>(null);
   const [mergedTrend, setMergedTrend] = useState<string | null>(null);
   const [mergedPrimarySupport, setMergedPrimarySupport] = useState<number | null>(null);
@@ -82,9 +82,11 @@ export function DetailPage({
     return state.candidates.find((c) => c.ticker === ticker && c.qualified);
   }, [state.candidates, ticker, strike, expiration]);
 
-  // ── Auto-fetch missing technical data ──
+  // ── Auto-fetch missing technical data (non-blocking) ──
   useEffect(() => {
     if (!candidate || !state.activeProfile) return;
+    const t0 = Date.now();
+    console.log(`[PERF] ${ticker} candidate detail opened`);
 
     const hasFullTech =
       candidate.trend_classification !== 'Pending' &&
@@ -95,12 +97,14 @@ export function DetailPage({
 
     if (hasFullTech) {
       setTechLoading(false);
-      setTechError(false);
+      setTechError(null);
       return;
     }
 
+    // Use cache first — no loading spinner if we already have data
     const cached = getCachedTechnical(ticker);
     if (cached) {
+      console.log(`[PERF] ${ticker} cache hit (${Date.now() - t0}ms)`);
       setExtraTech(cached.technical);
       setMergedTrend(
         candidate.trend_classification === 'Pending' || candidate.trend_classification === 'Unavailable'
@@ -117,18 +121,21 @@ export function DetailPage({
       } else {
         setMergedSupportDist(null);
       }
+      // Still refresh in background to update candidates list
       void state.refreshCandidateTechnical(ticker);
       return;
     }
 
+    // No cache — show loading skeleton, but DON'T block page render
     let cancelled = false;
     setTechLoading(true);
-    setTechError(false);
+    setTechError(null);
 
     (async () => {
-      const ok = await state.refreshCandidateTechnical(ticker);
+      console.log(`[PERF] ${ticker} cache miss — history request started`);
+      const result = await state.refreshCandidateTechnical(ticker);
       if (cancelled) return;
-      if (ok) {
+      if (result.ok) {
         const fresh = getCachedTechnical(ticker);
         if (fresh) {
           setExtraTech(fresh.technical);
@@ -148,14 +155,35 @@ export function DetailPage({
             setMergedSupportDist(null);
           }
         }
+        console.log(`[PERF] ${ticker} technical calculations done (${Date.now() - t0}ms)`);
       } else {
-        setTechError(true);
+        setTechError(result.error || 'error');
       }
       setTechLoading(false);
     })();
 
     return () => { cancelled = true; };
   }, [candidate, ticker, state.activeProfile, state.refreshCandidateTechnical]);
+
+  const handleRetryTechnical = () => {
+    setTechError(null);
+    setTechLoading(true);
+    void state.refreshCandidateTechnical(ticker).then((result) => {
+      if (result.ok) {
+        const fresh = getCachedTechnical(ticker);
+        if (fresh) {
+          setExtraTech(fresh.technical);
+          setMergedTrend(fresh.trend);
+          setMergedPrimarySupport(fresh.primary_support);
+          setMergedSecondarySupport(fresh.secondary_support);
+          setMergedResistance(fresh.resistance);
+        }
+      } else {
+        setTechError(result.error || 'error');
+      }
+      setTechLoading(false);
+    });
+  };
 
   const btcTable = useMemo(() => {
     if (!candidate || !state.activeProfile) return null;
@@ -306,9 +334,18 @@ export function DetailPage({
       </div>
 
       {techError && (
-        <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-400">
-          <AlertTriangle className="h-4 w-4 shrink-0" />
-          <span>Technical data unavailable for {ticker}. Trend and support/resistance levels could not be refreshed.</span>
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-400">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>Technical data temporarily {techError === 'rate_limited' ? 'unavailable due to API rate limit' : 'unavailable'}.</span>
+          </div>
+          <button
+            onClick={handleRetryTechnical}
+            className="flex items-center gap-1.5 rounded-md border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/10 transition-colors"
+          >
+            <Loader2 className="h-3.5 w-3.5" />
+            Retry
+          </button>
         </div>
       )}
 
@@ -334,14 +371,40 @@ export function DetailPage({
         <Card title="Technical Analysis" action={<BarChart3 className="h-4 w-4 text-slate-500" />}>
           <div className="p-5">
             {techLoading ? (
-              <div className="py-8 text-center">
-                <Loader2 className="h-6 w-6 mx-auto mb-2 text-sky-400 animate-spin" />
-                <p className="text-sm text-slate-500">Loading technical data...</p>
+              <div className="py-8 space-y-4 animate-pulse">
+                <div className="flex items-center gap-2">
+                  <div className="h-3 w-3 rounded-full bg-slate-700" />
+                  <div className="h-3 w-32 rounded bg-slate-700" />
+                </div>
+                <div className="h-4 w-24 rounded bg-slate-700" />
+                <div className="grid grid-cols-2 gap-x-6 border-t border-slate-800 pt-4">
+                  {[...Array(3)].map((_, i) => (
+                    <div key={i} className="flex justify-between">
+                      <div className="h-3 w-20 rounded bg-slate-700/70" />
+                      <div className="h-3 w-16 rounded bg-slate-700/70" />
+                    </div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-2 gap-x-6 border-t border-slate-800 pt-4">
+                  {[...Array(7)].map((_, i) => (
+                    <div key={i} className="flex justify-between">
+                      <div className="h-3 w-16 rounded bg-slate-700/50" />
+                      <div className="h-3 w-14 rounded bg-slate-700/50" />
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : techError ? (
               <div className="py-8 text-center">
                 <AlertTriangle className="h-6 w-6 mx-auto mb-2 text-amber-400/60" />
-                <p className="text-sm text-slate-500">Technical data unavailable.</p>
+                <p className="text-sm text-slate-500 mb-3">Technical data temporarily unavailable</p>
+                <button
+                  onClick={handleRetryTechnical}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-600 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 transition-colors"
+                >
+                  <Loader2 className="h-3.5 w-3.5" />
+                  Retry
+                </button>
               </div>
             ) : stockPrice || extraTech ? (
               <div className="space-y-4">

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
-import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates } from '@/lib/technicalCache';
+import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates, fetchCachedBars, type TechFetchError } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
   StrategyProfile,
@@ -241,6 +241,8 @@ export function useAppState() {
 
       const result = await analyzeTicker(sym, activeProfile, knownStockPrice);
       populateFromAnalyzeResponse(result);
+      // Warm bars cache so Analyze Ticker's chart loads instantly
+      void fetchCachedBars(sym);
       setAnalyzeResult(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Analyze ticker failed';
@@ -568,25 +570,32 @@ export function useAppState() {
     }));
   }, []);
 
-  const refreshCandidateTechnical = useCallback(async (ticker: string): Promise<boolean> => {
-    if (!activeProfile) return false;
+  const refreshCandidateTechnical = useCallback(async (ticker: string): Promise<{ ok: boolean; error: TechFetchError | null }> => {
+    if (!activeProfile) return { ok: false, error: 'error' };
     const sym = ticker.toUpperCase().trim();
+    const t0 = Date.now();
+    console.log(`[PERF] ${sym} candidate detail opened`);
 
     const cached = getCachedTechnical(sym);
     if (cached) {
+      console.log(`[PERF] ${sym} cache hit (${Date.now() - t0}ms)`);
       setCandidates((prev) => prev.map((c) =>
         c.ticker === sym ? mergeCandidateWithTechnical(c, cached) : c,
       ));
-      return true;
+      // Warm bars cache in background so chart loads instantly
+      void fetchCachedBars(sym);
+      return { ok: true, error: null };
     }
 
+    console.log(`[PERF] ${sym} cache miss — history request started`);
     const snap = await fetchTechnicalSnapshot(sym, activeProfile);
-    if (!snap) return false;
+    if (!snap) return { ok: false, error: 'error' };
 
     setCandidates((prev) => prev.map((c) =>
       c.ticker === sym ? mergeCandidateWithTechnical(c, snap) : c,
     ));
-    return true;
+    console.log(`[PERF] ${sym} technical calculations done (${Date.now() - t0}ms)`);
+    return { ok: true, error: null };
   }, [activeProfile]);
 
   return {
