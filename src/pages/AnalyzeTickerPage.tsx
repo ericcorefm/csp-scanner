@@ -15,7 +15,7 @@ import {
   MinusCircle,
   X,
 } from 'lucide-react';
-import type { AppState, PremiumSource } from '@/lib/types';
+import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 
@@ -38,10 +38,68 @@ class AnalyzeErrorBoundary extends Component<{ children: ReactNode }, { hasError
   }
 }
 
+function getFailedRules(c: ContractAnalysis): string[] {
+  if (!c.pass_fail || c.pass_fail.length === 0) return [];
+  return c.pass_fail.filter((pf) => pf.status === 'fail').map((pf) => pf.rule);
+}
+
+function getNotEvaluatedRules(c: ContractAnalysis): string[] {
+  if (!c.pass_fail || c.pass_fail.length === 0) return [];
+  return c.pass_fail.filter((pf) => pf.status === 'not_evaluated').map((pf) => pf.rule);
+}
+
+function contractStatus(c: ContractAnalysis): 'qualifies' | 'warning' | 'fail' {
+  if (c.qualified) return 'qualifies';
+  if (c.technical_pending || getNotEvaluatedRules(c).length > 0) return 'warning';
+  return 'fail';
+}
+
+function primaryReason(c: ContractAnalysis): string {
+  const failed = getFailedRules(c);
+  if (c.technical_pending) return 'Technical data pending';
+  if (failed.length > 0) return failed[0];
+  const notEval = getNotEvaluatedRules(c);
+  if (notEval.length > 0) return 'Trend/support could not be evaluated';
+  if (!c.has_quotes) return 'No option quotes available';
+  return '--';
+}
+
+function reasonSummary(c: ContractAnalysis): { primary: string; count: number; all: string[] } {
+  const failed = getFailedRules(c);
+  const notEval = getNotEvaluatedRules(c);
+  const all = [...failed, ...notEval];
+  if (c.technical_pending) {
+    return { primary: 'Technical data pending', count: all.length, all };
+  }
+  if (failed.length > 0) {
+    return { primary: failed[0], count: failed.length, all };
+  }
+  if (notEval.length > 0) {
+    return { primary: 'Trend/support could not be evaluated', count: notEval.length, all };
+  }
+  if (!c.has_quotes) return { primary: 'No option quotes available', count: 0, all: [] };
+  return { primary: '--', count: 0, all: [] };
+}
+
+function findClosestMatch(contracts: ContractAnalysis[]): ContractAnalysis | null {
+  const nonQualifying = contracts.filter((c) => !c.qualified);
+  if (nonQualifying.length === 0) return null;
+  nonQualifying.sort((a, b) => {
+    const aFailed = getFailedRules(a).length;
+    const bFailed = getFailedRules(b).length;
+    if (aFailed !== bFailed) return aFailed - bFailed;
+    if (b.net_croi !== a.net_croi) return b.net_croi - a.net_croi;
+    if (a.premium_capture !== b.premium_capture) return a.premium_capture - b.premium_capture;
+    return b.volume - a.volume;
+  });
+  return nonQualifying[0] || null;
+}
+
 export function AnalyzeTickerPage({ state }: { state: AppState }) {
   const [ticker, setTicker] = useState('');
   const [filterExpiration, setFilterExpiration] = useState<string>('all');
   const [filterStrike, setFilterStrike] = useState<string>('all');
+  const [filterStatus, setFilterStatus] = useState<string>('all');
   const tickerInputRef = useRef<HTMLInputElement>(null);
   const result = state.analyzeResult;
   const error = state.analyzeError;
@@ -52,6 +110,7 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
     if (!sym) return;
     setFilterExpiration('all');
     setFilterStrike('all');
+    setFilterStatus('all');
     state.runAnalyzeTicker(sym);
   };
 
@@ -59,6 +118,7 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
     setTicker('');
     setFilterExpiration('all');
     setFilterStrike('all');
+    setFilterStatus('all');
     state.clearAnalyzeResult();
     tickerInputRef.current?.focus();
   };
@@ -66,32 +126,48 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
   const isInUniverse = (sym: string) =>
     state.scanUniverseEntries.some((e) => e.symbol === sym.toUpperCase());
 
-  const expirations = useMemo(() => {
-    if (!result?.all_qualifying_contracts) return [];
-    return [...new Set(result.all_qualifying_contracts.map((c) => c.expiration))].sort();
+  const allContracts = useMemo(() => {
+    if (!result) return [];
+    return result.all_analyzed_contracts && result.all_analyzed_contracts.length > 0
+      ? result.all_analyzed_contracts
+      : result.all_qualifying_contracts;
   }, [result]);
+
+  const expirations = useMemo(() => {
+    return [...new Set(allContracts.map((c) => c.expiration))].sort();
+  }, [allContracts]);
 
   const strikes = useMemo(() => {
-    if (!result?.all_qualifying_contracts) return [];
-    return [...new Set(result.all_qualifying_contracts.map((c) => c.strike))].sort((a, b) => a - b);
-  }, [result]);
+    return [...new Set(allContracts.map((c) => c.strike))].sort((a, b) => a - b);
+  }, [allContracts]);
 
-  const groupedByExpiration = useMemo(() => {
-    if (!result?.all_qualifying_contracts) return [];
-    let contracts = result.all_qualifying_contracts;
+  const filteredContracts = useMemo(() => {
+    let contracts = allContracts;
     if (filterExpiration !== 'all') {
       contracts = contracts.filter((c) => c.expiration === filterExpiration);
     }
     if (filterStrike !== 'all') {
       contracts = contracts.filter((c) => c.strike === Number(filterStrike));
     }
+    if (filterStatus !== 'all') {
+      contracts = contracts.filter((c) => contractStatus(c) === filterStatus);
+    }
+    return contracts;
+  }, [allContracts, filterExpiration, filterStrike, filterStatus]);
+
+  const groupedByExpiration = useMemo(() => {
     const groups: Record<string, ContractAnalysis[]> = {};
-    for (const c of contracts) {
+    for (const c of filteredContracts) {
       if (!groups[c.expiration]) groups[c.expiration] = [];
       groups[c.expiration].push(c);
     }
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
-  }, [result, filterExpiration, filterStrike]);
+  }, [filteredContracts]);
+
+  const closestMatch = useMemo(() => {
+    if (!result || result.qualifies) return null;
+    return findClosestMatch(allContracts);
+  }, [result, allContracts]);
 
   return (
     <div className="space-y-5">
@@ -165,9 +241,14 @@ export function AnalyzeTickerPage({ state }: { state: AppState }) {
             strikes={strikes}
             filterExpiration={filterExpiration}
             filterStrike={filterStrike}
+            filterStatus={filterStatus}
             setFilterExpiration={setFilterExpiration}
             setFilterStrike={setFilterStrike}
+            setFilterStatus={setFilterStatus}
             groupedByExpiration={groupedByExpiration}
+            totalContracts={allContracts.length}
+            shownContracts={filteredContracts.length}
+            closestMatch={closestMatch}
           />
         </AnalyzeErrorBoundary>
       )}
@@ -192,9 +273,14 @@ function AnalyzeResult({
   strikes,
   filterExpiration,
   filterStrike,
+  filterStatus,
   setFilterExpiration,
   setFilterStrike,
+  setFilterStatus,
   groupedByExpiration,
+  totalContracts,
+  shownContracts,
+  closestMatch,
 }: {
   result: AnalyzeTickerResponse;
   state: AppState;
@@ -203,9 +289,14 @@ function AnalyzeResult({
   strikes: number[];
   filterExpiration: string;
   filterStrike: string;
+  filterStatus: string;
   setFilterExpiration: (v: string) => void;
   setFilterStrike: (v: string) => void;
+  setFilterStatus: (v: string) => void;
   groupedByExpiration: [string, ContractAnalysis[]][];
+  totalContracts: number;
+  shownContracts: number;
+  closestMatch: ContractAnalysis | null;
 }) {
   return (
     <div className="space-y-5">
@@ -225,6 +316,22 @@ function AnalyzeResult({
           </span>
         </div>
       </div>
+
+      {/* Closest Match when zero qualify */}
+      {!result.qualifies && closestMatch && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-5 py-4">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-400" />
+            <span className="text-sm font-semibold text-amber-300">Closest Match</span>
+            <span className="text-sm text-slate-300">
+              ${formatNum(closestMatch.strike)} strike · {closestMatch.expiration} · CROI {formatPct(closestMatch.net_croi)}
+            </span>
+          </div>
+          <p className="text-xs text-amber-300/70 mt-1.5 ml-8">
+            This contract misses the fewest active rules. It is not qualified.
+          </p>
+        </div>
+      )}
 
       {/* Stock Summary */}
       <Card title="Stock Summary">
@@ -325,7 +432,7 @@ function AnalyzeResult({
       </div>
 
       {/* Contract filters */}
-      {result.all_qualifying_contracts.length > 0 && (
+      {totalContracts > 0 && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
           <div className="flex items-center gap-2 text-sm text-slate-400">
             <Filter className="h-4 w-4" />
@@ -351,13 +458,23 @@ function AnalyzeResult({
               <option key={s} value={String(s)}>${formatNum(s)}</option>
             ))}
           </select>
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-slate-100"
+          >
+            <option value="all">All Statuses</option>
+            <option value="qualifies">Qualifies</option>
+            <option value="warning">Warning</option>
+            <option value="fail">Does Not Qualify</option>
+          </select>
           <span className="text-xs text-slate-500 ml-auto">
-            {groupedByExpiration.reduce((sum, [, contracts]) => sum + contracts.length, 0)} contracts
+            {shownContracts} of {totalContracts} contracts
           </span>
         </div>
       )}
 
-      {/* Contract Results */}
+      {/* Contract Results — all analyzed contracts */}
       {groupedByExpiration.length > 0 && (
         <div className="space-y-3">
           {groupedByExpiration.map(([expiration, contracts]) => (
@@ -375,7 +492,7 @@ function AnalyzeResult({
                 <table className="w-full text-sm">
                   <thead className="border-b border-slate-800 bg-slate-900/40">
                     <tr>
-                      {['Strike', 'Expiration', 'DTE', 'Strike Below Stock %', 'Strike Below Support %', 'Premium', 'Premium Source', 'BTC', 'Net Profit', 'CROI', 'PC', 'Breakeven'].map((h) => (
+                      {['Strike', 'DTE', 'Premium', 'BTC', 'CROI', 'PC', 'OI', 'IV', 'Vol', 'Support Dist', 'Status', 'Reason'].map((h) => (
                         <th key={h} className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
@@ -384,36 +501,25 @@ function AnalyzeResult({
                     {contracts.map((c, i) => {
                       const noQuote = !c.has_quotes;
                       const DASH = <span className="text-slate-600">--</span>;
+                      const status = contractStatus(c);
+                      const reason = reasonSummary(c);
+                      const isClosest = closestMatch?.strike === c.strike && closestMatch?.expiration === c.expiration;
                       return (
-                        <tr key={i} className="hover:bg-slate-800/40 transition-colors">
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-200 font-medium">${formatNum(c.strike)}</td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.expiration}</td>
+                        <tr key={i} className={`hover:bg-slate-800/40 transition-colors ${isClosest ? 'ring-1 ring-inset ring-amber-500/20' : ''}`}>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-200 font-medium">
+                            ${formatNum(c.strike)}
+                            {isClosest && <span className="ml-1 text-amber-400 text-xs">★</span>}
+                          </td>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.dte}</td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                            {c.strike_distance_from_stock != null ? `${c.strike_distance_from_stock}%` : DASH}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                            {c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : DASH}
-                          </td>
                           <td className="px-3 py-2 text-right tabular-nums text-sky-400 font-medium">
                             {noQuote ? DASH : `${formatNum(c.suggested_sto)}`}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {noQuote ? (
-                              <span className="text-slate-600 text-xs">--</span>
-                            ) : (
-                              <Badge variant={c.premium_source === 'MANUAL' ? 'warning' : c.premium_source === 'MID' ? 'success' : 'info'}>{c.premium_source || 'UNAVAILABLE'}</Badge>
-                            )}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-sky-300">
                             {noQuote ? DASH : `$${formatNum(c.suggested_btc)}`}
                           </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-300">
-                            {noQuote ? DASH : `$${formatNum(c.net_profit)}`}
-                          </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {noQuote ? DASH : (
-                              <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
+                              <span className={typeof c.net_croi === 'number' && c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
                                 {formatPct(c.net_croi)}
                               </span>
                             )}
@@ -422,7 +528,35 @@ function AnalyzeResult({
                             {noQuote ? DASH : formatPct(c.premium_capture)}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                            {noQuote ? DASH : `$${formatNum(c.breakeven)}`}
+                            {c.open_interest > 0 ? c.open_interest.toLocaleString() : DASH}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                            {typeof c.iv === 'number' && c.iv > 0 ? `${formatNum(c.iv, 0)}%` : DASH}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                            {c.volume > 0 ? c.volume.toLocaleString() : DASH}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                            {c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : DASH}
+                          </td>
+                          <td className="px-3 py-2 text-right whitespace-nowrap">
+                            {status === 'qualifies' ? (
+                              <span className="inline-flex items-center gap-1 text-emerald-400 text-xs font-medium">
+                                <CheckCircle2 className="h-3.5 w-3.5" /> Qualifies
+                              </span>
+                            ) : status === 'warning' ? (
+                              <span className="inline-flex items-center gap-1 text-amber-400 text-xs font-medium">
+                                <AlertTriangle className="h-3.5 w-3.5" /> Warning
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-red-400 text-xs font-medium">
+                                <XCircle className="h-3.5 w-3.5" /> Fail
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right text-xs text-slate-400 whitespace-nowrap" title={reason.all.length > 1 ? reason.all.join('\n') : undefined}>
+                            {reason.primary}
+                            {reason.count > 1 && <span className="text-slate-500 ml-1">({reason.count} rules)</span>}
                           </td>
                         </tr>
                       );
@@ -435,10 +569,10 @@ function AnalyzeResult({
         </div>
       )}
 
-      {result.all_qualifying_contracts.length === 0 && !result.qualifies && (
+      {totalContracts === 0 && !result.qualifies && (
         <div className="py-12 text-center rounded-xl border border-slate-800 bg-slate-900/50">
           <XCircle className="h-8 w-8 mx-auto mb-2 text-red-400/60" />
-          <p className="text-sm text-slate-500">No contracts qualified for {result.ticker} under the current strategy rules.</p>
+          <p className="text-sm text-slate-500">No option contracts were returned for {result.ticker}.</p>
         </div>
       )}
     </div>

@@ -1318,6 +1318,7 @@ serve(async (req) => {
         best_contract: bestContract,
         other_qualifying_contracts: qualifying.slice(1),
         all_qualifying_contracts: qualifying,
+        all_analyzed_contracts: analyses,
         all_contracts_count: analyses.length,
         qualifying_count: qualifying.length,
         // Diagnostic counts

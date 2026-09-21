@@ -91,6 +91,7 @@ export interface AnalyzeTickerResponse {
   best_contract: ContractAnalysis | null;
   other_qualifying_contracts: ContractAnalysis[];
   all_qualifying_contracts: ContractAnalysis[];
+  all_analyzed_contracts?: ContractAnalysis[];
   all_contracts_count: number;
   qualifying_count: number;
 }
@@ -194,6 +195,10 @@ function normalizeAnalyzeResponse(data: any): AnalyzeTickerResponse {
       ? data.other_qualifying_contracts.map(normalizeContract) : [],
     all_qualifying_contracts: Array.isArray(data.all_qualifying_contracts)
       ? data.all_qualifying_contracts.map(normalizeContract) : [],
+    all_analyzed_contracts: Array.isArray(data.all_analyzed_contracts)
+      ? data.all_analyzed_contracts.map(normalizeContract)
+      : Array.isArray(data.all_qualifying_contracts)
+        ? data.all_qualifying_contracts.map(normalizeContract) : [],
     all_contracts_count: typeof data.all_contracts_count === 'number' ? data.all_contracts_count : 0,
     qualifying_count: typeof data.qualifying_count === 'number' ? data.qualifying_count : 0,
   };
