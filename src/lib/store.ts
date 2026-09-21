@@ -14,6 +14,26 @@ import type {
 import type { AnalyzeTickerResponse, ScanCounts, ScanMode } from '@/lib/liveMarketData';
 import type { ScanUniverseEntry } from '@/types';
 
+function formatDataError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === 'object') {
+    const e = err as {
+      message?: string;
+      details?: string;
+      hint?: string;
+      code?: string;
+    };
+    const parts = [
+      e.message,
+      e.details ? `details: ${e.details}` : null,
+      e.hint ? `hint: ${e.hint}` : null,
+      e.code ? `code: ${e.code}` : null,
+    ].filter(Boolean);
+    if (parts.length) return parts.join(' | ');
+  }
+  return String(err ?? 'Unknown database error');
+}
+
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
   name: 'My CSP Default',
   is_default: true,
@@ -300,60 +320,69 @@ export function useAppState() {
       populateStockPricesFromCandidates(results);
 
       const today = new Date().toISOString().split('T')[0];
-      const { error: deleteError } = await supabase
-        .from('candidate_scans')
-        .delete()
-        .eq('scan_date', today)
-        .eq('strategy_profile_id', activeProfile.id);
-      if (deleteError) throw deleteError;
 
-      // IMPORTANT: map only database columns. CandidateScan also contains UI-only
-      // strike-distance fields that are not columns in candidate_scans. Spreading
-      // the whole object caused PostgREST inserts to fail during Rescan.
-      const insertData = results.map((r) => ({
-        scan_date: r.scan_date,
-        ticker: r.ticker,
-        company_name: r.company_name,
-        stock_price: r.stock_price,
-        strike: r.strike,
-        expiration: r.expiration,
-        dte: r.dte,
-        bid: r.bid,
-        ask: r.ask,
-        mid: r.mid,
-        spread_pct: r.spread_pct,
-        iv: r.iv,
-        delta: r.delta,
-        volume: r.volume,
-        open_interest: r.open_interest,
-        volume_classification: r.volume_classification,
-        trend_classification: r.trend_classification,
-        primary_support: r.primary_support,
-        secondary_support: r.secondary_support ?? null,
-        resistance: r.resistance ?? null,
-        suggested_sto: r.suggested_sto,
-        suggested_btc: r.suggested_btc,
-        net_profit: r.net_profit,
-        net_croi: r.net_croi,
-        premium_capture: r.premium_capture,
-        breakeven: r.breakeven,
-        qualified: r.qualified,
-        rejection_reasons: r.rejection_reasons,
-        strategy_profile_id: activeProfile.id,
-        strike_distance_from_stock: r.strike_distance_from_stock ?? null,
-        strike_distance_from_support: r.strike_distance_from_support ?? null,
-        has_quotes: r.has_quotes,
-        stock_source: r.stock_source ?? null,
-        premium_source: r.premium_source ?? null,
-      }));
+      // Persisting scan history is secondary. A successful live market scan
+      // must remain visible even if the local Supabase cache/schema is stale.
+      try {
+        const { error: deleteError } = await supabase
+          .from('candidate_scans')
+          .delete()
+          .eq('scan_date', today)
+          .eq('strategy_profile_id', activeProfile.id);
+        if (deleteError) throw deleteError;
 
-      if (insertData.length > 0) {
-        const { error: insertError } = await supabase.from('candidate_scans').insert(insertData);
-        if (insertError) throw insertError;
+        // Persist only database-backed columns and normalize undefined -> null.
+        const insertData = results.map((r) => ({
+          scan_date: r.scan_date || today,
+          ticker: r.ticker,
+          company_name: r.company_name ?? null,
+          stock_price: r.stock_price ?? null,
+          strike: r.strike,
+          expiration: r.expiration,
+          dte: r.dte,
+          bid: r.bid ?? 0,
+          ask: r.ask ?? 0,
+          mid: r.mid ?? 0,
+          spread_pct: r.spread_pct ?? 0,
+          iv: r.iv ?? 0,
+          delta: r.delta ?? null,
+          volume: r.volume ?? 0,
+          open_interest: r.open_interest ?? 0,
+          volume_classification: r.volume_classification ?? null,
+          trend_classification: r.trend_classification ?? null,
+          primary_support: r.primary_support ?? null,
+          secondary_support: r.secondary_support ?? null,
+          resistance: r.resistance ?? null,
+          suggested_sto: r.suggested_sto ?? null,
+          suggested_btc: r.suggested_btc ?? null,
+          net_profit: r.net_profit ?? null,
+          net_croi: r.net_croi ?? null,
+          premium_capture: r.premium_capture ?? null,
+          breakeven: r.breakeven ?? null,
+          qualified: Boolean(r.qualified),
+          rejection_reasons: Array.isArray(r.rejection_reasons) ? r.rejection_reasons : [],
+          strategy_profile_id: activeProfile.id,
+          strike_distance_from_stock: r.strike_distance_from_stock ?? null,
+          strike_distance_from_support: r.strike_distance_from_support ?? null,
+          has_quotes: Boolean(r.has_quotes),
+          stock_source: r.stock_source ?? null,
+          premium_source: r.premium_source ?? null,
+        }));
+
+        if (insertData.length > 0) {
+          const { error: insertError } = await supabase
+            .from('candidate_scans')
+            .insert(insertData);
+          if (insertError) throw insertError;
+        }
+      } catch (persistError) {
+        const detail = formatDataError(persistError);
+        console.error('Scan completed, but candidate_scans persistence failed:', persistError);
+        setScanError(`Scan completed, but saving scan history failed: ${detail}`);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Rescan failed';
-      setScanError(message);
+      const message = formatDataError(err);
+      setScanError(`Rescan failed: ${message}`);
       console.error('Rescan failed:', err);
     } finally {
       setScanning(false);
