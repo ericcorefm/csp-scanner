@@ -18,6 +18,7 @@ import {
 import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
+import { getCachedStockPrice } from '@/lib/technicalCache';
 
 class AnalyzeErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
@@ -188,6 +189,9 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
     return findClosestMatch(allContracts);
   }, [result, allContracts]);
 
+  const cachedDisplayPrice = result ? getCachedStockPrice(result.ticker)?.price ?? null : null;
+  const displayStockPrice = result?.stock_price ?? cachedDisplayPrice;
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -357,7 +361,7 @@ function AnalyzeResult({
         <div className="p-5">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatBox label="Ticker" value={result.ticker} />
-            <StatBox label="Stock Price" value={result.stock_price != null ? `${formatNum(result.stock_price)}` : 'Unavailable'} sub={result.stock_source && result.stock_source !== 'daily_aggregates' && result.stock_source !== 'none' ? 'Latest daily close' : undefined} />
+            <StatBox label="Stock Price" value={displayStockPrice != null ? `${formatNum(displayStockPrice)}` : 'Unavailable'} sub={result.stock_source && result.stock_source !== 'daily_aggregates' && result.stock_source !== 'none' ? 'Latest daily close' : undefined} />
             <StatBox label="Trend" value={result.trend === 'Unavailable' ? 'Unavailable' : result.trend} />
             <StatBox label="Primary Support" value={result.primary_support != null ? `${formatNum(result.primary_support)}` : 'Unavailable'} />
             <StatBox label="Secondary Support" value={result.secondary_support != null ? `${formatNum(result.secondary_support)}` : 'Unavailable'} />
