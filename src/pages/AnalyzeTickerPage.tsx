@@ -56,7 +56,7 @@ function contractStatus(c: ContractAnalysis): 'qualifies' | 'warning' | 'fail' {
 
 function primaryReason(c: ContractAnalysis): string {
   const failed = getFailedRules(c);
-  if (c.technical_pending) return 'Technical data pending';
+  if (c.technical_pending) return 'Technical data unavailable';
   if (failed.length > 0) return failed[0];
   const notEval = getNotEvaluatedRules(c);
   if (notEval.length > 0) return 'Trend/support could not be evaluated';
@@ -69,7 +69,7 @@ function reasonSummary(c: ContractAnalysis): { primary: string; count: number; a
   const notEval = getNotEvaluatedRules(c);
   const all = [...failed, ...notEval];
   if (c.technical_pending) {
-    return { primary: 'Technical data pending', count: all.length, all };
+    return { primary: 'Technical data unavailable', count: all.length, all };
   }
   if (failed.length > 0) {
     return { primary: failed[0], count: failed.length, all };

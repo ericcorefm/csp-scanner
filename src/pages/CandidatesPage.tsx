@@ -61,7 +61,6 @@ function RuleStatusCell({ passFail }: { passFail?: { rule: string; pass: boolean
       <td className="px-3 py-2.5 text-center">
         <span title={tooltipText} className="inline-flex items-center gap-1.5 cursor-help">
           <Badge variant="neutral">Unknown</Badge>
-          <span className="text-xs text-slate-500 tabular-nums">0 / 0 / 0</span>
         </span>
       </td>
     );
@@ -75,7 +74,6 @@ function RuleStatusCell({ passFail }: { passFail?: { rule: string; pass: boolean
     <td className="px-3 py-2.5 text-center">
       <span title={tooltipText} className="inline-flex items-center gap-1.5 cursor-help whitespace-nowrap">
         <Badge variant={badgeVariant}>{badgeIcon} {badgeLabel}</Badge>
-        <span className="text-xs text-slate-500 tabular-nums">{info.passCount} / {info.warningCount} / {info.failCount}</span>
       </span>
     </td>
   );
@@ -298,9 +296,6 @@ export function CandidatesPage({
                           {c.qualified && c.technical_pending && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
                           {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
-                          {c.technical_pending && (
-                            <span className="text-[10px] font-medium text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">TECH PENDING</span>
-                          )}
                         </div>
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.stock_price != null ? `${formatNum(c.stock_price)}` : <span className="text-slate-600">Unavailable</span>}</td>
