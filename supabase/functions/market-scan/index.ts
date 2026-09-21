@@ -46,6 +46,11 @@ type Profile = {
   spread_enabled: boolean;
   short_interest_enabled: boolean;
   technical_rules_enabled: boolean;
+  rsi_min: number;
+  rsi_max: number;
+  require_ma20_above_ma50: boolean;
+  require_ma50_above_ma200: boolean;
+  require_price_above_ma200: boolean;
 };
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
@@ -1116,6 +1121,19 @@ async function scanSymbol(
           if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
           if (supportDistPct > profile.maximum_support_distance_pct) reasons.push('Support distance too high');
         }
+        // Moving average rules
+        const closes = bars.map((b: any) => b.close);
+        const ma20v = sma(closes, 20);
+        const ma50v = sma(closes, 50);
+        const has200 = closes.length >= 200;
+        const ma200v = has200 ? sma(closes, 200) : 0;
+        if (profile.require_price_above_ma200 && has200 && stockPrice !== null && stockPrice <= ma200v) reasons.push('Price below MA200');
+        if (profile.require_ma20_above_ma50 && ma20v <= ma50v) reasons.push('MA20 below MA50');
+        if (profile.require_ma50_above_ma200 && has200 && ma50v <= ma200v) reasons.push('MA50 below MA200');
+        // RSI range rule
+        const rsiVal = rsi(closes);
+        if (rsiVal < profile.rsi_min) reasons.push('RSI below minimum');
+        if (rsiVal > profile.rsi_max) reasons.push('RSI above maximum');
       }
       // OI and volume rules are non-premium — they come from the contract itself
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
@@ -1175,10 +1193,12 @@ async function scanSymbol(
       reasons.push('CROI too low');
     }
 
-    const qualified = reasons.length === 0;
+    const hasPassFailFails = passFail.some((pf) => pf.status === 'fail');
+    const hasPassFailPending = passFail.some((pf) => pf.status === 'not_evaluated');
+    const qualified = reasons.length === 0 && !hasPassFailFails && !hasPassFailPending;
     const technicalPending = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable;
     r.evaluated++;
-    if (qualified && !technicalPending) r.qualified++; else r.rejected++;
+    if (qualified) r.qualified++; else r.rejected++;
 
     const premiumSourceOut = premiumSource as string;
 
@@ -1200,6 +1220,13 @@ async function scanSymbol(
       }
       if (!isSectionOff(profile, 'technical_rules_enabled')) {
         if (technicalDataAvailable) {
+          const closes = bars.map((b: any) => b.close);
+          const ma20v = sma(closes, 20);
+          const ma50v = sma(closes, 50);
+          const has200 = closes.length >= 200;
+          const ma200v = has200 ? sma(closes, 200) : 0;
+          const rsiVal = rsi(closes);
+
           const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport);
           passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
           if (primarySupport !== null && primarySupport > 0) {
@@ -1210,6 +1237,32 @@ async function scanSymbol(
             passFail.push({ rule: `Support distance ${profile.minimum_support_distance_pct}%–${profile.maximum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
           } else {
             passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
+          }
+          // Moving average rules
+          if (profile.require_price_above_ma200) {
+            if (has200 && stockPrice !== null) {
+              const maOk = stockPrice > ma200v;
+              passFail.push({ rule: `Price above MA200 (${stockPrice.toFixed(2)} > ${ma200v.toFixed(2)})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+            } else {
+              passFail.push({ rule: 'Price above MA200 — insufficient history', pass: true, status: 'not_evaluated' });
+            }
+          }
+          if (profile.require_ma20_above_ma50) {
+            const maOk = ma20v > ma50v;
+            passFail.push({ rule: `MA20 above MA50 (${ma20v.toFixed(2)} > ${ma50v.toFixed(2)})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+          }
+          if (profile.require_ma50_above_ma200) {
+            if (has200) {
+              const maOk = ma50v > ma200v;
+              passFail.push({ rule: `MA50 above MA200 (${ma50v.toFixed(2)} > ${ma200v.toFixed(2)})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+            } else {
+              passFail.push({ rule: 'MA50 above MA200 — insufficient history', pass: true, status: 'not_evaluated' });
+            }
+          }
+          // RSI range rule
+          if (profile.rsi_min > 0 || profile.rsi_max < 100) {
+            const rsiOk = rsiVal >= profile.rsi_min && rsiVal <= profile.rsi_max;
+            passFail.push({ rule: `RSI ${profile.rsi_min}–${profile.rsi_max} (${rsiVal.toFixed(1)})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
           }
         } else {
           passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true, status: 'not_evaluated' });
@@ -1240,7 +1293,7 @@ async function scanSymbol(
     }
 
     if (analyzeMode) {
-      const finalQualified = reasons.length === 0 && !technicalPending;
+      const finalQualified = qualified;
 
       analyses.push({
         strike, expiration, dte,
