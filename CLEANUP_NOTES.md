@@ -16,3 +16,11 @@ After importing/syncing this project:
 2. Redeploy `supabase/functions/market-scan/index.ts`.
 3. Rebuild/reload the Vite/Bolt frontend.
 4. Confirm the `MASSIVE_API_KEY` server secret still exists.
+
+## 2026-09-21 — Failed-to-load root cause fix
+The prior auth migration revoked all PostgreSQL privileges from the `anon` role on the app's personal tables. The later no-auth migrations recreated permissive RLS policies, but an RLS policy does **not** re-grant table privileges. Because the frontend intentionally runs without authentication, its Supabase client uses the `anon` role; `strategy_profiles.select()` could therefore fail before the app rendered.
+
+Added migration:
+`20260921231500_restore_single_tenant_anon_grants.sql`
+
+It restores `USAGE` on `public` and `SELECT/INSERT/UPDATE/DELETE` on the app tables to `anon` and `authenticated`.
