@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Layout, type Page } from '@/components/Layout';
 import { useAppState } from '@/lib/store';
+import { useAuth } from '@/lib/useAuth';
+import { AuthPage } from '@/components/AuthPage';
 import { CandidatesPage } from '@/pages/CandidatesPage';
 import { DetailPage } from '@/pages/DetailPage';
 import { OpenPositionsPage } from '@/pages/OpenPositionsPage';
@@ -16,7 +18,8 @@ function App() {
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
   const [selectedExpiration, setSelectedExpiration] = useState<string | null>(null);
   const [autoAnalyzeTicker, setAutoAnalyzeTicker] = useState<string | null>(null);
-  const state = useAppState();
+  const auth = useAuth();
+  const state = useAppState(auth.user?.id);
 
   const handleNavigate = (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => {
     if (ticker) setSelectedTicker(ticker);
@@ -27,6 +30,23 @@ function App() {
     setAutoAnalyzeTicker(page === 'analyze' && ticker ? ticker : null);
     setCurrentPage(page);
   };
+
+  // Auth gate: show loading spinner while auth state is being determined
+  if (auth.authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="text-center">
+          <div className="h-8 w-8 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm text-slate-400">Loading CSP Scanner...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Not signed in — show auth page
+  if (!auth.user) {
+    return <AuthPage />;
+  }
 
   if (state.loading) {
     return (
@@ -51,7 +71,7 @@ function App() {
   }
 
   return (
-    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state}>
+    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} auth={auth}>
       {currentPage === 'candidates' && (
         <CandidatesPage state={state} onNavigate={handleNavigate} />
       )}

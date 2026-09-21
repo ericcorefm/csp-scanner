@@ -54,7 +54,7 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   technical_rules_enabled: true,
 };
 
-export function useAppState() {
+export function useAppState(userId?: string) {
   const [profiles, setProfiles] = useState<StrategyProfile[]>([]);
   const [activeProfile, setActiveProfile] = useState<StrategyProfile | null>(null);
   const [candidates, setCandidates] = useState<CandidateScan[]>([]);
@@ -174,7 +174,7 @@ export function useAppState() {
           source: options?.source ?? 'manual',
           ...(options?.company_name ? { company_name: options.company_name } : {}),
         },
-        { onConflict: 'symbol' },
+        { onConflict: 'user_id,symbol' },
       );
     if (error && error.code !== '23505') throw error;
     await loadScanUniverse();
@@ -202,7 +202,7 @@ export function useAppState() {
     for (const sym of defaults) {
       await supabase
         .from('scan_universe')
-        .upsert({ symbol: sym, source: 'default', enabled: true }, { onConflict: 'symbol' });
+        .upsert({ symbol: sym, source: 'default', enabled: true }, { onConflict: 'user_id,symbol' });
     }
     await loadScanUniverse();
   }, [loadScanUniverse]);
@@ -280,6 +280,7 @@ export function useAppState() {
           openTickers,
           scanMode,
           scanMode === 'universe' ? universeSymbols : undefined,
+          userId,
         );
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
@@ -359,7 +360,7 @@ export function useAppState() {
     } finally {
       setScanning(false);
     }
-  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse.length]);
+  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse.length, userId]);
 
   const loadData = useCallback(async () => {
     try {

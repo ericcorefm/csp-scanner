@@ -318,12 +318,14 @@ export async function scanCandidatesLive(
   openTickers: string[],
   scanMode: ScanMode,
   symbols?: string[],
+  userId?: string,
 ): Promise<LiveScanResponse> {
   const { data, error } = await supabase.functions.invoke('market-scan', {
     body: {
       profile,
       openTickers,
       scanMode,
+      ...(userId ? { userId } : {}),
       ...(scanMode === 'universe' && symbols && symbols.length > 0 ? { symbols } : {}),
     },
   });
