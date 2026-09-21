@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
+import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
   StrategyProfile,
@@ -207,6 +208,7 @@ export function useAppState() {
     setAnalyzeResult(null);
     try {
       const result = await analyzeTicker(sym, activeProfile);
+      populateFromAnalyzeResponse(result);
       setAnalyzeResult(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Analyze ticker failed';
@@ -497,6 +499,27 @@ export function useAppState() {
     }));
   }, []);
 
+  const refreshCandidateTechnical = useCallback(async (ticker: string): Promise<boolean> => {
+    if (!activeProfile) return false;
+    const sym = ticker.toUpperCase().trim();
+
+    const cached = getCachedTechnical(sym);
+    if (cached) {
+      setCandidates((prev) => prev.map((c) =>
+        c.ticker === sym ? mergeCandidateWithTechnical(c, cached) : c,
+      ));
+      return true;
+    }
+
+    const snap = await fetchTechnicalSnapshot(sym, activeProfile);
+    if (!snap) return false;
+
+    setCandidates((prev) => prev.map((c) =>
+      c.ticker === sym ? mergeCandidateWithTechnical(c, snap) : c,
+    ));
+    return true;
+  }, [activeProfile]);
+
   return {
     profiles,
     activeProfile,
@@ -542,6 +565,7 @@ export function useAppState() {
     analyzeError,
     runAnalyzeTicker,
     clearAnalyzeResult,
+    refreshCandidateTechnical,
   };
 }
 

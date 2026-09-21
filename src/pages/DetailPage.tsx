@@ -1,13 +1,16 @@
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import {
   TrendingUp, TrendingDown, Minus, ArrowUpRight, BarChart3, Building2,
   CandlestickChart, Calculator, Target, Plus, Check, XCircle, AlertTriangle,
+  Activity, Crosshair, Loader2,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import { calcRecycleDate } from '@/lib/calculations';
 import { Badge, Card, StatRow, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { BackButton } from '@/components/Layout';
 import type { Page } from '@/components/Layout';
+import type { TechnicalData } from '@/lib/liveMarketData';
+import { getCachedTechnical } from '@/lib/technicalCache';
 
 const trendIcons: Record<string, typeof TrendingUp> = {
   Bullish: TrendingUp,
@@ -59,6 +62,15 @@ export function DetailPage({
   state: AppState;
   onNavigate: (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => void;
 }) {
+  const [techLoading, setTechLoading] = useState(false);
+  const [techError, setTechError] = useState(false);
+  const [extraTech, setExtraTech] = useState<TechnicalData | null>(null);
+  const [mergedTrend, setMergedTrend] = useState<string | null>(null);
+  const [mergedPrimarySupport, setMergedPrimarySupport] = useState<number | null>(null);
+  const [mergedSecondarySupport, setMergedSecondarySupport] = useState<number | null>(null);
+  const [mergedResistance, setMergedResistance] = useState<number | null>(null);
+  const [mergedSupportDist, setMergedSupportDist] = useState<number | null>(null);
+
   const candidate = useMemo(() => {
     if (strike !== null && expiration) {
       const exact = state.candidates.find(
@@ -69,10 +81,83 @@ export function DetailPage({
     return state.candidates.find((c) => c.ticker === ticker && c.qualified);
   }, [state.candidates, ticker, strike, expiration]);
 
+  // ── Auto-fetch missing technical data ──
+  useEffect(() => {
+    if (!candidate || !state.activeProfile) return;
+
+    const hasFullTech =
+      candidate.trend_classification !== 'Pending' &&
+      candidate.trend_classification !== 'Unavailable' &&
+      candidate.primary_support != null &&
+      candidate.secondary_support != null &&
+      candidate.resistance != null;
+
+    if (hasFullTech) {
+      setTechLoading(false);
+      setTechError(false);
+      return;
+    }
+
+    const cached = getCachedTechnical(ticker);
+    if (cached) {
+      setExtraTech(cached.technical);
+      setMergedTrend(
+        candidate.trend_classification === 'Pending' || candidate.trend_classification === 'Unavailable'
+          ? cached.trend : candidate.trend_classification,
+      );
+      setMergedPrimarySupport(candidate.primary_support ?? cached.primary_support);
+      setMergedSecondarySupport(candidate.secondary_support ?? cached.secondary_support);
+      setMergedResistance(candidate.resistance ?? cached.resistance);
+      const sd = candidate.strike_distance_from_support;
+      if (sd != null) {
+        setMergedSupportDist(sd);
+      } else if (cached.primary_support != null && cached.primary_support > 0) {
+        setMergedSupportDist(parseFloat(((cached.primary_support - candidate.strike) / cached.primary_support * 100).toFixed(1)));
+      } else {
+        setMergedSupportDist(null);
+      }
+      void state.refreshCandidateTechnical(ticker);
+      return;
+    }
+
+    let cancelled = false;
+    setTechLoading(true);
+    setTechError(false);
+
+    (async () => {
+      const ok = await state.refreshCandidateTechnical(ticker);
+      if (cancelled) return;
+      if (ok) {
+        const fresh = getCachedTechnical(ticker);
+        if (fresh) {
+          setExtraTech(fresh.technical);
+          setMergedTrend(
+            candidate.trend_classification === 'Pending' || candidate.trend_classification === 'Unavailable'
+              ? fresh.trend : candidate.trend_classification,
+          );
+          setMergedPrimarySupport(candidate.primary_support ?? fresh.primary_support);
+          setMergedSecondarySupport(candidate.secondary_support ?? fresh.secondary_support);
+          setMergedResistance(candidate.resistance ?? fresh.resistance);
+          const sd = candidate.strike_distance_from_support;
+          if (sd != null) {
+            setMergedSupportDist(sd);
+          } else if (fresh.primary_support != null && fresh.primary_support > 0) {
+            setMergedSupportDist(parseFloat(((fresh.primary_support - candidate.strike) / fresh.primary_support * 100).toFixed(1)));
+          } else {
+            setMergedSupportDist(null);
+          }
+        }
+      } else {
+        setTechError(true);
+      }
+      setTechLoading(false);
+    })();
+
+    return () => { cancelled = true; };
+  }, [candidate, ticker, state.activeProfile, state.refreshCandidateTechnical]);
+
   const btcTable = useMemo(() => {
     if (!candidate || !state.activeProfile) return null;
-    // Use the candidate's scanned BTC values — do NOT recalculate independently.
-    // The server already optimized BTC using the same iterative algorithm.
     if (candidate.suggested_btc > 0 && candidate.has_quotes) {
       return {
         best: {
@@ -103,13 +188,16 @@ export function DetailPage({
     );
   }
 
-  const TrendIcon = trendIcons[candidate.trend_classification] || Minus;
-  const trendColor = trendColors[candidate.trend_classification] || 'neutral';
+  const effectiveTrend = mergedTrend ?? candidate.trend_classification;
+  const effectivePrimarySupport = mergedPrimarySupport ?? candidate.primary_support;
+  const effectiveSecondarySupport = mergedSecondarySupport ?? (candidate.secondary_support ?? null);
+  const effectiveResistance = mergedResistance ?? (candidate.resistance ?? null);
+  const effectiveSupportDist = mergedSupportDist ?? candidate.strike_distance_from_support;
+
+  const TrendIcon = trendIcons[effectiveTrend] || Minus;
+  const trendColor = trendColors[effectiveTrend] || 'neutral';
   const recycleDate = calcRecycleDate(new Date().toISOString().split('T')[0], state.activeProfile?.max_recycle_days || 120);
   const stockPrice = candidate.stock_price;
-  const primarySupport = candidate.primary_support;
-  const secondarySupport = candidate.secondary_support ?? null;
-  const resistance = candidate.resistance ?? null;
 
   const handleAddPosition = async () => {
     if (!candidate || !state.activeProfile) return;
@@ -131,8 +219,8 @@ export function DetailPage({
       collateral: candidate.strike * 100,
       breakeven: candidate.breakeven,
       stock_price: stockPrice ?? 0,
-      trend_classification: candidate.trend_classification,
-      primary_support: primarySupport ?? 0,
+      trend_classification: effectiveTrend,
+      primary_support: effectivePrimarySupport ?? 0,
       support_status: 'Stable',
       position_status: 'Waiting',
       days_open: 0,
@@ -146,16 +234,23 @@ export function DetailPage({
     <div className="space-y-5">
       <BackButton onClick={() => onNavigate('candidates')} />
 
-      {/* Header — uses the candidate row's own data, never a static lookup */}
+      {/* Header */}
       <div className="rounded-xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-900/50 p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold text-slate-100">{ticker}</h1>
-              <Badge variant={trendColor} dot>
-                <TrendIcon className="h-3 w-3 inline mr-0.5" />
-                {displayTrend(candidate.trend_classification)}
-              </Badge>
+              {techLoading ? (
+                <Badge variant="neutral" dot>
+                  <Loader2 className="h-3 w-3 inline mr-0.5 animate-spin" />
+                  Loading
+                </Badge>
+              ) : (
+                <Badge variant={trendColor} dot>
+                  <TrendIcon className="h-3 w-3 inline mr-0.5" />
+                  {displayTrend(effectiveTrend)}
+                </Badge>
+              )}
             </div>
             <p className="text-sm text-slate-400 mt-1">{candidate.company_name}</p>
             <div className="flex items-center gap-6 mt-4">
@@ -170,20 +265,20 @@ export function DetailPage({
               </div>
               <div>
                 <div className="text-xs text-slate-500">Primary Support</div>
-                <div className={`text-xl font-semibold tabular-nums ${primarySupport ? 'text-emerald-400' : 'text-slate-600'}`}>
-                  {displayPrice(primarySupport)}
+                <div className={`text-xl font-semibold tabular-nums ${effectivePrimarySupport ? 'text-emerald-400' : 'text-slate-600'}`}>
+                  {displayPrice(effectivePrimarySupport)}
                 </div>
               </div>
               <div>
                 <div className="text-xs text-slate-500">Secondary Support</div>
-                <div className={`text-xl font-semibold tabular-nums ${secondarySupport ? 'text-emerald-400/70' : 'text-slate-600'}`}>
-                  {displayPrice(secondarySupport)}
+                <div className={`text-xl font-semibold tabular-nums ${effectiveSecondarySupport ? 'text-emerald-400/70' : 'text-slate-600'}`}>
+                  {displayPrice(effectiveSecondarySupport)}
                 </div>
               </div>
               <div>
                 <div className="text-xs text-slate-500">Resistance</div>
-                <div className={`text-xl font-semibold tabular-nums ${resistance ? 'text-amber-400' : 'text-slate-600'}`}>
-                  {displayPrice(resistance)}
+                <div className={`text-xl font-semibold tabular-nums ${effectiveResistance ? 'text-amber-400' : 'text-slate-600'}`}>
+                  {displayPrice(effectiveResistance)}
                 </div>
               </div>
             </div>
@@ -200,10 +295,10 @@ export function DetailPage({
         </div>
       </div>
 
-      {candidate.technical_pending && (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+      {techError && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-400">
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          <span>Technical data is pending for {ticker}. Trend and support/resistance levels could not be calculated. This candidate is not fully validated until technical rules are evaluated.</span>
+          <span>Technical data unavailable for {ticker}. Trend and support/resistance levels could not be refreshed.</span>
         </div>
       )}
 
@@ -224,32 +319,56 @@ export function DetailPage({
         );
       })()}
 
-      {!stockPrice && (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
-          <BarChart3 className="h-4 w-4 shrink-0" />
-          <span>Historical price data was unavailable for {ticker}. Technical indicators and support/resistance levels could not be calculated. Contract discovery and strike/expiration rules were still applied.</span>
-        </div>
-      )}
-
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {/* Technical card — shows data from the scan, or Unavailable */}
+        {/* Technical Analysis card */}
         <Card title="Technical Analysis" action={<BarChart3 className="h-4 w-4 text-slate-500" />}>
           <div className="p-5">
-            {stockPrice ? (
+            {techLoading ? (
+              <div className="py-8 text-center">
+                <Loader2 className="h-6 w-6 mx-auto mb-2 text-sky-400 animate-spin" />
+                <p className="text-sm text-slate-500">Loading technical data...</p>
+              </div>
+            ) : techError ? (
+              <div className="py-8 text-center">
+                <AlertTriangle className="h-6 w-6 mx-auto mb-2 text-amber-400/60" />
+                <p className="text-sm text-slate-500">Technical data unavailable.</p>
+              </div>
+            ) : stockPrice || extraTech ? (
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <MetricIndicator status={
-                    candidate.trend_classification === 'Downtrend' ? 'fail' :
-                    candidate.trend_classification === 'Pending' || candidate.trend_classification === 'Unavailable' || !candidate.trend_classification ? 'warn' : 'pass'
+                    effectiveTrend === 'Downtrend' ? 'fail' :
+                    effectiveTrend === 'Pending' || effectiveTrend === 'Unavailable' || !effectiveTrend ? 'warn' : 'pass'
                   } />
                   <span className="text-xs text-slate-500">Trend Classification</span>
                 </div>
-                <div className="text-sm text-slate-200">{displayTrend(candidate.trend_classification)}</div>
+                <div className="text-sm text-slate-200">{displayTrend(effectiveTrend)}</div>
                 <div className="grid grid-cols-2 gap-x-6 border-t border-slate-800 pt-4">
-                  <StatRow label="Primary Support" value={displayPrice(primarySupport)} />
-                  <StatRow label="Secondary Support" value={displayPrice(secondarySupport)} />
-                  <StatRow label="Resistance" value={displayPrice(resistance)} />
+                  <StatRow label="Primary Support" value={displayPrice(effectivePrimarySupport)} />
+                  <StatRow label="Secondary Support" value={displayPrice(effectiveSecondarySupport)} />
+                  <StatRow label="Resistance" value={displayPrice(effectiveResistance)} />
                 </div>
+                {extraTech && (
+                  <div className="grid grid-cols-2 gap-x-6 border-t border-slate-800 pt-4">
+                    <StatRow label="RSI" value={formatNum(extraTech.rsi, 1)} icon={<Activity className="h-3.5 w-3.5 text-slate-500" />} />
+                    <StatRow label="20 DMA" value={`$${formatNum(extraTech.ma20)}`} />
+                    <StatRow label="50 DMA" value={`$${formatNum(extraTech.ma50)}`} />
+                    <StatRow label="200 DMA" value={`$${formatNum(extraTech.ma200)}`} />
+                    <StatRow
+                      label="MACD"
+                      value={`${formatNum(extraTech.macd, 4)} / ${formatNum(extraTech.macd_signal, 4)}`}
+                      sub={`Hist: ${formatNum(extraTech.macd_histogram, 4)}`}
+                      icon={<BarChart3 className="h-3.5 w-3.5 text-slate-500" />}
+                    />
+                    <StatRow
+                      label="Bollinger Position"
+                      value={extraTech.bb_position}
+                      sub={`U: $${formatNum(extraTech.bb_upper)} · L: $${formatNum(extraTech.bb_lower)}`}
+                      icon={<Crosshair className="h-3.5 w-3.5 text-slate-500" />}
+                    />
+                    <StatRow label="Volume Trend" value={extraTech.volume_trend} />
+                  </div>
+                )}
               </div>
             ) : (
               <div className="py-8 text-center">
@@ -259,14 +378,14 @@ export function DetailPage({
           </div>
         </Card>
 
-        {/* Fundamental card — uses candidate metadata, not static lookup */}
+        {/* Fundamental card */}
         <Card title="Fundamental Snapshot" action={<Building2 className="h-4 w-4 text-slate-500" />}>
           <div className="p-5">
             <div className="grid grid-cols-2 gap-x-6">
               <StatRow label="Company" value={candidate.company_name} />
               <StatRow label="Stock Price" value={displayPrice(stockPrice)} />
-              <StatRow label="Trend" value={displayTrend(candidate.trend_classification)} />
-              <StatRow label="Primary Support" value={displayPrice(primarySupport)} />
+              <StatRow label="Trend" value={displayTrend(effectiveTrend)} />
+              <StatRow label="Primary Support" value={displayPrice(effectivePrimarySupport)} />
             </div>
             <div className="mt-4 border-t border-slate-800 pt-4">
               <p className="text-xs text-slate-500">
@@ -328,14 +447,14 @@ export function DetailPage({
                 />
                 <StatRow
                   label="Strike Dist from Support"
-                  value={candidate.strike_distance_from_support != null ? `${candidate.strike_distance_from_support}%` : 'Unavailable'}
+                  value={effectiveSupportDist != null ? `${effectiveSupportDist}%` : 'Unavailable'}
                 />
                 <StatRow label="Recycle Date (120d)" value={recycleDate} />
               </div>
             </div>
           </Card>
 
-          {/* BTC Optimization — single best qualifying BTC */}
+          {/* BTC Optimization */}
           <Card title="BTC Optimization" action={<Target className="h-4 w-4 text-slate-500" />}>
             <div className="p-3">
               <div className="text-xs text-slate-500 px-2 py-1">
