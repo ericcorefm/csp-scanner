@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
-import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, populateStockPricesFromCandidates } from '@/lib/technicalCache';
+import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
   StrategyProfile,
@@ -207,7 +207,12 @@ export function useAppState() {
     setAnalyzeError(null);
     setAnalyzeResult(null);
     try {
-      const result = await analyzeTicker(sym, activeProfile);
+      const cachedPrice = getCachedStockPrice(sym)?.price ?? null;
+      const candidatePrice =
+        candidates.find((c) => c.ticker.toUpperCase() === sym && c.stock_price != null && c.stock_price > 0)?.stock_price ?? null;
+      const knownStockPrice = cachedPrice ?? candidatePrice;
+
+      const result = await analyzeTicker(sym, activeProfile, knownStockPrice);
       populateFromAnalyzeResponse(result);
       setAnalyzeResult(result);
     } catch (err) {
@@ -217,7 +222,7 @@ export function useAppState() {
     } finally {
       setAnalyzing(false);
     }
-  }, [activeProfile, analyzing]);
+  }, [activeProfile, analyzing, candidates]);
 
   const clearAnalyzeResult = useCallback(() => {
     setAnalyzeResult(null);
