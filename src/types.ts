@@ -152,6 +152,7 @@ export interface CandidateScan {
   premium_capture: number;
   breakeven: number;
   qualified: boolean;
+  technical_pending?: boolean;
   rejection_reasons: string[];
   strategy_profile_id?: string;
   strike_distance_from_stock: number | null;

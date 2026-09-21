@@ -115,6 +115,7 @@ export interface ContractAnalysis {
   premium_capture: number;
   breakeven: number;
   qualified: boolean;
+  technical_pending?: boolean;
   pass_fail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
   has_quotes?: boolean;
   premium_source?: PremiumSource;

@@ -210,14 +210,18 @@ export function CandidatesPage({
                     <tr
                       onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
                       className={`cursor-pointer transition-colors ${
-                        c.qualified ? 'hover:bg-slate-800/40' : 'opacity-60 hover:bg-slate-800/40'
+                        c.qualified && !c.technical_pending ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
-                          {c.qualified && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
+                          {c.qualified && !c.technical_pending && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
+                          {c.qualified && c.technical_pending && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
                           {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
+                          {c.technical_pending && (
+                            <span className="text-[10px] font-medium text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">TECH PENDING</span>
+                          )}
                         </div>
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.stock_price != null ? `${formatNum(c.stock_price)}` : <span className="text-slate-600">Unavailable</span>}</td>

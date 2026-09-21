@@ -50,7 +50,7 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
-const DEBUG_TICKERS = new Set(['BLNK', 'RIVN', 'XPEV', 'RUN', 'DKNG']);
+const DEBUG_TICKERS = new Set(['BLNK', 'RIVN', 'XPEV', 'RUN', 'DKNG', 'SNAP', 'CMCSA']);
 
 function isRetryableStatus(status: number): boolean {
   // Only retry transient network errors (status 0) or 5xx responses
@@ -288,13 +288,10 @@ function trend(bars: HistoryBar[]) {
   return 'Downtrend';
 }
 
-// ── BTC calculation: round DOWN to BTC increment so CROI stays at or above target ──
-// collateral = strike * 100
-// minimumRequiredNetProfit = collateral * (minimumNetCROI / 100)
-// requiredGrossProfit = minimumRequiredNetProfit + roundTripCommission
-// requiredPremiumCapturePerShare = requiredGrossProfit / 100
-// highestBTC = suggestedSTO - requiredPremiumCapturePerShare
-// Round BTC DOWN to the configured BTC increment.
+// ── BTC optimization: iterative approach matching client calcBtcOptimization ──
+// Iterates upward from $0.01 in configured increments, picks the HIGHEST BTC
+// that satisfies both Net CROI >= min AND Premium Capture <= max.
+// This ensures server and client always produce the same BTC value.
 function calcBtc(suggestedSTO: number, strike: number, p: Profile): {
   btc: number | null;
   netProfit: number;
@@ -302,27 +299,36 @@ function calcBtc(suggestedSTO: number, strike: number, p: Profile): {
   pc: number;
 } {
   const collateral = strike * 100;
-  const minimumRequiredNetProfit = collateral * (p.min_net_croi / 100);
-  const requiredGrossProfit = minimumRequiredNetProfit + p.round_trip_commission;
-  const requiredPremiumCapturePerShare = requiredGrossProfit / 100;
-  const highestBtc = suggestedSTO - requiredPremiumCapturePerShare;
-
   const increment = p.allow_penny_increments ? 0.01 : Math.max(0.01, p.btc_increment || 0.05);
+  const minCroi = p.min_net_croi;
+  const maxPc = p.max_premium_capture;
 
-  // Round DOWN to the increment
-  let btc = Math.floor(highestBtc / increment) * increment;
-  btc = parseFloat(btc.toFixed(2));
+  let best: { btc: number; netProfit: number; netCroi: number; pc: number } | null = null;
 
-  // BTC must be > 0 to qualify
-  if (btc <= 0) {
-    return { btc: null, netProfit: 0, netCroi: 0, pc: 0 };
+  let price = 0.01;
+  while (price < suggestedSTO) {
+    const btcPrice = parseFloat(price.toFixed(2));
+    const netProfit = (suggestedSTO - btcPrice) * 100 - p.round_trip_commission;
+    const netCroi = collateral > 0 ? (netProfit / collateral) * 100 : 0;
+    const pc = suggestedSTO > 0 ? ((suggestedSTO - btcPrice) / suggestedSTO) * 100 : 0;
+
+    if (netCroi >= minCroi && pc <= maxPc && btcPrice < suggestedSTO) {
+      // This BTC qualifies — keep the highest one
+      best = { btc: btcPrice, netProfit, netCroi, pc };
+    }
+
+    price += increment;
   }
 
-  const netProfit = (suggestedSTO - btc) * 100 - p.round_trip_commission;
-  const netCroi = collateral > 0 ? (netProfit / collateral) * 100 : 0;
-  const pc = suggestedSTO > 0 ? ((suggestedSTO - btc) / suggestedSTO) * 100 : 0;
-
-  return { btc, netProfit, netCroi, pc };
+  if (best) {
+    return {
+      btc: parseFloat(best.btc.toFixed(2)),
+      netProfit: parseFloat(best.netProfit.toFixed(2)),
+      netCroi: parseFloat(best.netCroi.toFixed(2)),
+      pc: parseFloat(best.pc.toFixed(1)),
+    };
+  }
+  return { btc: null, netProfit: 0, netCroi: 0, pc: 0 };
 }
 
 function spreadPct(bid: number, ask: number) {
@@ -670,6 +676,26 @@ async function scanSymbol(
   r.resistance = resistance;
   r.trendClass = trendClass;
 
+  // Debug logging for technical data
+  if (DEBUG_TICKERS.has(symbol.toUpperCase())) {
+    const supportDistForLog = primarySupport !== null && primarySupport > 0 && stockPrice !== null
+      ? ((primarySupport - stockPrice) / primarySupport * 100).toFixed(1)
+      : 'n/a';
+    console.log(`[TECH] ${symbol} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | bars=${bars.length} | oldestBar=${bars.length > 0 ? bars[0].date : 'n/a'} | latestBar=${bars.length > 0 ? bars.at(-1)!.date : 'n/a'} | primarySupport=${primarySupport} | trend=${trendClass} | supportDist=${supportDistForLog}`);
+  }
+
+  // Debug logging for BTC optimization
+  if (DEBUG_TICKERS.has(symbol.toUpperCase()) && filteredContracts.length > 0) {
+    const sample = filteredContracts[0];
+    const { suggestedSTO: sampleSto } = extractPremium(sample);
+    if (sampleSto !== null && sampleSto > 0) {
+      const sampleStrike = Number(sample?.details?.strike_price || 0);
+      const btcResult = calcBtc(sampleSto, sampleStrike, profile);
+      const inc = profile.allow_penny_increments ? 0.01 : Math.max(0.01, profile.btc_increment || 0.05);
+      console.log(`[BTC] ${symbol} | STO=${sampleSto} | strike=${sampleStrike} | increment=${inc} | allowPenny=${profile.allow_penny_increments} | optimizedBTC=${btcResult.btc} | netCroi=${btcResult.netCroi} | pc=${btcResult.pc}`);
+    }
+  }
+
   if (technicalDataAvailable) {
     const closes = bars.map((b) => b.close);
     const m = macd(closes);
@@ -942,8 +968,9 @@ async function scanSymbol(
     }
 
     const qualified = reasons.length === 0;
+    const technicalPending = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable;
     r.evaluated++;
-    if (qualified) r.qualified++; else r.rejected++;
+    if (qualified && !technicalPending) r.qualified++; else r.rejected++;
 
     const premiumSourceOut = premiumSource as string;
 
@@ -1001,7 +1028,7 @@ async function scanSymbol(
       if (!hasPremium) {
         passFail.push({ rule: 'Premium data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
       }
-      const finalQualified = reasons.length === 0;
+      const finalQualified = reasons.length === 0 && !technicalPending;
 
       analyses.push({
         strike, expiration, dte,
@@ -1017,7 +1044,7 @@ async function scanSymbol(
         net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
-        qualified: finalQualified, pass_fail: passFail,
+        qualified: finalQualified, technical_pending: technicalPending, pass_fail: passFail,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
@@ -1043,6 +1070,7 @@ async function scanSymbol(
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
+        technical_pending: technicalPending,
         strategy_profile_id: profile.id,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,

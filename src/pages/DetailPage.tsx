@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
 import {
   TrendingUp, TrendingDown, Minus, ArrowUpRight, BarChart3, Building2,
-  CandlestickChart, Calculator, Target, Plus, Check, XCircle,
+  CandlestickChart, Calculator, Target, Plus, Check, XCircle, AlertTriangle,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
-import { calcBtcOptimization, calcRecycleDate } from '@/lib/calculations';
+import { calcRecycleDate } from '@/lib/calculations';
 import { Badge, Card, StatRow, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { BackButton } from '@/components/Layout';
 import type { Page } from '@/components/Layout';
@@ -69,13 +69,22 @@ export function DetailPage({
 
   const btcTable = useMemo(() => {
     if (!candidate || !state.activeProfile) return null;
-    return calcBtcOptimization(
-      candidate.mid,
-      candidate.strike,
-      1,
-      state.activeProfile,
-      candidate.open_interest > 0,
-    );
+    // Use the candidate's scanned BTC values — do NOT recalculate independently.
+    // The server already optimized BTC using the same iterative algorithm.
+    if (candidate.suggested_btc > 0 && candidate.has_quotes) {
+      return {
+        best: {
+          btc_price: candidate.suggested_btc,
+          net_profit: candidate.net_profit,
+          net_croi: candidate.net_croi,
+          premium_capture: candidate.premium_capture,
+          status: 'qualifies' as const,
+          is_best: true,
+        },
+        table: [],
+      };
+    }
+    return null;
   }, [candidate, state.activeProfile]);
 
   if (!candidate) {
@@ -188,6 +197,13 @@ export function DetailPage({
           )}
         </div>
       </div>
+
+      {candidate.technical_pending && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span>Technical data is pending for {ticker}. Trend and support/resistance levels could not be calculated. This candidate is not fully validated until technical rules are evaluated.</span>
+        </div>
+      )}
 
       {!stockPrice && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
