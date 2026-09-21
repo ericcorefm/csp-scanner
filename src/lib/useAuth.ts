@@ -20,6 +20,7 @@ export function useAuth() {
       '/reset-password': 'reset-password',
     };
     const initialRoute = routeMap[path] ?? null;
+    let inPasswordRecovery = initialRoute === 'reset-password';
 
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       setSession(s);
@@ -35,7 +36,11 @@ export function useAuth() {
         setAuthLoading(false);
 
         if (event === 'PASSWORD_RECOVERY') {
+          inPasswordRecovery = true;
           setAuthRoute('reset-password');
+        } else if (inPasswordRecovery) {
+          // Stay on reset-password until the user submits a new password,
+          // even if Supabase fires session events with a valid recovery session.
         } else if (event === 'SIGNED_OUT') {
           setAuthRoute('signin');
         } else if (s) {
