@@ -205,6 +205,23 @@ export function DetailPage({
         </div>
       )}
 
+      {candidate.pass_fail && candidate.pass_fail.length > 0 && (() => {
+        let pCount = 0, wCount = 0, fCount = 0;
+        for (const pf of candidate.pass_fail) {
+          if (pf.status === 'pass') pCount++;
+          else if (pf.status === 'fail') fCount++;
+          else wCount++;
+        }
+        return (
+          <div className="flex items-center gap-4 rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-2.5 text-sm">
+            <span className="text-slate-400">Rule Summary:</span>
+            <span className="text-emerald-400 font-medium">Passes: {pCount}</span>
+            <span className="text-amber-400 font-medium">Warnings: {wCount}</span>
+            <span className="text-red-400 font-medium">Fails: {fCount}</span>
+          </div>
+        );
+      })()}
+
       {!stockPrice && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
           <BarChart3 className="h-4 w-4 shrink-0" />

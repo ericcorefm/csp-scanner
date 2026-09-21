@@ -154,6 +154,7 @@ export interface CandidateScan {
   qualified: boolean;
   technical_pending?: boolean;
   rejection_reasons: string[];
+  pass_fail?: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
   strategy_profile_id?: string;
   strike_distance_from_stock: number | null;
   strike_distance_from_support: number | null;

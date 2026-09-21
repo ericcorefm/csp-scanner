@@ -974,8 +974,9 @@ async function scanSymbol(
 
     const premiumSourceOut = premiumSource as string;
 
-    if (analyzeMode) {
-      const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
+    // ── Build pass/fail rule checks for both scan and analyze modes ──
+    const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
+    if (!noFilterMode) {
       if (!isSectionOff(profile, 'order_strike_enabled')) {
         passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
         if (primarySupport !== null && primarySupport > 0) {
@@ -1028,6 +1029,9 @@ async function scanSymbol(
       if (!hasPremium) {
         passFail.push({ rule: 'Premium data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
       }
+    }
+
+    if (analyzeMode) {
       const finalQualified = reasons.length === 0 && !technicalPending;
 
       analyses.push({
@@ -1071,6 +1075,7 @@ async function scanSymbol(
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
         technical_pending: technicalPending,
+        pass_fail: passFail,
         strategy_profile_id: profile.id,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
