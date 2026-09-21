@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, Component, ReactNode } from 'react';
+import { useState, useMemo, useRef, useEffect, Component, ReactNode } from 'react';
 import {
   Search,
   Plus,
@@ -95,15 +95,34 @@ function findClosestMatch(contracts: ContractAnalysis[]): ContractAnalysis | nul
   return nonQualifying[0] || null;
 }
 
-export function AnalyzeTickerPage({ state }: { state: AppState }) {
+export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnalyze }: { state: AppState; autoAnalyzeTicker?: string | null; onConsumeAutoAnalyze?: () => void }) {
   const [ticker, setTicker] = useState('');
   const [filterExpiration, setFilterExpiration] = useState<string>('all');
   const [filterStrike, setFilterStrike] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const tickerInputRef = useRef<HTMLInputElement>(null);
+  const autoAnalyzeConsumed = useRef(false);
   const result = state.analyzeResult;
   const error = state.analyzeError;
   const analyzing = state.analyzing;
+
+  useEffect(() => {
+    if (autoAnalyzeTicker && !autoAnalyzeConsumed.current) {
+      autoAnalyzeConsumed.current = true;
+      setTicker(autoAnalyzeTicker);
+      setFilterExpiration('all');
+      setFilterStrike('all');
+      setFilterStatus('all');
+      state.runAnalyzeTicker(autoAnalyzeTicker);
+      onConsumeAutoAnalyze?.();
+    }
+  }, [autoAnalyzeTicker, state, onConsumeAutoAnalyze]);
+
+  useEffect(() => {
+    if (!autoAnalyzeTicker) {
+      autoAnalyzeConsumed.current = false;
+    }
+  }, [autoAnalyzeTicker]);
 
   const handleAnalyze = () => {
     const sym = ticker.toUpperCase().trim();

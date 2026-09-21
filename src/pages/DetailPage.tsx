@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import {
   TrendingUp, TrendingDown, Minus, ArrowUpRight, BarChart3, Building2,
   CandlestickChart, Calculator, Target, Plus, Check, XCircle, AlertTriangle,
-  Activity, Crosshair, Loader2,
+  Activity, Crosshair, Loader2, Search,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import { calcRecycleDate } from '@/lib/calculations';
@@ -284,13 +284,22 @@ export function DetailPage({
             </div>
           </div>
           {candidate && (
-            <button
-              onClick={handleAddPosition}
-              className="flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 transition-colors"
-            >
-              <Plus className="h-4 w-4" />
-              Open Position
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => onNavigate('analyze', candidate.ticker)}
+                className="flex items-center gap-2 rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800 hover:text-slate-100 transition-colors"
+              >
+                <Search className="h-4 w-4" />
+                Analyze Ticker
+              </button>
+              <button
+                onClick={handleAddPosition}
+                className="flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 transition-colors"
+              >
+                <Plus className="h-4 w-4" />
+                Open Position
+              </button>
+            </div>
           )}
         </div>
       </div>

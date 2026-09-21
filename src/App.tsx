@@ -15,6 +15,7 @@ function App() {
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
   const [selectedExpiration, setSelectedExpiration] = useState<string | null>(null);
+  const [autoAnalyzeTicker, setAutoAnalyzeTicker] = useState<string | null>(null);
   const state = useAppState();
 
   const handleNavigate = (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => {
@@ -23,6 +24,7 @@ function App() {
       setSelectedStrike(contract.strike);
       setSelectedExpiration(contract.expiration);
     }
+    setAutoAnalyzeTicker(page === 'analyze' && ticker ? ticker : null);
     setCurrentPage(page);
   };
 
@@ -54,7 +56,7 @@ function App() {
         <CandidatesPage state={state} onNavigate={handleNavigate} />
       )}
       {currentPage === 'analyze' && (
-        <AnalyzeTickerPage state={state} />
+        <AnalyzeTickerPage state={state} autoAnalyzeTicker={autoAnalyzeTicker} onConsumeAutoAnalyze={() => setAutoAnalyzeTicker(null)} />
       )}
       {currentPage === 'detail' && selectedTicker && (
         <DetailPage
