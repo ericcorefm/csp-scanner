@@ -5,6 +5,7 @@ import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
+import { deriveQualification, type QualificationStatus } from '@/lib/qualification';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -36,8 +37,10 @@ export function CandidatesPage({
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
 
+  const qualificationFor = (c: CandidateScan): QualificationStatus => deriveQualification(c.pass_fail);
+
   const filtered = useMemo(() => {
-    let list = state.candidates.filter((c) => (showRejected ? true : c.qualified));
+    let list = state.candidates.filter((c) => (showRejected ? true : qualificationFor(c) !== 'rejected'));
     list = [...list].sort((a, b) => {
       let aVal = a[sortKey as keyof CandidateScan];
       let bVal = b[sortKey as keyof CandidateScan];
@@ -84,7 +87,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 15;
+  const colCount = 16;
 
   return (
     <div className="space-y-4">
@@ -106,22 +109,36 @@ export function CandidatesPage({
         </div>
       )}
 
-      {state.scanCounts && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-            <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
-            <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
-            <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
-            <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
-            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
-            <ScanCountItem
-              label="Last Scan"
-              value={state.lastScanAt ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '--'}
-              isText
-            />
+      {(() => {
+        const allCandidates = state.candidates;
+        const qualCounts = allCandidates.reduce(
+          (acc, c) => {
+            const q = qualificationFor(c);
+            if (q === 'qualified') acc.qualified++;
+            else if (q === 'pending') acc.pending++;
+            else acc.rejected++;
+            return acc;
+          },
+          { qualified: 0, pending: 0, rejected: 0 },
+        );
+        const lastScanLabel = state.lastScanAt
+          ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+          : '--';
+        const totalContracts = allCandidates.length;
+        const symbolsCount = new Set(allCandidates.map((c) => c.ticker)).size;
+        return (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+              <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts?.symbols_in_universe ?? symbolsCount} />
+              <ScanCountItem label="Contracts Found" value={state.scanCounts?.puts_returned ?? totalContracts} color="text-sky-400" />
+              <ScanCountItem label="Qualified" value={qualCounts.qualified} color="text-emerald-400" />
+              <ScanCountItem label="Pending" value={qualCounts.pending} color="text-amber-400" />
+              <ScanCountItem label="Rejected" value={qualCounts.rejected} color="text-slate-400" />
+              <ScanCountItem label="Last Scan" value={lastScanLabel} isText />
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Scan Mode Selector */}
       <div className="flex flex-wrap items-center gap-4">
@@ -161,8 +178,8 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {filtered.filter((c) => c.qualified).length} qualified
-            {showRejected && ` · ${filtered.filter((c) => !c.qualified).length} rejected`}
+            {filtered.filter((c) => qualificationFor(c) === 'qualified').length} qualified
+            {showRejected && ` · ${filtered.filter((c) => qualificationFor(c) === 'pending').length} pending · ${filtered.filter((c) => qualificationFor(c) === 'rejected').length} rejected`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -196,6 +213,7 @@ export function CandidatesPage({
                 <SortHeader k="iv" label="IV" align="right" />
                 <SortHeader k="volume" label="Volume" align="right" />
                 <SortHeader k="strike_distance_from_support" label="Support Dist %" align="right" />
+                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Qualified</th>
                 <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Action</th>
               </tr>
             </thead>
@@ -214,9 +232,12 @@ export function CandidatesPage({
                     >
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
-                          {c.qualified && !c.technical_pending && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
-                          {c.qualified && c.technical_pending && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
-                          {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
+                          {(() => {
+                            const q = qualificationFor(c);
+                            if (q === 'qualified') return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />;
+                            if (q === 'pending') return <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />;
+                            return <XCircle className="h-3.5 w-3.5 text-red-400" />;
+                          })()}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
@@ -250,6 +271,26 @@ export function CandidatesPage({
                         {c.volume > 0 ? c.volume : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
+                      <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                        {(() => {
+                          const q = qualificationFor(c);
+                          if (q === 'qualified') return (
+                            <span className="inline-flex items-center gap-1 text-emerald-400 text-xs font-medium">
+                              <CheckCircle2 className="h-3.5 w-3.5" /> Yes
+                            </span>
+                          );
+                          if (q === 'pending') return (
+                            <span className="inline-flex items-center gap-1 text-amber-400 text-xs font-medium">
+                              <AlertTriangle className="h-3.5 w-3.5" /> Pending
+                            </span>
+                          );
+                          return (
+                            <span className="inline-flex items-center gap-1 text-red-400 text-xs font-medium">
+                              <XCircle className="h-3.5 w-3.5" /> No
+                            </span>
+                          );
+                        })()}
+                      </td>
                       <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
                         <button
                           onClick={() => setQuoteModalRow(rowKey)}
