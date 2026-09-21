@@ -67,30 +67,53 @@ async function fetchGroupedDailyPrices(
   fmt: (d: Date) => string,
 ): Promise<{ priceMap: Map<string, number>; tradingDate: string | null }> {
   const priceMap = new Map<string, number>();
-  for (let offset = 0; offset < 7; offset++) {
-    const tryDate = new Date(today);
-    tryDate.setDate(tryDate.getDate() - offset);
+
+  // Stocks Basic is end-of-day and limited to 5 stock API calls/minute.
+  // Start with the most recently COMPLETED trading day instead of probing
+  // today/weekends first, which used to burn several calls before finding data.
+  const first = new Date(today);
+  first.setDate(first.getDate() - 1);
+  while (first.getDay() === 0 || first.getDay() === 6) {
+    first.setDate(first.getDate() - 1);
+  }
+
+  // Only walk back through business days. In normal operation the first call
+  // succeeds, so the entire 121-symbol scan consumes one stock API request.
+  for (let businessOffset = 0; businessOffset < 5; businessOffset++) {
+    const tryDate = new Date(first);
+    let remaining = businessOffset;
+    while (remaining > 0) {
+      tryDate.setDate(tryDate.getDate() - 1);
+      if (tryDate.getDay() !== 0 && tryDate.getDay() !== 6) remaining--;
+    }
+
     const dateStr = fmt(tryDate);
     const path = `/v2/aggs/grouped/locale/us/market/stocks/${dateStr}`;
     const result = await massiveFetch(path, apiKey, 'GROUPED', `grouped_daily_${dateStr}`);
-    if (result.ok) {
-      const results = result.data?.results || [];
-      if (results.length > 0) {
-        for (const r of results) {
-          const ticker = String(r.T || r.ticker || '').toUpperCase();
-          const close = Number(r.c || r.close || 0);
-          if (ticker && Number.isFinite(close) && close > 0) {
-            priceMap.set(ticker, close);
-          }
-        }
-        console.log(`[GroupedDaily] Found ${priceMap.size} stock prices for trading date ${dateStr}`);
-        return { priceMap, tradingDate: dateStr };
-      }
-    } else {
+
+    if (!result.ok) {
       console.log(`[GroupedDaily] ${dateStr} failed: HTTP ${result.status}`);
+      // Do not keep spending the 5/minute Basic quota after a rate-limit or auth error.
+      if (result.status === 401 || result.status === 403 || result.status === 429) break;
+      continue;
+    }
+
+    const results = result.data?.results || [];
+    for (const r of results) {
+      const ticker = String(r.T || r.ticker || '').toUpperCase();
+      const close = Number(r.c || r.close || 0);
+      if (ticker && Number.isFinite(close) && close > 0) {
+        priceMap.set(ticker, close);
+      }
+    }
+
+    if (priceMap.size > 0) {
+      console.log(`[GroupedDaily] Found ${priceMap.size} stock prices for completed trading date ${dateStr}`);
+      return { priceMap, tradingDate: dateStr };
     }
   }
-  console.log('[GroupedDaily] No valid grouped daily response found in last 7 days');
+
+  console.log('[GroupedDaily] No completed grouped daily response available');
   return { priceMap, tradingDate: null };
 }
 
@@ -662,6 +685,7 @@ async function getStockSnapshot(
   today: Date,
   fmt: (d: Date) => string,
   bulkStockPrice: number | null,
+  allowLiveHistory = true,
 ): Promise<StockSnapshot> {
   const upper = ticker.toUpperCase();
   const cached = stockCache.get(upper);
@@ -709,7 +733,7 @@ async function getStockSnapshot(
   const start = new Date(today);
   start.setDate(start.getDate() - 548); // ~18 months
 
-  if (needsFresh || bars.length < 60) {
+  if (allowLiveHistory && (needsFresh || bars.length < 60)) {
     const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
     let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
 
@@ -762,6 +786,16 @@ async function getStockSnapshot(
         currentPrice = Number(bars.at(-1)!.close);
         source = 'daily_aggregates';
       }
+    }
+  } else if (!allowLiveHistory && (needsFresh || bars.length < 60)) {
+    // Broad Market Discovery / Scan Universe runs on Stocks Basic.
+    // Never make one stock-history request per symbol; use the grouped close for
+    // Price and any already-cached bars for technicals. Analyze Ticker can fetch
+    // fresh history for a single symbol.
+    historyHttpStatus = bars.length > 0 ? 200 : undefined;
+    if (currentPrice === null && bars.length > 0) {
+      currentPrice = Number(bars.at(-1)!.close);
+      source = 'daily_aggregates';
     }
   } else {
     // Cache is sufficient — use cached bars, no Massive call needed
@@ -824,7 +858,7 @@ async function scanSymbol(
   // Step 1: Stock snapshot via shared function (cached per ticker)
   // For discovery/universe mode, bulkStockPrice from grouped daily is passed in.
   // For analyze mode, bulkStockPrice is null so getStockSnapshot falls back to history.
-  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice);
+  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice, analyzeMode);
   let bars = snapshot.historicalBars;
   let stockPrice: number | null = snapshot.currentPrice;
   r.stockSource = snapshot.source;
@@ -872,17 +906,6 @@ async function scanSymbol(
     console.log(`[TECH] ${symbol} | historyHTTP=${snapshot.historyHttpStatus || 'n/a'} | historyResults=${bars.length} | finalBars=${bars.length} | oldestDate=${bars.length > 0 ? bars[0].date : 'n/a'} | latestDate=${bars.length > 0 ? bars.at(-1)!.date : 'n/a'} | stockPrice=${stockPrice} | primarySupport=${primarySupport} | secondarySupport=${secondarySupport} | resistance=${resistance} | trend=${trendClass} | supportDist=${supportDistForLog} | technicalDataAvailable=${technicalDataAvailable}`);
   }
 
-  // Debug logging for BTC optimization
-  if (DEBUG_TICKERS.has(symbol.toUpperCase()) && filteredContracts.length > 0) {
-    const sample = filteredContracts[0];
-    const { suggestedSTO: sampleSto } = extractPremium(sample);
-    if (sampleSto !== null && sampleSto > 0) {
-      const sampleStrike = Number(sample?.details?.strike_price || 0);
-      const btcResult = calcBtc(sampleSto, sampleStrike, profile);
-      const inc = profile.allow_penny_increments ? 0.01 : Math.max(0.01, profile.btc_increment || 0.05);
-      console.log(`[BTC] ${symbol} | STO=${sampleSto} | strike=${sampleStrike} | increment=${inc} | allowPenny=${profile.allow_penny_increments} | optimizedBTC=${btcResult.btc} | netCroi=${btcResult.netCroi} | pc=${btcResult.pc}`);
-    }
-  }
 
   if (technicalDataAvailable) {
     const closes = bars.map((b) => b.close);
