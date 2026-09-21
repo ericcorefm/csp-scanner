@@ -167,6 +167,18 @@ async function fetchMarketUniverse(limit: number): Promise<{ ticker: string; com
   return shuffled.slice(0, limit);
 }
 
+async function fetchLatestCandidateStockPrice(ticker: string): Promise<number | null> {
+  const upper = ticker.toUpperCase().trim();
+  if (!upper) return null;
+  const rows = await supabaseSelect(
+    'candidate_scans',
+    'stock_price,created_at',
+    `ticker=eq.${encodeURIComponent(upper)}&stock_price=not.is.null&order=created_at.desc&limit=1`,
+  );
+  const value = Number(rows?.[0]?.stock_price);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 // ── Stock history cache: load/save daily OHLCV bars in Supabase ──
 async function loadCachedHistory(ticker: string, maxBars = 250): Promise<HistoryBar[]> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
@@ -611,7 +623,25 @@ async function getStockSnapshot(
 ): Promise<StockSnapshot> {
   const upper = ticker.toUpperCase();
   const cached = stockCache.get(upper);
-  if (cached) return cached;
+  if (cached) {
+    // Edge Function isolates can stay warm across multiple HTTP requests.
+    // Never let an old/empty snapshot poison a later Analyze request.
+    if (bulkStockPrice !== null && Number.isFinite(bulkStockPrice) && bulkStockPrice > 0) {
+      const refreshed: StockSnapshot = {
+        ...cached,
+        currentPrice: bulkStockPrice,
+        source: 'grouped_daily',
+        error: null,
+      };
+      stockCache.set(upper, refreshed);
+      return refreshed;
+    }
+    if (cached.currentPrice !== null || cached.historicalBars.length > 0) {
+      return cached;
+    }
+    // Empty cached snapshot: discard it and try live/persistent fallbacks again.
+    stockCache.delete(upper);
+  }
 
   let currentPrice: number | null = null;
   let source: StockSnapshot['source'] = 'none';
@@ -938,6 +968,21 @@ async function scanSymbol(
     }
   }
 
+  // If price was discovered only after the option snapshot arrived, recalculate
+  // price-dependent technical levels now. Previously these stayed null forever.
+  if (stockPrice !== null && stockPrice > 0 && technicalDataAvailable) {
+    if (primarySupport === null) primarySupport = calcPrimarySupport(bars, stockPrice);
+    if (secondarySupport === null && primarySupport !== null) secondarySupport = calcSecondarySupport(bars, primarySupport);
+    if (resistance === null) resistance = findResistance(bars, stockPrice);
+    r.stockPrice = stockPrice;
+    r.primarySupport = primarySupport;
+    r.secondarySupport = secondarySupport;
+    r.resistance = resistance;
+    r.trendClass = trendClass;
+  } else {
+    r.stockPrice = stockPrice;
+  }
+
   // Debug logging for final price resolution
   if (DEBUG_TICKERS.has(symbol.toUpperCase())) {
     console.log(`[PRICE] ${symbol} | grouped=${bulkStockPrice} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | historyClose=${bars.length > 0 ? bars.at(-1)!.close : null} | optionUnderlying=${optionUnderlyingPrice} | final=${stockPrice} | source=${r.stockSource}`);
@@ -1243,6 +1288,11 @@ serve(async (req) => {
   console.log('market-scan started');
   console.log('MASSIVE_API_KEY exists:', Boolean(Deno.env.get('MASSIVE_API_KEY')));
 
+  // stockCache is intentionally only an intra-request dedupe cache.
+  // Supabase is the persistent cache. Warm Edge Function instances must not
+  // carry null/stale stock snapshots into later Analyze requests.
+  stockCache.clear();
+
   try {
     const apiKey = Deno.env.get('MASSIVE_API_KEY');
     if (!apiKey) return json({ success: false, provider: 'Massive', error: 'MASSIVE_API_KEY is not configured.' });
@@ -1277,11 +1327,30 @@ serve(async (req) => {
 
       console.log(`[Analyze] Analyzing ${ticker}`);
 
-      // Fetch grouped daily price for this ticker — same source as discovery/universe mode.
-      // This ensures analyze mode gets a stock price even if history fetch fails.
-      const { priceMap: analyzePriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
-      const analyzeBulkPrice = analyzePriceMap.get(ticker) ?? null;
-      console.log(`[Analyze] ${ticker} | grouped_daily_price=${analyzeBulkPrice}`);
+      // Reuse a price the client already knows from Today's Candidates whenever possible.
+      // This avoids burning another Stocks Basic API request immediately after a scan.
+      const bodyKnownPrice = Number(body.knownStockPrice);
+      const clientKnownPrice =
+        Number.isFinite(bodyKnownPrice) && bodyKnownPrice > 0 ? bodyKnownPrice : null;
+
+      // Also reuse the latest persisted candidate price if the browser cache is empty.
+      const persistedCandidatePrice =
+        clientKnownPrice === null ? await fetchLatestCandidateStockPrice(ticker) : null;
+
+      let analyzeBulkPrice = clientKnownPrice ?? persistedCandidatePrice;
+      let analyzePriceSource =
+        clientKnownPrice !== null ? 'client_scan_cache'
+        : persistedCandidatePrice !== null ? 'candidate_scans'
+        : 'none';
+
+      // Only spend a grouped-market API call when we still have no usable price.
+      if (analyzeBulkPrice === null) {
+        const { priceMap: analyzePriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+        analyzeBulkPrice = analyzePriceMap.get(ticker) ?? null;
+        if (analyzeBulkPrice !== null) analyzePriceSource = 'grouped_daily';
+      }
+
+      console.log(`[Analyze] ${ticker} | seed_price=${analyzeBulkPrice} | seed_source=${analyzePriceSource}`);
 
       const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, analyzeBulkPrice);
 
