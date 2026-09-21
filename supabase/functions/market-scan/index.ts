@@ -50,6 +50,50 @@ type Profile = {
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
 
+const DEBUG_TICKERS = new Set(['BLNK', 'RIVN', 'XPEV', 'RUN', 'DKNG']);
+
+function isRetryableStatus(status: number): boolean {
+  // Only retry transient network errors (status 0) or 5xx responses
+  return status === 0 || (status >= 500 && status < 600);
+}
+
+// ── Bulk grouped daily prices ──
+// Fetches the latest completed U.S. stock market day in ONE request.
+// Tries today first, walks backwards up to 7 calendar days.
+// Returns a Map<ticker, closePrice>.
+async function fetchGroupedDailyPrices(
+  apiKey: string,
+  today: Date,
+  fmt: (d: Date) => string,
+): Promise<{ priceMap: Map<string, number>; tradingDate: string | null }> {
+  const priceMap = new Map<string, number>();
+  for (let offset = 0; offset < 7; offset++) {
+    const tryDate = new Date(today);
+    tryDate.setDate(tryDate.getDate() - offset);
+    const dateStr = fmt(tryDate);
+    const path = `/v2/aggs/grouped/locale/us/market/stocks/${dateStr}`;
+    const result = await massiveFetch(path, apiKey, 'GROUPED', `grouped_daily_${dateStr}`);
+    if (result.ok) {
+      const results = result.data?.results || [];
+      if (results.length > 0) {
+        for (const r of results) {
+          const ticker = String(r.T || r.ticker || '').toUpperCase();
+          const close = Number(r.c || r.close || 0);
+          if (ticker && Number.isFinite(close) && close > 0) {
+            priceMap.set(ticker, close);
+          }
+        }
+        console.log(`[GroupedDaily] Found ${priceMap.size} stock prices for trading date ${dateStr}`);
+        return { priceMap, tradingDate: dateStr };
+      }
+    } else {
+      console.log(`[GroupedDaily] ${dateStr} failed: HTTP ${result.status}`);
+    }
+  }
+  console.log('[GroupedDaily] No valid grouped daily response found in last 7 days');
+  return { priceMap, tradingDate: null };
+}
+
 type ChainStatus = 'success' | 'no_options' | 'api_error' | 'unauthorized' | 'rate_limited' | 'network_error';
 
 function json(body: unknown, status = 200) {
@@ -398,8 +442,9 @@ type StockSnapshot = {
   ticker: string;
   currentPrice: number | null;
   historicalBars: HistoryBar[];
-  source: 'ticker_snapshot' | 'daily_aggregates' | 'previous_close' | 'underlying_asset' | 'none';
+  source: 'grouped_daily' | 'daily_aggregates' | 'previous_close' | 'underlying_asset' | 'none';
   error: string | null;
+  historyHttpStatus?: number;
 };
 
 // Per-request cache: ticker -> StockSnapshot. Avoids re-fetching history
@@ -441,19 +486,19 @@ type ScanSymbolResult = {
   technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
 };
 
-// ── Shared stock snapshot: fetches history + current price with fallback order ──
-// Fallback order:
-//   1. Single-ticker snapshot endpoint (day.close — latest completed daily close)
-//   2. Daily aggregates (range/1/day — historical OHLCV for technicals)
-//   3. Previous-close endpoint
-//   4. Newest valid cached daily close (from any source that returned bars)
-// Only shows Unavailable if all sources fail. Never uses $0.00.
-// Retries once on failure. Cached per-request.
+// ── Shared stock snapshot: fetches history for technicals only ──
+// For market discovery, the bulk grouped daily price is supplied via bulkStockPrice.
+// This function does NOT call the per-ticker snapshot endpoint.
+// It only fetches historical aggregates for technical indicators (DMAs, RSI, etc).
+// If history fails but a bulk price exists, the price is retained.
+// Only retries on transient network errors (status 0) or 5xx.
+// Cached per-request.
 async function getStockSnapshot(
   ticker: string,
   apiKey: string,
   today: Date,
   fmt: (d: Date) => string,
+  bulkStockPrice: number | null,
 ): Promise<StockSnapshot> {
   const upper = ticker.toUpperCase();
   const cached = stockCache.get(upper);
@@ -466,65 +511,52 @@ async function getStockSnapshot(
   let currentPrice: number | null = null;
   let source: StockSnapshot['source'] = 'none';
   let error: string | null = null;
+  let historyHttpStatus: number | undefined;
 
-  // 1. Single-ticker snapshot — latest completed daily close + prevDay
-  const snapPath = `/v2/snapshot/locale/us/markets/stocks/tickers/${encodeURIComponent(upper)}`;
-  let snapResult = await massiveFetch(snapPath, apiKey, upper, 'stock_ticker_snapshot');
-  if (!snapResult.ok) {
-    snapResult = await massiveFetch(snapPath, apiKey, upper, 'stock_ticker_snapshot_retry');
-  }
-  if (snapResult.ok) {
-    const day = snapResult.data?.ticker?.day;
-    const prevDay = snapResult.data?.ticker?.prevDay;
-    // day.close = latest completed daily close
-    if (day && Number(day.c) > 0) {
-      currentPrice = Number(day.c);
-      source = 'ticker_snapshot';
-    } else if (prevDay && Number(prevDay.c) > 0) {
-      currentPrice = Number(prevDay.c);
-      source = 'ticker_snapshot';
+  // 1. Use bulk grouped daily price as the primary stock price
+  if (bulkStockPrice !== null && bulkStockPrice > 0) {
+    currentPrice = bulkStockPrice;
+    source = 'grouped_daily';
+    if (DEBUG_TICKERS.has(upper)) {
+      console.log(`[PRICE] ${upper} | grouped=${bulkStockPrice} | historyStatus=pending`);
     }
-    // Build a minimal bar from the snapshot day for technical fallback if aggregates fail
-    if (day && Number(day.c) > 0) {
-      const d = day;
-      bars = [{
-        date: d.t ? new Date(d.t).toISOString().slice(0, 10) : fmt(today),
-        open: Number(d.o || d.c || 0), high: Number(d.h || d.c || 0),
-        low: Number(d.l || d.c || 0), close: Number(d.c), volume: Number(d.v || 0),
-      }];
-    }
-  } else {
-    error = `Snapshot HTTP ${snapResult.status}: ${snapResult.body.slice(0, 200)}`;
   }
 
-  // 2. Daily aggregates — historical OHLCV for technical calculations
+  // 2. Daily aggregates — historical OHLCV for technical calculations only
   const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
   let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
-  if (!histResult.ok) {
+  if (!histResult.ok && isRetryableStatus(histResult.status)) {
     histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
   }
+  historyHttpStatus = histResult.ok ? 200 : histResult.status;
+
   if (histResult.ok) {
     const histBars = (histResult.data?.results || []).map((b: any) => ({
       date: new Date(b.t).toISOString().slice(0, 10),
       open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
     })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
     if (histBars.length) {
-      bars = histBars; // Replace snapshot-only bar with full history
-      // If snapshot didn't give a price, use latest aggregate close
+      bars = histBars;
+      // Only use historical close as price fallback if no bulk price yet
       if (currentPrice === null) {
         currentPrice = Number(histBars.at(-1)!.close);
         source = 'daily_aggregates';
       }
     }
-  } else if (!error) {
-    error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+  } else {
+    if (!isRetryableStatus(histResult.status)) {
+      console.log(`[History] ${upper} | HTTP ${histResult.status} — not retryable, using fallback price`);
+    }
+    if (!error) {
+      error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+    }
   }
 
-  // 3. Fallback: previous-close endpoint (if still no price or bars)
-  if (currentPrice === null || bars.length < 20) {
+  // 3. Fallback: previous-close endpoint — only if we still have NO price at all
+  if (currentPrice === null) {
     const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
     let prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
-    if (!prevResult.ok) {
+    if (!prevResult.ok && isRetryableStatus(prevResult.status)) {
       prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close_retry');
     }
     if (prevResult.ok) {
@@ -532,15 +564,14 @@ async function getStockSnapshot(
         date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
         open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
       })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-      if (prevBars.length && currentPrice === null) {
+      if (prevBars.length) {
         currentPrice = Number(prevBars.at(-1)!.close);
         source = 'previous_close';
-      }
-      // Merge any additional bars (won't help 200 DMA but ensures some data)
-      if (prevBars.length && bars.length < 20) {
-        const existingDates = new Set(bars.map((b) => b.date));
-        for (const pb of prevBars) {
-          if (!existingDates.has(pb.date)) bars.push(pb);
+        if (bars.length < 20) {
+          const existingDates = new Set(bars.map((b) => b.date));
+          for (const pb of prevBars) {
+            if (!existingDates.has(pb.date)) bars.push(pb);
+          }
         }
       }
     } else if (!error) {
@@ -548,13 +579,13 @@ async function getStockSnapshot(
     }
   }
 
-  // 4. Final fallback: newest cached valid daily close (already captured above)
+  // 4. Final fallback: newest bar close if price somehow still null
   if (currentPrice === null && bars.length) {
     currentPrice = Number(bars.at(-1)!.close);
     source = source === 'none' ? 'daily_aggregates' : source;
   }
 
-  const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error };
+  const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error, historyHttpStatus };
   stockCache.set(upper, snapshot);
   return snapshot;
 }
@@ -570,6 +601,7 @@ async function scanSymbol(
   fmt: (d: Date) => string,
   verbose: boolean,
   analyzeMode: boolean,
+  bulkStockPrice: number | null = null,
 ): Promise<ScanSymbolResult> {
   const r: ScanSymbolResult = {
     candidates: [],
@@ -581,10 +613,18 @@ async function scanSymbol(
   };
 
   // Step 1: Stock snapshot via shared function (cached per ticker)
-  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt);
+  // For discovery/universe mode, bulkStockPrice from grouped daily is passed in.
+  // For analyze mode, bulkStockPrice is null so getStockSnapshot falls back to history.
+  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice);
   let bars = snapshot.historicalBars;
   let stockPrice: number | null = snapshot.currentPrice;
   r.stockSource = snapshot.source;
+
+  // Debug logging for specific tickers
+  if (DEBUG_TICKERS.has(symbol.toUpperCase())) {
+    const histClose = bars.length > 0 ? bars.at(-1)!.close : null;
+    console.log(`[PRICE] ${symbol} | grouped=${bulkStockPrice} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | historyClose=${histClose} | optionUnderlying=pending | final=${stockPrice} | source=${snapshot.source}`);
+  }
 
   if (snapshot.error && !bars.length) {
     r.historyStatus = 'error';
@@ -727,15 +767,22 @@ async function scanSymbol(
 
   // Final stock-price fallback from the option snapshot's underlying_asset object.
   // This is contract-discovery data, not an invented price.
+  let optionUnderlyingPrice: number | null = null;
   if (stockPrice === null && allRawContracts.length) {
     const underlyingPrice = allRawContracts
       .map((c: any) => Number(c?.underlying_asset?.price || c?.underlying_asset?.value || 0))
       .find((v: number) => Number.isFinite(v) && v > 0) || 0;
     if (underlyingPrice > 0) {
+      optionUnderlyingPrice = underlyingPrice;
       stockPrice = underlyingPrice;
       r.stockPrice = stockPrice;
       r.stockSource = 'underlying_asset';
     }
+  }
+
+  // Debug logging for final price resolution
+  if (DEBUG_TICKERS.has(symbol.toUpperCase())) {
+    console.log(`[PRICE] ${symbol} | grouped=${bulkStockPrice} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | historyClose=${bars.length > 0 ? bars.at(-1)!.close : null} | optionUnderlying=${optionUnderlyingPrice} | final=${stockPrice} | source=${r.stockSource}`);
   }
 
   // Apply deferred underlying-price filters after all real price fallbacks were tried.
@@ -1064,7 +1111,7 @@ serve(async (req) => {
       if (!ticker) return json({ success: false, error: 'Missing ticker for analyze mode' });
 
       console.log(`[Analyze] Analyzing ${ticker}`);
-      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true);
+      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, null);
 
       if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') {
         return json({
@@ -1145,6 +1192,10 @@ serve(async (req) => {
       return json({ success: true, candidates: [], source: 'massive', scanned_at: new Date().toISOString(), scan_mode: scanMode, no_filter_mode: noFilterMode, scan_counts: emptyCounts });
     }
 
+    // ── Bulk stock prices: one grouped daily request for all symbols ──
+    const { priceMap: bulkPriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+    console.log(`[BulkPrices] ${bulkPriceMap.size} stock prices loaded from grouped daily`);
+
     // ── Main scan ──
     const candidates: any[] = [];
     let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
@@ -1164,7 +1215,7 @@ serve(async (req) => {
         batch.map((sym) => {
           const isVerbose = verboseCount < 3;
           if (isVerbose) verboseCount++;
-          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false)
+          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, bulkPriceMap.get(sym.ticker.toUpperCase()) ?? null)
             .catch((err) => {
               console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
               return null;
