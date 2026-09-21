@@ -2,13 +2,16 @@ import { useState } from 'react';
 import { Layout, type Page } from '@/components/Layout';
 import { useAppState } from '@/lib/store';
 import { useAuth } from '@/lib/useAuth';
-import { AuthPage } from '@/components/AuthPage';
+import { SignInPage } from '@/pages/auth/SignInPage';
+import { SignUpPage } from '@/pages/auth/SignUpPage';
+import { ForgotPasswordPage } from '@/pages/auth/ForgotPasswordPage';
+import { ResetPasswordPage } from '@/pages/auth/ResetPasswordPage';
+import { ProfilePage } from '@/pages/ProfilePage';
 import { CandidatesPage } from '@/pages/CandidatesPage';
 import { DetailPage } from '@/pages/DetailPage';
 import { OpenPositionsPage } from '@/pages/OpenPositionsPage';
 import { ClosedPositionsPage } from '@/pages/ClosedPositionsPage';
 import { SettingsPage } from '@/pages/SettingsPage';
-import { AccountPage } from '@/pages/AccountPage';
 import { DailySummaryPage } from '@/pages/DailySummaryPage';
 import { ScanUniversePage } from '@/pages/ScanUniversePage';
 import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
@@ -44,9 +47,29 @@ function App() {
     );
   }
 
-  // Not signed in — show auth page
+  // Auth routes: allow only when not authenticated (or reset-password during recovery)
+  if (auth.authRoute) {
+    // If user is authenticated but authRoute is still set (e.g. recovery), 
+    // only allow reset-password; otherwise clear the route and proceed to app
+    if (auth.user && auth.authRoute !== 'reset-password') {
+      auth.setAuthRoute(null);
+    } else {
+      switch (auth.authRoute) {
+        case 'signin':
+          return <SignInPage auth={auth} />;
+        case 'signup':
+          return <SignUpPage auth={auth} />;
+        case 'forgot-password':
+          return <ForgotPasswordPage auth={auth} />;
+        case 'reset-password':
+          return <ResetPasswordPage auth={auth} />;
+      }
+    }
+  }
+
+  // Not signed in — default to sign in page
   if (!auth.user) {
-    return <AuthPage />;
+    return <SignInPage auth={auth} />;
   }
 
   if (state.loading) {
@@ -94,7 +117,7 @@ function App() {
       {currentPage === 'open' && <OpenPositionsPage state={state} />}
       {currentPage === 'closed' && <ClosedPositionsPage state={state} />}
       {currentPage === 'settings' && <SettingsPage state={state} />}
-      {currentPage === 'account' && <AccountPage auth={auth} />}
+      {currentPage === 'profile' && <ProfilePage auth={auth} />}
       {currentPage === 'summary' && <DailySummaryPage state={state} />}
       {currentPage === 'universe' && <ScanUniversePage state={state} />}
     </Layout>
