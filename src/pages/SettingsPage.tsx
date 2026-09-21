@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Save, RotateCcw, Copy, Plus, Trash2, Check, AlertCircle } from 'lucide-react';
+import { Save, RotateCcw, Copy, Plus, Trash2, Check, AlertCircle, Mail, Lock, KeyRound, Loader2 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { StrategyProfile } from '@/types';
+import type { AuthState } from '@/lib/useAuth';
+import { supabase } from '@/lib/supabase';
 import { Card } from '@/components/ui';
 
 interface FieldDef {
@@ -106,12 +108,38 @@ const NULLABLE_PRICE_KEYS: (keyof StrategyProfile)[] = [
   'maximum_stock_price',
 ];
 
-export function SettingsPage({ state }: { state: AppState }) {
+export function SettingsPage({ state, auth }: { state: AppState; auth: AuthState }) {
   const [profile, setProfile] = useState<StrategyProfile | null>(state.activeProfile);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
+
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [pwdLoading, setPwdLoading] = useState(false);
+  const [pwdSuccess, setPwdSuccess] = useState(false);
+  const [pwdError, setPwdError] = useState<string | null>(null);
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPassword || newPassword !== confirmPassword) return;
+    setPwdLoading(true);
+    setPwdError(null);
+    setPwdSuccess(false);
+    try {
+      const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+      if (updateError) throw updateError;
+      setPwdSuccess(true);
+      setNewPassword('');
+      setConfirmPassword('');
+      setTimeout(() => setPwdSuccess(false), 3000);
+    } catch (err) {
+      setPwdError(err instanceof Error ? err.message : 'Failed to update password.');
+    } finally {
+      setPwdLoading(false);
+    }
+  };
 
   useEffect(() => {
     setProfile(state.activeProfile);
@@ -263,6 +291,74 @@ export function SettingsPage({ state }: { state: AppState }) {
 
   return (
     <div className="space-y-5">
+      {/* Account */}
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-slate-200 mb-4">Account</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Email</label>
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1 max-w-sm">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                <input
+                  type="email"
+                  value={auth.user?.email ?? ''}
+                  readOnly
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/60 pl-10 pr-3 py-2.5 text-sm text-slate-300 cursor-not-allowed"
+                />
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={handleChangePassword} className="space-y-3">
+            <label className="block text-xs text-slate-500">Change Password</label>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="relative flex-1 max-w-sm">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => { setNewPassword(e.target.value); setPwdError(null); setPwdSuccess(false); }}
+                  placeholder="New password"
+                  minLength={6}
+                  required
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 pl-10 pr-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500/50"
+                />
+              </div>
+              <div className="relative flex-1 max-w-sm">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => { setConfirmPassword(e.target.value); setPwdError(null); setPwdSuccess(false); }}
+                  placeholder="Confirm new password"
+                  minLength={6}
+                  required
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 pl-10 pr-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500/50"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={pwdLoading || !newPassword || newPassword !== confirmPassword}
+                className="flex items-center justify-center gap-2 rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60 transition-colors whitespace-nowrap"
+              >
+                {pwdLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
+                {pwdLoading ? 'Updating...' : 'Update Password'}
+              </button>
+            </div>
+            {newPassword && confirmPassword && newPassword !== confirmPassword && (
+              <p className="text-xs text-red-400">Passwords do not match.</p>
+            )}
+            {pwdError && <p className="text-xs text-red-400">{pwdError}</p>}
+            {pwdSuccess && (
+              <p className="flex items-center gap-1.5 text-xs text-emerald-400">
+                <Check className="h-3.5 w-3.5" /> Password updated successfully.
+              </p>
+            )}
+          </form>
+        </div>
+      </Card>
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-slate-100">Settings</h1>

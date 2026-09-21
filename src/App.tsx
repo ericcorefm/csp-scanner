@@ -92,7 +92,7 @@ function App() {
       )}
       {currentPage === 'open' && <OpenPositionsPage state={state} />}
       {currentPage === 'closed' && <ClosedPositionsPage state={state} />}
-      {currentPage === 'settings' && <SettingsPage state={state} />}
+      {currentPage === 'settings' && <SettingsPage state={state} auth={auth} />}
       {currentPage === 'summary' && <DailySummaryPage state={state} />}
       {currentPage === 'universe' && <ScanUniversePage state={state} />}
     </Layout>
