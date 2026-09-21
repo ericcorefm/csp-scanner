@@ -373,7 +373,11 @@ export function CandidatesPage({
         {filtered.length === 0 && (
           <div className="py-12 text-center text-slate-500">
             <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
-            <p className="text-sm">No candidates found. Try adjusting your strategy rules in Settings.</p>
+            <p className="text-sm">
+              {state.scanCounts && state.scanCounts.symbols_with_chains === 0
+                ? 'No option contracts were returned for the saved tickers.'
+                : 'No contracts qualified under the current strategy rules.'}
+            </p>
           </div>
         )}
       </div>

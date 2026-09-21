@@ -231,9 +231,31 @@ export function useAppState() {
 
   const runScan = useCallback(async () => {
     if (!activeProfile || scanning || !positionsLoaded) return;
-    if (scanMode === 'universe' && scanUniverse.length === 0) {
-      setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers, or switch to Market Discovery.');
-      return;
+
+    // Reload enabled Scan Universe tickers fresh from the database instead of
+    // relying on potentially stale React state.
+    let universeSymbols: string[] = scanUniverse;
+    if (scanMode === 'universe') {
+      try {
+        const { data: freshData, error: freshError } = await supabase
+          .from('scan_universe')
+          .select('symbol,enabled')
+          .order('symbol');
+        if (!freshError && freshData) {
+          universeSymbols = (freshData as ScanUniverseEntry[])
+            .filter((e) => e.enabled)
+            .map((e) => e.symbol.toUpperCase().trim())
+            .filter(Boolean);
+          setScanUniverse(universeSymbols);
+          setScanUniverseEntries((freshData as ScanUniverseEntry[]));
+        }
+      } catch {
+        // fall back to stale state
+      }
+      if (universeSymbols.length === 0) {
+        setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers, or switch to Market Discovery.');
+        return;
+      }
     }
 
     setScanning(true);
@@ -245,7 +267,12 @@ export function useAppState() {
       let scannedAt = new Date().toISOString();
 
       try {
-        const live = await scanCandidatesLive(activeProfile, openTickers, scanMode);
+        const live = await scanCandidatesLive(
+          activeProfile,
+          openTickers,
+          scanMode,
+          scanMode === 'universe' ? universeSymbols : undefined,
+        );
         results = live.candidates;
         scannedAt = live.scanned_at || scannedAt;
         setScanCounts(live.scan_counts || null);

@@ -807,24 +807,9 @@ async function scanSymbol(
   const technicalDataAvailable = bars.length >= 60;
   r.technicalDataAvailable = technicalDataAvailable;
 
-  // Stock price filter (if Order & Strike section enabled). If even the previous
-  // close is unavailable, defer this filter until an underlying price can be read
-  // from the option-chain snapshot.
-  // This filters the underlying stock price, independent of put strike price.
-  // A $71 stock with max put strike $25 is still allowed — stock price and
-  // strike price are separate filters.
-  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
-      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} < minimum ${profile.minimum_stock_price}, skipping symbol`);
-      r.chainStatus = 'no_options';
-      return r;
-    }
-    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
-      if (verbose) console.log(`[VERBOSE] ${symbol} | stock price ${stockPrice} > maximum ${profile.maximum_stock_price}, skipping symbol`);
-      r.chainStatus = 'no_options';
-      return r;
-    }
-  }
+  // Stock price filter is NOT applied here as a symbol-level early return.
+  // It is applied as a contract-level rejection reason after option chains are
+  // retrieved, so that "With Option Chains" reflects actual chain availability.
 
   let primarySupport: number | null = technicalDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
   let secondarySupport: number | null = technicalDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
@@ -988,17 +973,9 @@ async function scanSymbol(
     console.log(`[PRICE] ${symbol} | grouped=${bulkStockPrice} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | historyClose=${bars.length > 0 ? bars.at(-1)!.close : null} | optionUnderlying=${optionUnderlyingPrice} | final=${stockPrice} | source=${r.stockSource}`);
   }
 
-  // Apply deferred underlying-price filters after all real price fallbacks were tried.
-  if (stockPrice !== null && stockPrice > 0 && !noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
-    if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
-      r.chainStatus = 'no_options';
-      return r;
-    }
-    if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
-      r.chainStatus = 'no_options';
-      return r;
-    }
-  }
+  // Stock-price filter is applied at the contract level (as a rejection reason)
+  // rather than aborting the whole symbol, so option chain availability is
+  // reported accurately in scan counts.
 
   if (chainError) {
     if (chainError.status === 401 || chainError.status === 403) r.chainStatus = 'unauthorized';
@@ -1100,6 +1077,16 @@ async function scanSymbol(
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         if (oi < profile.min_target_oi) reasons.push('OI too low');
         if (volume < 10) reasons.push('Insufficient liquidity');
+      }
+      // Stock-price filter applied at contract level (not as a symbol-level abort)
+      // so that option chain availability is accurately reflected in scan counts.
+      if (stockPrice !== null && stockPrice > 0 && !isSectionOff(profile, 'order_strike_enabled')) {
+        if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+          if (!reasons.includes('Stock price below minimum')) reasons.push('Stock price below minimum');
+        }
+        if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+          if (!reasons.includes('Stock price above maximum')) reasons.push('Stock price above maximum');
+        }
       }
     }
 
@@ -1419,8 +1406,17 @@ serve(async (req) => {
     // ── DISCOVERY / UNIVERSE MODE ──
     let symbolList: { ticker: string; company_name: string | null }[];
     if (scanMode === 'universe') {
-      symbolList = await fetchScanUniverse();
-      console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols`);
+      // Use client-supplied symbols if provided; otherwise load from database.
+      const clientSymbols: string[] = Array.isArray(body.symbols)
+        ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean)
+        : [];
+      if (clientSymbols.length > 0) {
+        symbolList = clientSymbols.map((t) => ({ ticker: t, company_name: null }));
+        console.log(`[UNIVERSE SCAN REQUEST] mode=universe, symbols=${JSON.stringify(clientSymbols)}`);
+      } else {
+        symbolList = await fetchScanUniverse();
+        console.log(`[ScanMode=universe] Loaded ${symbolList.length} enabled symbols from database`);
+      }
     } else {
       symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
       console.log(`[ScanMode=discovery] Loaded ${symbolList.length} optionable symbols (cap ${MAX_DISCOVERY_SYMBOLS})`);
