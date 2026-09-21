@@ -220,6 +220,13 @@ export function Layout({ children, currentPage, onNavigate, state, auth }: Layou
                       Profile
                     </button>
                     <button
+                      onClick={() => handleNav('universe')}
+                      className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-700/50 transition-colors"
+                    >
+                      <Globe className="h-4 w-4 text-slate-400" />
+                      Scan Universe
+                    </button>
+                    <button
                       onClick={() => handleNav('settings')}
                       className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-700/50 transition-colors"
                     >
