@@ -39,7 +39,7 @@ function computeRuleStatus(passFail?: { rule: string; pass: boolean; status: 'pa
   }
   let overall: RuleStatusInfo['overall'] = 'passes';
   if (failCount > 0) overall = 'fails';
-  else if (warningCount > 0) overall = 'warning';
+  else if (warningCount > 0 && passCount <= warningCount) overall = 'warning';
   return { passCount, warningCount, failCount, overall };
 }
 
