@@ -162,12 +162,20 @@ export function useAppState() {
     }
   }, []);
 
-  const addToScanUniverse = useCallback(async (symbol: string) => {
+  const addToScanUniverse = useCallback(async (symbol: string, options?: { company_name?: string | null; source?: string }) => {
     const sym = symbol.toUpperCase().trim();
     if (!sym) return;
     const { error } = await supabase
       .from('scan_universe')
-      .insert({ symbol: sym, source: 'manual', enabled: true });
+      .upsert(
+        {
+          symbol: sym,
+          enabled: true,
+          source: options?.source ?? 'manual',
+          ...(options?.company_name ? { company_name: options.company_name } : {}),
+        },
+        { onConflict: 'symbol' },
+      );
     if (error && error.code !== '23505') throw error;
     await loadScanUniverse();
   }, [loadScanUniverse]);
