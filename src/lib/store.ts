@@ -223,7 +223,21 @@ export function useAppState() {
   }, [loadScanUniverse]);
 
   const clearScanUniverse = useCallback(async () => {
-    await supabase.from('scan_universe').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    const { error } = await supabase
+      .from('scan_universe')
+      .delete()
+      .not('id', 'is', null);
+    if (error) {
+      console.error('[clearScanUniverse] Supabase error:', {
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+        code: error.code,
+      });
+      throw error;
+    }
+    setScanUniverse([]);
+    setScanUniverseEntries([]);
     await loadScanUniverse();
   }, [loadScanUniverse]);
 

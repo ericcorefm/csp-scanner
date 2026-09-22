@@ -63,7 +63,7 @@ export function ScanUniversePage({ state }: { state: AppState }) {
     try {
       await state.clearScanUniverse();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to clear universe');
+      setError('Could not clear Scan Universe.');
     } finally {
       setActionLoading(false);
     }
