@@ -5,6 +5,7 @@ import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
+import { selectBestContractPerTicker } from '@/lib/bestContract';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -36,8 +37,13 @@ export function CandidatesPage({
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
 
+  const displayCandidates = useMemo(
+    () => selectBestContractPerTicker(state.candidates),
+    [state.candidates],
+  );
+
   const filtered = useMemo(() => {
-    let list = state.candidates.filter((c) => (showRejected ? true : c.qualified));
+    let list = displayCandidates.filter((c) => (showRejected ? true : c.qualified));
     list = [...list].sort((a, b) => {
       let aVal = a[sortKey as keyof CandidateScan];
       let bVal = b[sortKey as keyof CandidateScan];
@@ -50,7 +56,7 @@ export function CandidatesPage({
       return 0;
     });
     return list;
-  }, [state.candidates, showRejected, sortKey, sortDir]);
+  }, [displayCandidates, showRejected, sortKey, sortDir]);
 
   const quoteModalCandidate = useMemo(() => {
     if (!quoteModalRow) return null;
@@ -167,8 +173,8 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {filtered.filter((c) => c.qualified).length} qualified
-            {showRejected && ` · ${filtered.filter((c) => !c.qualified).length} rejected`}
+            {new Set(filtered.filter((c) => c.qualified).map((c) => c.ticker)).size} qualified
+            {showRejected && ` · ${new Set(filtered.filter((c) => !c.qualified).map((c) => c.ticker)).size} rejected`}
           </p>
         </div>
         <div className="flex items-center gap-3">

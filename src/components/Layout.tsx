@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type { AppState } from '@/lib/store';
 import { Badge } from '@/components/ui';
+import { selectBestContractPerTicker } from '@/lib/bestContract';
 
 export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
 
@@ -39,8 +40,9 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
 export function Layout({ children, currentPage, onNavigate, state }: LayoutProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  const qualifiedCount = state.candidates.filter((c) => c.qualified).length;
-  const rejectedCount = state.candidates.filter((c) => !c.qualified).length;
+  const bestPerTicker = selectBestContractPerTicker(state.candidates);
+  const qualifiedCount = new Set(bestPerTicker.filter((c) => c.qualified).map((c) => c.ticker)).size;
+  const rejectedCount = new Set(bestPerTicker.filter((c) => !c.qualified).map((c) => c.ticker)).size;
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
 
   const handleNav = (page: Page) => {
