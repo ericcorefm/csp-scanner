@@ -1,5 +1,5 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
@@ -29,6 +29,7 @@ export function CandidatesPage({
   onNavigate: (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => void;
 }) {
   const [showRejected, setShowRejected] = useState(false);
+  const [showPending, setShowPending] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -43,7 +44,12 @@ export function CandidatesPage({
   );
 
   const filtered = useMemo(() => {
-    let list = displayCandidates.filter((c) => (showRejected ? true : c.qualified));
+    let list = displayCandidates.filter((c) => {
+      if (c.qualified && !c.technical_pending) return true;
+      if (showPending && c.technical_pending) return true;
+      if (showRejected && !c.qualified) return true;
+      return false;
+    });
     list = [...list].sort((a, b) => {
       let aVal = a[sortKey as keyof CandidateScan];
       let bVal = b[sortKey as keyof CandidateScan];
@@ -56,7 +62,7 @@ export function CandidatesPage({
       return 0;
     });
     return list;
-  }, [displayCandidates, showRejected, sortKey, sortDir]);
+  }, [displayCandidates, showRejected, showPending, sortKey, sortDir]);
 
   const quoteModalCandidate = useMemo(() => {
     if (!quoteModalRow) return null;
@@ -90,7 +96,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 15;
+  const colCount = 16;
 
   return (
     <div className="space-y-4">
@@ -124,8 +130,8 @@ export function CandidatesPage({
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
             <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
-            <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
-            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
+            <ScanCountItem label="Candidate Tickers" value={new Set(displayCandidates.filter((c) => c.qualified && !c.technical_pending).map((c) => c.ticker)).size} color="text-emerald-400" />
+            <ScanCountItem label="Contracts Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
             <ScanCountItem
               label="Last Scan"
               value={state.lastScanAt ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '--'}
@@ -173,11 +179,21 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {new Set(filtered.filter((c) => c.qualified).map((c) => c.ticker)).size} qualified
+            {new Set(filtered.filter((c) => c.qualified && !c.technical_pending).map((c) => c.ticker)).size} qualified
+            {showPending && ` · ${new Set(filtered.filter((c) => c.technical_pending).map((c) => c.ticker)).size} pending`}
             {showRejected && ` · ${new Set(filtered.filter((c) => !c.qualified).map((c) => c.ticker)).size} rejected`}
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer">
+            <button
+              onClick={() => setShowPending(!showPending)}
+              className={`relative h-5 w-9 rounded-full transition-colors ${showPending ? 'bg-sky-500' : 'bg-slate-700'}`}
+            >
+              <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${showPending ? 'left-4' : 'left-0.5'}`} />
+            </button>
+            Show Pending
+          </label>
           <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer">
             <button
               onClick={() => setShowRejected(!showRejected)}
@@ -196,6 +212,7 @@ export function CandidatesPage({
             <thead className="border-b border-slate-800 bg-slate-900/80">
               <tr>
                 <SortHeader k="ticker" label="Ticker" />
+                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Scan Universe</th>
                 <SortHeader k="stock_price" label="Price" align="right" />
                 <SortHeader k="strike" label="Strike" align="right" />
                 <SortHeader k="expiration" label="Expiration" />
@@ -231,6 +248,19 @@ export function CandidatesPage({
                           {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
+                      </td>
+                      <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                        {state.scanUniverse.includes(c.ticker) ? (
+                          <Check className="h-4 w-4 text-emerald-400 mx-auto" />
+                        ) : (
+                          <button
+                            onClick={() => state.addToScanUniverse(c.ticker, { company_name: c.company_name || null, source: 'scan' })}
+                            className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-300 hover:bg-sky-500/20 transition-colors"
+                            title="Add to Scan Universe"
+                          >
+                            <Plus className="h-3 w-3" />
+                          </button>
+                        )}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{c.stock_price != null ? `${formatNum(c.stock_price)}` : <span className="text-slate-600">Unavailable</span>}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-200 font-medium">${formatNum(c.strike)}</td>

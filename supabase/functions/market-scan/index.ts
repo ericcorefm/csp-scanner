@@ -1781,32 +1781,11 @@ serve(async (req) => {
       }
     }
 
-    // ── Apply max strikes per ticker limit ──
-    // Each ticker's candidates are ranked (qualified first, then by spread, then CROI)
-    // and only the top N are kept. This ensures diversity across tickers in the results.
-    const maxStrikesPerTicker = Math.max(1, Math.floor(profile.max_strikes_per_ticker || 1));
-    if (maxStrikesPerTicker < candidates.length) {
-      const byTicker = new Map<string, any[]>();
-      for (const c of candidates) {
-        const arr = byTicker.get(c.ticker) || [];
-        arr.push(c);
-        byTicker.set(c.ticker, arr);
-      }
-      const limited: any[] = [];
-      for (const [, arr] of byTicker) {
-        arr.sort((a, b) =>
-          Number(b.qualified) - Number(a.qualified) ||
-          a.spread_pct - b.spread_pct ||
-          b.net_croi - a.net_croi
-        );
-        limited.push(...arr.slice(0, maxStrikesPerTicker));
-      }
-      candidates.length = 0;
-      candidates.push(...limited);
-    }
-
+    // Send all contracts to the client. The client's selectBestContractPerTicker
+    // helper handles one-contract-per-ticker display logic. Keeping all contracts
+    // preserves them for Analyze Ticker / Candidate Detail views.
     candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
-    const capped = candidates.slice(0, MAX_CANDIDATES * 2);
+    const capped = candidates.slice(0, MAX_CANDIDATES * 10);
 
     const scan_counts = {
       symbols_in_universe: symbolList.length,
