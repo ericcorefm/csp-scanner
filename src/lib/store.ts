@@ -99,6 +99,8 @@ export function useAppState() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeTickerResponse | null>(null);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [settingsChanged, setSettingsChanged] = useState(false);
+  const [savedCandidatesLoaded, setSavedCandidatesLoaded] = useState(false);
 
   const loadProfiles = useCallback(async () => {
     const { data, error } = await supabase
@@ -298,6 +300,7 @@ export function useAppState() {
 
     setScanning(true);
     setScanError(null);
+    setSettingsChanged(false);
 
     try {
       const openTickers = openPositions.map((p) => p.ticker.toUpperCase());
@@ -425,12 +428,46 @@ export function useAppState() {
     }
   }, [activeProfile, loadOpenPositions, loadClosedPositions, loadDailyResults, loadAlerts, loadScanUniverse]);
 
-  useEffect(() => {
-    if (activeProfile && positionsLoaded && candidates.length === 0 && !scanning) {
-      void runScan();
+  // On startup or profile change: load the most recent saved scan results from
+  // Supabase. Do NOT automatically call market-scan — the user must click Rescan.
+  const loadSavedCandidates = useCallback(async (profileId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('candidate_scans')
+        .select('*')
+        .eq('strategy_profile_id', profileId)
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (error) throw error;
+      const rows = (data || []) as CandidateScan[];
+      if (rows.length > 0) {
+        // Deduplicate by ticker-strike-expiration, keeping the newest
+        const seen = new Set<string>();
+        const deduped: CandidateScan[] = [];
+        for (const row of rows) {
+          const key = `${row.ticker}-${row.strike}-${row.expiration}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(row);
+          }
+        }
+        setCandidates(deduped);
+        setLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+        setScanSource(null);
+        populateStockPricesFromCandidates(deduped);
+      }
+      setSavedCandidatesLoaded(true);
+    } catch (err) {
+      console.error('loadSavedCandidates failed:', err);
+      setSavedCandidatesLoaded(true);
     }
-    // Wait for open positions so the first scan can correctly exclude existing contracts.
-    // Market Discovery mode does not require scan_universe to be loaded.
+  }, []);
+
+  useEffect(() => {
+    if (activeProfile && positionsLoaded) {
+      void loadSavedCandidates(activeProfile.id);
+      setSettingsChanged(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProfile?.id, positionsLoaded]);
 
@@ -452,6 +489,7 @@ export function useAppState() {
       return [...prev, updated];
     });
     setActiveProfile(updated);
+    setSettingsChanged(true);
     return updated;
   }, []);
 
@@ -568,6 +606,7 @@ export function useAppState() {
     if (error) throw error;
     const updated = data as StrategyProfile;
     setActiveProfile(updated);
+    setSettingsChanged(true);
     setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
     return updated;
   }, [activeProfile]);
@@ -610,7 +649,10 @@ export function useAppState() {
   return {
     profiles,
     activeProfile,
-    setActiveProfile,
+    setActiveProfile: (p: StrategyProfile | null) => {
+      setActiveProfile(p);
+      setSettingsChanged(true);
+    },
     candidates,
     updateCandidateWithQuote,
     openPositions,
@@ -643,7 +685,10 @@ export function useAppState() {
     restoreDefaultUniverse,
     reloadScanUniverse: loadScanUniverse,
     scanMode,
-    setScanMode,
+    setScanMode: (m: ScanMode) => {
+      setScanMode(m);
+      setSettingsChanged(true);
+    },
     scanCounts,
     noFilterMode,
     rawSample,
@@ -653,6 +698,8 @@ export function useAppState() {
     runAnalyzeTicker,
     clearAnalyzeResult,
     refreshCandidateTechnical,
+    settingsChanged,
+    savedCandidatesLoaded,
   };
 }
 

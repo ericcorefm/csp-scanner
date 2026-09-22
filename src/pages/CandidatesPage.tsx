@@ -88,6 +88,12 @@ export function CandidatesPage({
 
   return (
     <div className="space-y-4">
+      {state.settingsChanged && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-300">
+          Settings changed — click Rescan to apply.
+        </div>
+      )}
+
       {state.scanError && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm text-red-400">
           {state.scanError}
@@ -293,12 +299,22 @@ export function CandidatesPage({
         </div>
         {filtered.length === 0 && (
           <div className="py-12 text-center text-slate-500">
-            <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
-            <p className="text-sm">
-              {state.scanCounts && state.scanCounts.symbols_with_chains === 0
-                ? 'No option contracts were returned for the saved tickers.'
-                : 'No contracts qualified under the current strategy rules.'}
-            </p>
+            {state.savedCandidatesLoaded && state.candidates.length === 0 && !state.scanCounts ? (
+              <>
+                <Telescope className="h-8 w-8 mx-auto mb-2 text-slate-600" />
+                <p className="text-sm font-medium text-slate-400">No scan results yet.</p>
+                <p className="text-xs text-slate-500 mt-1">Click Rescan to run your first scan.</p>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
+                <p className="text-sm">
+                  {state.scanCounts && state.scanCounts.symbols_with_chains === 0
+                    ? 'No option contracts were returned for the saved tickers.'
+                    : 'No contracts qualified under the current strategy rules.'}
+                </p>
+              </>
+            )}
           </div>
         )}
       </div>
