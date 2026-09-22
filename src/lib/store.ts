@@ -362,10 +362,7 @@ export function useAppState() {
         return;
       }
 
-      const filteredResults = activeProfile
-        ? reapplyHardFilters(results, activeProfile)
-        : results;
-      setCandidates(filteredResults);
+      setCandidates(results);
       setScanSource('live');
       setLastScanAt(scannedAt);
       populateStockPricesFromCandidates(results);
