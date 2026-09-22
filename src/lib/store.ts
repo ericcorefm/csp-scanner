@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
+import { reapplyHardFilters } from '@/lib/bestContract';
 import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates, fetchCachedBars, type TechFetchError } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
@@ -361,7 +362,10 @@ export function useAppState() {
         return;
       }
 
-      setCandidates(results);
+      const filteredResults = activeProfile
+        ? reapplyHardFilters(results, activeProfile)
+        : results;
+      setCandidates(filteredResults);
       setScanSource('live');
       setLastScanAt(scannedAt);
       populateStockPricesFromCandidates(results);
@@ -484,7 +488,10 @@ export function useAppState() {
             deduped.push(row);
           }
         }
-        setCandidates(deduped);
+        const filtered = activeProfile
+          ? reapplyHardFilters(deduped, activeProfile)
+          : deduped;
+        setCandidates(filtered);
         setLastScanAt(rows[0].scan_date || rows[0].created_at || null);
         setScanSource(null);
         populateStockPricesFromCandidates(deduped);

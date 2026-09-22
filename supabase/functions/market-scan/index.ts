@@ -1260,12 +1260,27 @@ async function scanSymbol(
       }
       // Stock-price filter applied at contract level (not as a symbol-level abort)
       // so that option chain availability is accurately reflected in scan counts.
-      if (stockPrice !== null && stockPrice > 0 && !isSectionOff(profile, 'order_strike_enabled')) {
-        if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
-          if (!reasons.includes('Stock price below minimum')) reasons.push('Stock price below minimum');
-        }
-        if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
-          if (!reasons.includes('Stock price above maximum')) reasons.push('Stock price above maximum');
+      if (!isSectionOff(profile, 'order_strike_enabled')) {
+        if (stockPrice !== null && stockPrice > 0) {
+          if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+            if (!reasons.includes('Stock price below minimum')) reasons.push('Stock price below minimum');
+          }
+          if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+            if (!reasons.includes('Stock price above maximum')) reasons.push('Stock price above maximum');
+          }
+        } else {
+          // Stock price unavailable and a stock-price rule is active — cannot evaluate.
+          // Mark as pending so it does NOT appear as qualified in Today's Candidates.
+          if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined) {
+            if (!reasons.includes('Stock price unavailable — minimum stock price rule not evaluated')) {
+              reasons.push('Stock price unavailable — minimum stock price rule not evaluated');
+            }
+          }
+          if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined) {
+            if (!reasons.includes('Stock price unavailable — maximum stock price rule not evaluated')) {
+              reasons.push('Stock price unavailable — maximum stock price rule not evaluated');
+            }
+          }
         }
       }
     }
@@ -1579,6 +1594,7 @@ serve(async (req) => {
       profile.exclude_existing_positions === false;
 
     console.log(`mode=${mode}, scanMode=${scanMode}, noFilterMode=${noFilterMode}`);
+    console.log(`[PROFILE] min_stock_price=${profile.minimum_stock_price}, max_stock_price=${profile.maximum_stock_price}, max_strike=${profile.max_strike}, min_dte=${profile.min_dte}, max_strikes_per_ticker=${profile.max_strikes_per_ticker}, order_strike_enabled=${profile.order_strike_enabled}, expiration_enabled=${profile.expiration_enabled}`);
 
     // ── ANALYZE MODE: deep-analyze a single ticker ──
     if (mode === 'analyze') {
