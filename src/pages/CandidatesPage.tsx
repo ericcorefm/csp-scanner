@@ -100,7 +100,14 @@ export function CandidatesPage({
 
   return (
     <div className="space-y-4">
-      {state.settingsChanged && (
+      {state.scanning && (
+        <div className="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-2.5 text-sm text-sky-300">
+          <div className="h-3.5 w-3.5 border-2 border-sky-400 border-t-transparent rounded-full animate-spin" />
+          Refreshing market data...
+        </div>
+      )}
+
+      {state.settingsChanged && !state.scanning && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-300">
           Settings changed — click Rescan to apply.
         </div>

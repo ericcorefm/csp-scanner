@@ -355,9 +355,9 @@ export function useAppState() {
         setRawSample(live.raw_sample || null);
       } catch (liveError) {
         const message = liveError instanceof Error
-          ? `Massive API error: ${liveError.message}`
-          : 'Massive API error: scan failed.';
-        setScanError(message);
+          ? liveError.message
+          : 'scan failed.';
+        setScanError(`Rescan failed — showing previous results. (${message})`);
         setScanning(false);
         return;
       }
@@ -430,7 +430,7 @@ export function useAppState() {
       }
     } catch (err) {
       const message = formatDataError(err);
-      setScanError(`Rescan failed: ${message}`);
+      setScanError(`Rescan failed — showing previous results. (${message})`);
       console.error('Rescan failed:', err);
     } finally {
       setScanning(false);
