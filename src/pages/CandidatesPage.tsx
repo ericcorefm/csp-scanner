@@ -1,9 +1,10 @@
-import { useState, useMemo, Fragment, useCallback } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe } from 'lucide-react';
+import { useState, useMemo, Fragment } from 'react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
+import { EnterQuoteModal } from '@/components/EnterQuoteModal';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -30,55 +31,10 @@ export function CandidatesPage({
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [universeError, setUniverseError] = useState<string | null>(null);
+  const [quoteModalRow, setQuoteModalRow] = useState<string | null>(null);
 
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
-
-  // Build a lookup of tickers already in scan_universe (enabled or disabled)
-  const universeLookup = useMemo(() => {
-    const map = new Map<string, boolean>();
-    for (const entry of state.scanUniverseEntries) {
-      map.set(entry.symbol.toUpperCase(), entry.enabled);
-    }
-    return map;
-  }, [state.scanUniverseEntries]);
-
-  // Track optimistic checkbox state per ticker so we can roll back on error
-  const [optimisticUniverse, setOptimisticUniverse] = useState<Map<string, boolean>>(new Map());
-
-  const handleUniverseToggle = useCallback(async (ticker: string, companyName: string | null) => {
-    const upper = ticker.toUpperCase().trim();
-    const currentlyEnabled = optimisticUniverse.get(upper) ?? universeLookup.get(upper) ?? false;
-    const nextEnabled = !currentlyEnabled;
-
-    // Optimistic update
-    setOptimisticUniverse((prev) => {
-      const next = new Map(prev);
-      next.set(upper, nextEnabled);
-      return next;
-    });
-    setUniverseError(null);
-
-    try {
-      if (universeLookup.has(upper)) {
-        // Ticker already exists in scan_universe — toggle enabled
-        await state.toggleScanUniverseEnabled(upper, nextEnabled);
-      } else {
-        // New ticker — add to scan_universe
-        await state.addToScanUniverse(upper, { company_name: companyName ?? null, source: 'today_candidates' });
-      }
-    } catch (err) {
-      // Roll back optimistic state
-      setOptimisticUniverse((prev) => {
-        const next = new Map(prev);
-        next.set(upper, currentlyEnabled);
-        return next;
-      });
-      setUniverseError('Could not update Scan Universe.');
-      console.error('[UniverseToggle] Supabase error:', err);
-    }
-  }, [state, universeLookup, optimisticUniverse]);
 
   const filtered = useMemo(() => {
     let list = state.candidates.filter((c) => (showRejected ? true : c.qualified));
@@ -95,6 +51,11 @@ export function CandidatesPage({
     });
     return list;
   }, [state.candidates, showRejected, sortKey, sortDir]);
+
+  const quoteModalCandidate = useMemo(() => {
+    if (!quoteModalRow) return null;
+    return state.candidates.find((c) => `${c.ticker}-${c.strike}-${c.expiration}` === quoteModalRow) || null;
+  }, [quoteModalRow, state.candidates]);
 
   const handleSort = (key: keyof CandidateScan) => {
     if (sortKey === key) {
@@ -119,6 +80,10 @@ export function CandidatesPage({
     </th>
   );
 
+  const handleQuoteSubmit = (rowKey: string, updates: Partial<CandidateScan>) => {
+    state.updateCandidateWithQuote(rowKey, updates);
+  };
+
   const colCount = 15;
 
   return (
@@ -132,12 +97,6 @@ export function CandidatesPage({
       {state.scanError && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm text-red-400">
           {state.scanError}
-        </div>
-      )}
-
-      {universeError && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm text-red-400">
-          {universeError}
         </div>
       )}
 
@@ -243,7 +202,7 @@ export function CandidatesPage({
                 <SortHeader k="iv" label="IV" align="right" />
                 <SortHeader k="volume" label="Volume" align="right" />
                 <SortHeader k="strike_distance_from_support" label="Support Dist %" align="right" />
-                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Scan Universe</th>
+                <th className="px-3 py-2.5 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
@@ -298,14 +257,13 @@ export function CandidatesPage({
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}</td>
                       <td className="px-3 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
-                        <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={optimisticUniverse.get(c.ticker.toUpperCase()) ?? universeLookup.get(c.ticker.toUpperCase()) ?? false}
-                            onChange={() => void handleUniverseToggle(c.ticker, c.company_name ?? null)}
-                            className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-sky-500 focus:ring-sky-500/40 cursor-pointer"
-                          />
-                        </label>
+                        <button
+                          onClick={() => setQuoteModalRow(rowKey)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/20 transition-colors"
+                        >
+                          <Pencil className="h-3 w-3" />
+                          Enter Quote
+                        </button>
                       </td>
                     </tr>
                     {showRejected && !c.qualified && isExpanded && (
@@ -373,6 +331,14 @@ export function CandidatesPage({
         </div>
       </div>
 
+      {quoteModalCandidate && state.activeProfile && (
+        <EnterQuoteModal
+          candidate={quoteModalCandidate}
+          profile={state.activeProfile}
+          onClose={() => setQuoteModalRow(null)}
+          onSubmit={(updates) => handleQuoteSubmit(quoteModalRow!, updates)}
+        />
+      )}
     </div>
   );
 }
