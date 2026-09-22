@@ -212,7 +212,26 @@ export function useAppState() {
 
   const removeFromScanUniverse = useCallback(async (symbol: string) => {
     const sym = symbol.toUpperCase().trim();
-    await supabase.from('scan_universe').delete().eq('symbol', sym);
+    const { error } = await supabase.from('scan_universe').delete().eq('symbol', sym);
+    if (error) throw error;
+    await loadScanUniverse();
+  }, [loadScanUniverse]);
+
+  const removeFromScanUniverseBulk = useCallback(async (symbols: string[]) => {
+    const clean = symbols.map((s) => s.toUpperCase().trim()).filter(Boolean);
+    if (clean.length === 0) return;
+    const { error } = await supabase.from('scan_universe').delete().in('symbol', clean);
+    if (error) {
+      console.error('[removeFromScanUniverseBulk] Supabase error:', {
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+        code: error.code,
+      });
+      throw error;
+    }
+    setScanUniverse((prev) => prev.filter((s) => !clean.includes(s)));
+    setScanUniverseEntries((prev) => prev.filter((e) => !clean.includes(e.symbol)));
     await loadScanUniverse();
   }, [loadScanUniverse]);
 
@@ -694,6 +713,7 @@ export function useAppState() {
     scanUniverseEntries,
     addToScanUniverse,
     removeFromScanUniverse,
+    removeFromScanUniverseBulk,
     toggleScanUniverseEnabled,
     clearScanUniverse,
     restoreDefaultUniverse,
