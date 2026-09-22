@@ -79,6 +79,15 @@ export function useAppState() {
   const [profiles, setProfiles] = useState<StrategyProfile[]>([]);
   const [activeProfile, setActiveProfile] = useState<StrategyProfile | null>(null);
   const [candidates, setCandidates] = useState<CandidateScan[]>([]);
+
+  // Per-mode result caches so switching tabs restores the last results for that mode
+  // without overwriting the other mode's results or triggering a rescan.
+  const [discoveryCandidates, setDiscoveryCandidates] = useState<CandidateScan[]>([]);
+  const [universeCandidates, setUniverseCandidates] = useState<CandidateScan[]>([]);
+  const [discoveryScanCounts, setDiscoveryScanCounts] = useState<ScanCounts | null>(null);
+  const [universeScanCounts, setUniverseScanCounts] = useState<ScanCounts | null>(null);
+  const [discoveryLastScanAt, setDiscoveryLastScanAt] = useState<string | null>(null);
+  const [universeLastScanAt, setUniverseLastScanAt] = useState<string | null>(null);
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
   const [closedPositions, setClosedPositions] = useState<ClosedPosition[]>([]);
   const [dailyResults, setDailyResults] = useState<DailyScanResult[]>([]);
@@ -357,12 +366,23 @@ export function useAppState() {
         const message = liveError instanceof Error
           ? liveError.message
           : 'scan failed.';
-        setScanError(`Rescan failed — showing previous results. (${message})`);
+        const modeLabel = scanMode === 'universe' ? 'universe results' : 'results';
+        setScanError(`Rescan failed — showing previous ${modeLabel}. (${message})`);
         setScanning(false);
         return;
       }
 
       setCandidates(results);
+      // Cache results per mode so switching tabs restores them
+      if (scanMode === 'discovery') {
+        setDiscoveryCandidates(results);
+        setDiscoveryScanCounts(live.scan_counts || null);
+        setDiscoveryLastScanAt(scannedAt);
+      } else {
+        setUniverseCandidates(results);
+        setUniverseScanCounts(live.scan_counts || null);
+        setUniverseLastScanAt(scannedAt);
+      }
       setScanSource('live');
       setLastScanAt(scannedAt);
       populateStockPricesFromCandidates(results);
@@ -430,7 +450,8 @@ export function useAppState() {
       }
     } catch (err) {
       const message = formatDataError(err);
-      setScanError(`Rescan failed — showing previous results. (${message})`);
+      const modeLabel = scanMode === 'universe' ? 'universe results' : 'results';
+      setScanError(`Rescan failed — showing previous ${modeLabel}. (${message})`);
       console.error('Rescan failed:', err);
     } finally {
       setScanning(false);
@@ -489,6 +510,14 @@ export function useAppState() {
           ? reapplyHardFilters(deduped, activeProfile)
           : deduped;
         setCandidates(filtered);
+        // Seed the current mode's cache so a tab switch restores these results
+        if (scanMode === 'discovery') {
+          setDiscoveryCandidates(filtered);
+          setDiscoveryLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+        } else {
+          setUniverseCandidates(filtered);
+          setUniverseLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+        }
         setLastScanAt(rows[0].scan_date || rows[0].created_at || null);
         setScanSource(null);
         populateStockPricesFromCandidates(deduped);
@@ -724,6 +753,26 @@ export function useAppState() {
     reloadScanUniverse: loadScanUniverse,
     scanMode,
     setScanMode: (m: ScanMode) => {
+      // Before switching away, cache the current mode's results
+      if (scanMode === 'discovery') {
+        setDiscoveryCandidates(candidates);
+        setDiscoveryScanCounts(scanCounts);
+        setDiscoveryLastScanAt(lastScanAt);
+      } else {
+        setUniverseCandidates(candidates);
+        setUniverseScanCounts(scanCounts);
+        setUniverseLastScanAt(lastScanAt);
+      }
+      // Restore the incoming mode's cached results (may be empty on first switch)
+      if (m === 'discovery') {
+        setCandidates(discoveryCandidates);
+        setScanCounts(discoveryScanCounts);
+        setLastScanAt(discoveryLastScanAt);
+      } else {
+        setCandidates(universeCandidates);
+        setScanCounts(universeScanCounts);
+        setLastScanAt(universeLastScanAt);
+      }
       setScanMode(m);
       setSettingsChanged(true);
     },
