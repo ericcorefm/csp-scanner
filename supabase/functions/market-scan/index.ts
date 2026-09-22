@@ -65,8 +65,9 @@ async function fetchGroupedDailyPrices(
   apiKey: string,
   today: Date,
   fmt: (d: Date) => string,
-): Promise<{ priceMap: Map<string, number>; tradingDate: string | null }> {
+): Promise<{ priceMap: Map<string, number>; tradingDate: string | null; httpStatus: number | null }> {
   const priceMap = new Map<string, number>();
+  let lastHttpStatus: number | null = null;
 
   // Stocks Basic is end-of-day and limited to 5 stock API calls/minute.
   // Start with the most recently COMPLETED trading day instead of probing
@@ -90,6 +91,7 @@ async function fetchGroupedDailyPrices(
     const dateStr = fmt(tryDate);
     const path = `/v2/aggs/grouped/locale/us/market/stocks/${dateStr}`;
     const result = await massiveFetch(path, apiKey, 'GROUPED', `grouped_daily_${dateStr}`);
+    lastHttpStatus = result.ok ? 200 : result.status;
 
     if (!result.ok) {
       console.log(`[GroupedDaily] ${dateStr} failed: HTTP ${result.status}`);
@@ -109,12 +111,14 @@ async function fetchGroupedDailyPrices(
 
     if (priceMap.size > 0) {
       console.log(`[GroupedDaily] Found ${priceMap.size} stock prices for completed trading date ${dateStr}`);
-      return { priceMap, tradingDate: dateStr };
+      console.log(`[PRICE BULK] HTTP ${lastHttpStatus} | trading_date=${dateStr} | prices_returned=${priceMap.size}`);
+      return { priceMap, tradingDate: dateStr, httpStatus: lastHttpStatus };
     }
   }
 
+  console.log(`[PRICE BULK] HTTP ${lastHttpStatus} | trading_date=null | prices_returned=0 — GROUPED FAILED, using fallbacks`);
   console.log('[GroupedDaily] No completed grouped daily response available');
-  return { priceMap, tradingDate: null };
+  return { priceMap, tradingDate: null, httpStatus: lastHttpStatus };
 }
 
 type ChainStatus = 'success' | 'no_options' | 'api_error' | 'unauthorized' | 'rate_limited' | 'network_error';
@@ -201,6 +205,81 @@ async function fetchLatestCandidateStockPrice(ticker: string): Promise<number | 
   );
   const value = Number(rows?.[0]?.stock_price);
   return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+// ── Persistent stock price cache (stock_price_cache table) ──
+// Last-valid-price cache. Never overwrites a valid price with null/0.
+async function loadCachedStockPrice(ticker: string): Promise<{ price: number; source: string; tradeDate: string | null } | null> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey) return null;
+  const url = `${supabaseUrl}/rest/v1/stock_price_cache?select=price,source,trade_date&ticker=eq.${encodeURIComponent(ticker)}&limit=1`;
+  try {
+    const resp = await fetch(url, { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' } });
+    if (!resp.ok) return null;
+    const rows = await resp.json() as any[];
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const price = Number(rows[0].price);
+    if (!Number.isFinite(price) || price <= 0) return null;
+    return { price, source: String(rows[0].source || 'cached'), tradeDate: rows[0].trade_date ? String(rows[0].trade_date) : null };
+  } catch {
+    return null;
+  }
+}
+
+async function saveCachedStockPrice(ticker: string, price: number, source: string, tradeDate: string | null): Promise<void> {
+ const upper = ticker.toUpperCase().trim();
+ if (!upper || !Number.isFinite(price) || price <= 0) return;
+ const supabaseUrl = Deno.env.get('SUPABASE_URL');
+ const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+ if (!supabaseUrl || !serviceKey) return;
+ try {
+   const resp = await fetch(`${supabaseUrl}/rest/v1/stock_price_cache`, {
+     method: 'POST',
+     headers: {
+       apikey: serviceKey,
+       Authorization: `Bearer ${serviceKey}`,
+       'Content-Type': 'application/json',
+       Prefer: 'resolution=merge-duplicates',
+     },
+     body: JSON.stringify({ ticker: upper, price, source, trade_date: tradeDate, updated_at: new Date().toISOString() }),
+   });
+   if (!resp.ok) {
+     console.log(`[PriceCache] ${upper} | save failed: HTTP ${resp.status}`);
+   }
+ } catch (e) {
+   console.log(`[PriceCache] ${upper} | save error: ${e instanceof Error ? e.message : String(e)}`);
+ }
+}
+
+// ── Bulk load cached stock prices for all scan tickers ──
+async function bulkLoadCachedStockPrices(tickers: string[]): Promise<Map<string, { price: number; source: string; tradeDate: string | null }>> {
+  const result = new Map<string, { price: number; source: string; tradeDate: string | null }>();
+  if (tickers.length === 0) return result;
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey) return result;
+  // Fetch in chunks of 50 to avoid URL length limits
+  for (let i = 0; i < tickers.length; i += 50) {
+    const chunk = tickers.slice(i, i + 50);
+    const filter = `ticker=in.(${chunk.map((t) => encodeURIComponent(t)).join(',')})`;
+    const url = `${supabaseUrl}/rest/v1/stock_price_cache?select=ticker,price,source,trade_date&${filter}`;
+    try {
+      const resp = await fetch(url, { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' } });
+      if (!resp.ok) continue;
+      const rows = await resp.json() as any[];
+      if (!Array.isArray(rows)) continue;
+      for (const row of rows) {
+        const price = Number(row.price);
+        if (Number.isFinite(price) && price > 0) {
+          result.set(String(row.ticker).toUpperCase(), { price, source: String(row.source || 'cached'), tradeDate: row.trade_date ? String(row.trade_date) : null });
+        }
+      }
+    } catch {
+      // continue to next chunk
+    }
+  }
+  return result;
 }
 
 // ── Stock history cache: load/save daily OHLCV bars in Supabase ──
@@ -1003,19 +1082,52 @@ async function scanSymbol(
   const contracts = allRawContracts.filter((c: any) => c?.details?.contract_type === 'put');
   r.putsReturned = contracts.length;
 
-  // Final stock-price fallback from the option snapshot's underlying_asset object.
-  // This is contract-discovery data, not an invented price.
+  // ── Tier 2: Option snapshot underlying_asset price ──
+  // Always extract it (even if we already have a price) so we can save it to cache.
   let optionUnderlyingPrice: number | null = null;
-  if (stockPrice === null && allRawContracts.length) {
+  if (allRawContracts.length) {
     const underlyingPrice = allRawContracts
       .map((c: any) => Number(c?.underlying_asset?.price || c?.underlying_asset?.value || 0))
       .find((v: number) => Number.isFinite(v) && v > 0) || 0;
     if (underlyingPrice > 0) {
       optionUnderlyingPrice = underlyingPrice;
-      stockPrice = underlyingPrice;
-      r.stockPrice = stockPrice;
-      r.stockSource = 'underlying_asset';
+      // Save to persistent price cache
+      void saveCachedStockPrice(symbol, underlyingPrice, 'option_snapshot', fmt(today));
+      // Use as stock price if we don't already have one from grouped daily
+      if (stockPrice === null || stockPrice <= 0) {
+        stockPrice = underlyingPrice;
+        r.stockPrice = stockPrice;
+        r.stockSource = 'underlying_asset';
+      }
     }
+  }
+
+  // ── Tier 3: Latest historical daily close (already handled in getStockSnapshot) ──
+  // (bars.at(-1).close is used as a fallback inside getStockSnapshot)
+
+  // ── Tier 4: Persistent stock_price_cache ──
+  if ((stockPrice === null || stockPrice <= 0) && !analyzeMode) {
+    const cached = await loadCachedStockPrice(symbol);
+    if (cached && cached.price > 0) {
+      stockPrice = cached.price;
+      r.stockPrice = stockPrice;
+      r.stockSource = 'cached';
+    }
+  }
+
+  // ── Tier 5: Latest non-null candidate_scans.stock_price ──
+  if (stockPrice === null || stockPrice <= 0) {
+    const prevScanPrice = await fetchLatestCandidateStockPrice(symbol);
+    if (prevScanPrice !== null && prevScanPrice > 0) {
+      stockPrice = prevScanPrice;
+      r.stockPrice = stockPrice;
+      r.stockSource = 'previous_scan';
+    }
+  }
+
+  // ── Save any valid final price to persistent cache (if not already saved from tier 2) ──
+  if (stockPrice !== null && stockPrice > 0 && r.stockSource !== 'underlying_asset') {
+    void saveCachedStockPrice(symbol, stockPrice, r.stockSource || 'unknown', fmt(today));
   }
 
   // If price was discovered only after the option snapshot arrived, recalculate
@@ -1033,9 +1145,12 @@ async function scanSymbol(
     r.stockPrice = stockPrice;
   }
 
-  // Debug logging for final price resolution
-  if (DEBUG_TICKERS.has(symbol.toUpperCase())) {
-    console.log(`[PRICE] ${symbol} | grouped=${bulkStockPrice} | historyStatus=${snapshot.historyHttpStatus || 'n/a'} | historyClose=${bars.length > 0 ? bars.at(-1)!.close : null} | optionUnderlying=${optionUnderlyingPrice} | final=${stockPrice} | source=${r.stockSource}`);
+  // Per-ticker price resolution logging for debug tickers
+  const PRICE_LOG_TICKERS = new Set(['PLUG', 'LCID', 'NIO', 'MARA', 'NVAX', 'SOFI', 'RIOT', 'RGTI', 'CIFR']);
+  if (DEBUG_TICKERS.has(symbol.toUpperCase()) || PRICE_LOG_TICKERS.has(symbol.toUpperCase())) {
+    const cachedPrice = await loadCachedStockPrice(symbol);
+    const candidateScanPrice = await fetchLatestCandidateStockPrice(symbol);
+    console.log(`[PRICE RESOLUTION] ${symbol} | grouped=${bulkStockPrice} | optionUnderlying=${optionUnderlyingPrice} | cached=${cachedPrice?.price ?? null} | previousScan=${candidateScanPrice} | final=${stockPrice} | source=${r.stockSource}`);
   }
 
   // Stock-price filter is applied at the contract level (as a rejection reason)
@@ -1594,8 +1709,19 @@ serve(async (req) => {
     }
 
     // ── Bulk stock prices: one grouped daily request for all symbols ──
-    const { priceMap: bulkPriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
-    console.log(`[BulkPrices] ${bulkPriceMap.size} stock prices loaded from grouped daily`);
+    // If grouped daily fails (429/401/403/empty), bulkLoadCachedStockPrices
+    // provides the last valid price for each ticker so they don't go Unavailable.
+    const allTickers = symbolList.map((s) => s.ticker.toUpperCase());
+    const { priceMap: bulkPriceMap, httpStatus: bulkHttpStatus } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+    console.log(`[BulkPrices] ${bulkPriceMap.size} stock prices loaded from grouped daily (HTTP ${bulkHttpStatus})`);
+
+    // If grouped daily returned nothing, bulk-load persistent price cache as fallback
+    let bulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
+    if (bulkPriceMap.size === 0) {
+      console.log(`[BulkPrices] Grouped daily returned 0 prices — loading persistent price cache for ${allTickers.length} tickers`);
+      bulkCachedPrices = await bulkLoadCachedStockPrices(allTickers);
+      console.log(`[BulkPrices] Persistent cache returned ${bulkCachedPrices.size} prices`);
+    }
 
     // ── Main scan ──
     const candidates: any[] = [];
@@ -1616,7 +1742,10 @@ serve(async (req) => {
         batch.map((sym) => {
           const isVerbose = verboseCount < 3;
           if (isVerbose) verboseCount++;
-          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, bulkPriceMap.get(sym.ticker.toUpperCase()) ?? null)
+          const upper = sym.ticker.toUpperCase();
+          // Use grouped daily price; if missing, use persistent cache fallback
+          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
+          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, price)
             .catch((err) => {
               console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
               return null;
