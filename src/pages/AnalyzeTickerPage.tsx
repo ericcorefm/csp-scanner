@@ -20,6 +20,7 @@ import type { ScanUniverseEntry } from '@/types';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 import { getCachedStockPrice } from '@/lib/technicalCache';
 import { TradingViewChart } from '@/components/TradingViewChart';
+import { calcProbabilities } from '@/lib/probability';
 
 function getFailedRules(c: ContractAnalysis): string[] {
   if (!c.pass_fail || c.pass_fail.length === 0) return [];
@@ -312,6 +313,8 @@ function AnalyzeResult({
   closestMatch: ContractAnalysis | null;
   displayStockPrice: number | null;
 }) {
+  const maxCycleDays = state.activeProfile?.max_recycle_days ?? 120;
+
   const dataWarnings: string[] = [];
   if (displayStockPrice == null) dataWarnings.push('Stock price unavailable.');
   if (!result.technical) dataWarnings.push('Technical history unavailable.');
@@ -587,8 +590,23 @@ function AnalyzeResult({
                 <table className="w-full text-sm">
                   <thead className="border-b border-slate-800 bg-slate-900/40">
                     <tr>
-                      {['Strike', 'DTE', 'Premium', 'BTC', 'CROI', 'PC', 'OI', 'IV', 'Vol', 'Support Dist', 'Status', 'Reason'].map((h) => (
-                        <th key={h} className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">{h}</th>
+                      {[
+                        { label: 'Strike' },
+                        { label: 'DTE' },
+                        { label: 'Premium' },
+                        { label: 'BTC' },
+                        { label: 'CROI' },
+                        { label: 'PC' },
+                        { label: 'Exp POP', title: 'Probability of expiring worthless (stock > strike at expiration)' },
+                        { label: `BTC Prob (${maxCycleDays}d)`, title: `Probability the put premium reaches the BTC target within min(${maxCycleDays}, DTE) days` },
+                        { label: 'OI' },
+                        { label: 'IV' },
+                        { label: 'Vol' },
+                        { label: 'Support Dist' },
+                        { label: 'Status' },
+                        { label: 'Reason' },
+                      ].map((h) => (
+                        <th key={h.label} className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap" title={h.title}>{h.label}</th>
                       ))}
                     </tr>
                   </thead>
@@ -599,6 +617,15 @@ function AnalyzeResult({
                       const status = contractStatus(c);
                       const reason = reasonSummary(c);
                       const isClosest = closestMatch?.strike === c.strike && closestMatch?.expiration === c.expiration;
+                      const probs = calcProbabilities({
+                        stockPrice: displayStockPrice ?? 0,
+                        strike: c.strike,
+                        dte: c.dte,
+                        iv: c.iv,
+                        suggestedSto: c.suggested_sto,
+                        suggestedBtc: c.suggested_btc,
+                        maxCycleDays,
+                      });
                       return (
                         <tr key={i} className={`hover:bg-slate-800/40 transition-colors ${isClosest ? 'ring-1 ring-inset ring-amber-500/20' : ''}`}>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-200 font-medium">
@@ -621,6 +648,12 @@ function AnalyzeResult({
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-300">
                             {noQuote ? DASH : formatPct(c.premium_capture)}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-300">
+                            {noQuote || probs.expirationPop == null ? DASH : `${formatPct(probs.expirationPop * 100)}`}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-300">
+                            {noQuote || probs.btcTargetProb == null ? DASH : `${formatPct(probs.btcTargetProb * 100)}`}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-400">
                             {c.open_interest > 0 ? c.open_interest.toLocaleString() : DASH}
