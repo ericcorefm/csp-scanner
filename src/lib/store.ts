@@ -111,6 +111,7 @@ export function useAppState() {
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [settingsChanged, setSettingsChanged] = useState(false);
   const [savedCandidatesLoaded, setSavedCandidatesLoaded] = useState(false);
+  const [hasUniverseScanned, setHasUniverseScanned] = useState(false);
 
   const loadProfiles = useCallback(async () => {
     const { data, error } = await supabase
@@ -335,6 +336,7 @@ export function useAppState() {
       } catch {
         // fall back to stale state
       }
+      console.log(`[UNIVERSE RESCAN] symbols=${JSON.stringify(universeSymbols)}`);
       if (universeSymbols.length === 0) {
         setScanError('No active tickers in Scan Universe. Go to Scan Universe to add or enable tickers, or switch to Market Discovery.');
         return;
@@ -349,19 +351,22 @@ export function useAppState() {
       const openTickers = openPositions.map((p) => p.ticker.toUpperCase());
       let results: CandidateScan[];
       let scannedAt = new Date().toISOString();
+      let newCounts: ScanCounts | null = null;
+      let newNoFilter = false;
+      let newRawSample: unknown = null;
 
       try {
-        const live = await scanCandidatesLive(
+        const liveResponse = await scanCandidatesLive(
           activeProfile,
           openTickers,
           scanMode,
           scanMode === 'universe' ? universeSymbols : undefined,
         );
-        results = live.candidates;
-        scannedAt = live.scanned_at || scannedAt;
-        setScanCounts(live.scan_counts || null);
-        setNoFilterMode(live.no_filter_mode || false);
-        setRawSample(live.raw_sample || null);
+        results = liveResponse.candidates;
+        scannedAt = liveResponse.scanned_at || scannedAt;
+        newCounts = liveResponse.scan_counts || null;
+        newNoFilter = liveResponse.no_filter_mode || false;
+        newRawSample = liveResponse.raw_sample || null;
       } catch (liveError) {
         const message = liveError instanceof Error
           ? liveError.message
@@ -373,15 +378,19 @@ export function useAppState() {
       }
 
       setCandidates(results);
+      setScanCounts(newCounts);
+      setNoFilterMode(newNoFilter);
+      setRawSample(newRawSample);
       // Cache results per mode so switching tabs restores them
       if (scanMode === 'discovery') {
         setDiscoveryCandidates(results);
-        setDiscoveryScanCounts(live.scan_counts || null);
+        setDiscoveryScanCounts(newCounts);
         setDiscoveryLastScanAt(scannedAt);
       } else {
         setUniverseCandidates(results);
-        setUniverseScanCounts(live.scan_counts || null);
+        setUniverseScanCounts(newCounts);
         setUniverseLastScanAt(scannedAt);
+        setHasUniverseScanned(true);
       }
       setScanSource('live');
       setLastScanAt(scannedAt);
@@ -396,7 +405,8 @@ export function useAppState() {
           .from('candidate_scans')
           .delete()
           .eq('scan_date', today)
-          .eq('strategy_profile_id', activeProfile.id);
+          .eq('strategy_profile_id', activeProfile.id)
+          .eq('scan_mode', scanMode);
         if (deleteError) throw deleteError;
 
         // Persist only database-backed columns and normalize undefined -> null.
@@ -435,6 +445,7 @@ export function useAppState() {
           has_quotes: Boolean(r.has_quotes),
           stock_source: r.stock_source ?? null,
           premium_source: r.premium_source ?? null,
+          scan_mode: scanMode,
         }));
 
         if (insertData.length > 0) {
@@ -485,12 +496,13 @@ export function useAppState() {
 
   // On startup or profile change: load the most recent saved scan results from
   // Supabase. Do NOT automatically call market-scan — the user must click Rescan.
-  const loadSavedCandidates = useCallback(async (profileId: string) => {
+  const loadSavedCandidates = useCallback(async (profileId: string, mode: ScanMode = 'discovery') => {
     try {
       const { data, error } = await supabase
         .from('candidate_scans')
         .select('*')
         .eq('strategy_profile_id', profileId)
+        .eq('scan_mode', mode)
         .order('created_at', { ascending: false })
         .limit(200);
       if (error) throw error;
@@ -509,17 +521,20 @@ export function useAppState() {
         const filtered = activeProfile
           ? reapplyHardFilters(deduped, activeProfile)
           : deduped;
-        setCandidates(filtered);
-        // Seed the current mode's cache so a tab switch restores these results
-        if (scanMode === 'discovery') {
+        if (mode === 'discovery') {
           setDiscoveryCandidates(filtered);
           setDiscoveryLastScanAt(rows[0].scan_date || rows[0].created_at || null);
         } else {
           setUniverseCandidates(filtered);
           setUniverseLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+          setHasUniverseScanned(true);
         }
-        setLastScanAt(rows[0].scan_date || rows[0].created_at || null);
-        setScanSource(null);
+        // Only set the visible candidates if this is the current mode
+        if (scanMode === mode) {
+          setCandidates(filtered);
+          setLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+          setScanSource(null);
+        }
         populateStockPricesFromCandidates(deduped);
       }
       setSavedCandidatesLoaded(true);
@@ -531,7 +546,8 @@ export function useAppState() {
 
   useEffect(() => {
     if (activeProfile && positionsLoaded) {
-      void loadSavedCandidates(activeProfile.id);
+      void loadSavedCandidates(activeProfile.id, 'discovery');
+      void loadSavedCandidates(activeProfile.id, 'universe');
       setSettingsChanged(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -774,7 +790,6 @@ export function useAppState() {
         setLastScanAt(universeLastScanAt);
       }
       setScanMode(m);
-      setSettingsChanged(true);
     },
     scanCounts,
     noFilterMode,
@@ -787,6 +802,7 @@ export function useAppState() {
     refreshCandidateTechnical,
     settingsChanged,
     savedCandidatesLoaded,
+    hasUniverseScanned,
   };
 }
 

@@ -125,6 +125,12 @@ export function CandidatesPage({
         </div>
       )}
 
+      {scanMode === 'universe' && state.scanUniverseLoaded && state.scanUniverse.length > 0 && !state.hasUniverseScanned && state.candidates.length === 0 && !state.scanning && (
+        <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-sky-300">
+          {state.scanUniverse.length} active ticker{state.scanUniverse.length === 1 ? '' : 's'} — click Rescan to scan them.
+        </div>
+      )}
+
       {state.noFilterMode && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-medium text-amber-300">
           NO FILTER MODE — All strategy sections and Exclude Existing Positions are OFF. Every discovered put contract is qualified.
@@ -344,17 +350,33 @@ export function CandidatesPage({
           <div className="py-12 text-center text-slate-500">
             {state.savedCandidatesLoaded && state.candidates.length === 0 && !state.scanCounts ? (
               <>
-                <Telescope className="h-8 w-8 mx-auto mb-2 text-slate-600" />
-                <p className="text-sm font-medium text-slate-400">No scan results yet.</p>
-                <p className="text-xs text-slate-500 mt-1">Click Rescan to run your first scan.</p>
+                {scanMode === 'universe' ? (
+                  <Globe className="h-8 w-8 mx-auto mb-2 text-slate-600" />
+                ) : (
+                  <Telescope className="h-8 w-8 mx-auto mb-2 text-slate-600" />
+                )}
+                <p className="text-sm font-medium text-slate-400">
+                  {scanMode === 'universe' && state.scanUniverse.length > 0
+                    ? `${state.scanUniverse.length} active ticker${state.scanUniverse.length === 1 ? '' : 's'} — click Rescan to scan them.`
+                    : 'No scan results yet.'}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {scanMode === 'universe' && state.scanUniverse.length > 0
+                    ? ''
+                    : 'Click Rescan to run your first scan.'}
+                </p>
               </>
             ) : (
               <>
                 <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
                 <p className="text-sm">
                   {state.scanCounts && state.scanCounts.symbols_with_chains === 0
-                    ? 'No option contracts were returned for the saved tickers.'
-                    : 'No contracts qualified under the current strategy rules.'}
+                    ? scanMode === 'universe'
+                      ? `${state.scanCounts.symbols_in_universe} tickers scanned; no option contracts were returned.`
+                      : 'No option contracts were returned for the saved tickers.'
+                    : scanMode === 'universe'
+                      ? `${state.scanCounts?.symbols_in_universe ?? 0} tickers scanned; no contracts qualified under the current strategy rules.`
+                      : 'No contracts qualified under the current strategy rules.'}
                 </p>
               </>
             )}
