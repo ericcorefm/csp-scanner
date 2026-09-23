@@ -747,6 +747,7 @@ type ScanSymbolResult = {
   technicalDataAvailable?: boolean;
   historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
   historyError?: string;
+  optionUnderlyingPrice?: number | null;
   technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
 };
 
@@ -1092,6 +1093,7 @@ async function scanSymbol(
       .find((v: number) => Number.isFinite(v) && v > 0) || 0;
     if (underlyingPrice > 0) {
       optionUnderlyingPrice = underlyingPrice;
+      r.optionUnderlyingPrice = optionUnderlyingPrice;
       // Save to persistent price cache
       void saveCachedStockPrice(symbol, underlyingPrice, 'option_snapshot', fmt(today));
       // Use as stock price if we don't already have one from grouped daily
@@ -1402,6 +1404,11 @@ async function scanSymbol(
       }
     }
 
+    const quoteTimestamp = new Date().toISOString();
+    const quoteSourceStr = premiumSourceOut.toLowerCase().replace(' ', '_');
+    const underlyingPriceVal = optionUnderlyingPrice !== null && optionUnderlyingPrice > 0 ? Number(optionUnderlyingPrice.toFixed(2)) : null;
+    const underlyingPriceSource = underlyingPriceVal !== null ? 'option_snapshot' : null;
+
     if (analyzeMode) {
       analyses.push({
         strike, expiration, dte,
@@ -1420,6 +1427,11 @@ async function scanSymbol(
         qualified, technical_pending: technicalPending, pass_fail: passFail,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
+        quote_timestamp: quoteTimestamp,
+        quote_source: quoteSourceStr,
+        underlying_price: underlyingPriceVal,
+        underlying_price_timestamp: underlyingPriceVal !== null ? quoteTimestamp : null,
+        underlying_price_source: underlyingPriceSource,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
       });
@@ -1450,6 +1462,11 @@ async function scanSymbol(
         strike_distance_from_support: primarySupport !== null && primarySupport > 0 ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1)) : null,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
+        quote_timestamp: quoteTimestamp,
+        quote_source: quoteSourceStr,
+        underlying_price: underlyingPriceVal,
+        underlying_price_timestamp: underlyingPriceVal !== null ? quoteTimestamp : null,
+        underlying_price_source: underlyingPriceSource,
         secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
         resistance: resistance !== null ? Number(resistance.toFixed(2)) : null,
       });
@@ -1674,6 +1691,8 @@ serve(async (req) => {
         ticker,
         stock_price: result.stockPrice !== null && result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
         stock_source: result.stockSource || 'none',
+        underlying_price: result.optionUnderlyingPrice !== null && result.optionUnderlyingPrice > 0 ? Number(result.optionUnderlyingPrice.toFixed(2)) : null,
+        underlying_price_source: result.optionUnderlyingPrice !== null && result.optionUnderlyingPrice > 0 ? 'option_snapshot' : null,
         trend: result.trendClass || 'Unknown',
         primary_support: result.primarySupport !== null ? Number(result.primarySupport.toFixed(2)) : null,
         secondary_support: result.secondarySupport !== null ? Number(result.secondarySupport.toFixed(2)) : null,
