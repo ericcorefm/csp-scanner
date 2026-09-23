@@ -74,7 +74,7 @@ function App() {
       {currentPage === 'closed' && <ClosedPositionsPage state={state} />}
       {currentPage === 'settings' && <SettingsPage state={state} />}
       {currentPage === 'summary' && <DailySummaryPage state={state} />}
-      {currentPage === 'universe' && <ScanUniversePage state={state} />}
+      {currentPage === 'universe' && <ScanUniversePage state={state} onNavigate={handleNavigate} />}
     </Layout>
   );
 }

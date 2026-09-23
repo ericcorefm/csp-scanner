@@ -1,9 +1,10 @@
 import { useState, useMemo } from 'react';
 import { Plus, Trash2, RotateCcw, Power, AlertCircle } from 'lucide-react';
 import type { AppState } from '@/lib/types';
+import type { Page } from '@/components/Layout';
 import { Card, Badge } from '@/components/ui';
 
-export function ScanUniversePage({ state }: { state: AppState }) {
+export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNavigate: (page: Page, ticker?: string) => void }) {
   const [newTicker, setNewTicker] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
@@ -222,7 +223,15 @@ export function ScanUniversePage({ state }: { state: AppState }) {
                         className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-sky-500 focus:ring-sky-500/40 cursor-pointer"
                       />
                     </td>
-                    <td className="px-4 py-2.5 font-semibold text-slate-100">{entry.symbol}</td>
+                    <td className="px-4 py-2.5 font-semibold text-slate-100">
+                      <button
+                        onClick={() => onNavigate('analyze', entry.symbol)}
+                        title={`Analyze ${entry.symbol}`}
+                        className="text-sky-400 hover:text-sky-300 hover:underline cursor-pointer transition-colors"
+                      >
+                        {entry.symbol}
+                      </button>
+                    </td>
                     <td className="px-4 py-2.5 text-slate-400">{entry.company_name || '—'}</td>
                     <td className="px-4 py-2.5 text-slate-400 text-xs whitespace-nowrap">
                       {new Date(entry.created_at).toLocaleDateString()}
