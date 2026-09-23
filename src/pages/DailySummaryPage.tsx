@@ -1,13 +1,27 @@
 import { useMemo } from 'react';
 import {
-  CheckCircle2, PlusCircle, MinusCircle, Target, Clock,
+  CheckCircle2, PlusCircle, Target, Clock,
   AlertTriangle, TrendingDown,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
+import type { OpenPosition } from '@/types';
 import { Card, Badge, formatMoney, formatPercent, formatNum } from '@/components/ui';
-import { calcPositionStatus, calcDaysOpen, calcDaysToReview } from '@/lib/calculations';
+import { calcPositionStatus, calcDaysOpen } from '@/lib/calculations';
+
+const REVIEW_WARNING_DAYS = 14;
+
+interface CycleReviewEntry {
+  position: OpenPosition;
+  daysOpen: number;
+  maxCycleDays: number;
+  daysRemaining: number;
+  overdue: boolean;
+  overdueBy: number;
+}
 
 export function DailySummaryPage({ state }: { state: AppState }) {
+  const maxCycleDays = state.activeProfile?.max_recycle_days ?? 120;
+
   const summary = useMemo(() => {
     const qualified = state.candidates.filter((c) => c.qualified);
     const openTickers = state.openPositions.map((p) => p.ticker);
@@ -15,15 +29,22 @@ export function DailySummaryPage({ state }: { state: AppState }) {
       const status = calcPositionStatus(
         p.current_mid, p.btc_target,
         calcDaysOpen(p.open_date),
-        state.activeProfile?.max_recycle_days || 120,
+        maxCycleDays,
         p.trend_classification, p.stock_price, p.primary_support,
       );
       return status === 'BTC Ready' || status === 'Near BTC Target';
     });
-    const near120 = state.openPositions.filter((p) => {
-      const days = calcDaysToReview(p.open_date, state.activeProfile?.max_recycle_days || 120);
-      return days <= 10;
-    });
+
+    const cycleReview: CycleReviewEntry[] = state.openPositions
+      .map((p) => {
+        const daysOpen = calcDaysOpen(p.open_date);
+        const daysRemaining = maxCycleDays - daysOpen;
+        const overdue = daysOpen > maxCycleDays;
+        const overdueBy = overdue ? daysOpen - maxCycleDays : 0;
+        return { position: p, daysOpen, maxCycleDays, daysRemaining, overdue, overdueBy };
+      })
+      .filter((e) => e.daysOpen >= maxCycleDays - REVIEW_WARNING_DAYS);
+
     const supportBreaks = state.openPositions.filter((p) => p.stock_price < p.primary_support * 0.98);
     const trendChanges = state.openPositions.filter((p) => p.trend_classification === 'Downtrend');
 
@@ -31,13 +52,13 @@ export function DailySummaryPage({ state }: { state: AppState }) {
       qualifiedCount: qualified.length,
       newCount: qualified.length,
       nearBtc,
-      near120,
+      cycleReview,
       supportBreaks,
       trendChanges,
       openTickers,
       qualified,
     };
-  }, [state.candidates, state.openPositions, state.activeProfile]);
+  }, [state.candidates, state.openPositions, maxCycleDays]);
 
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
@@ -64,8 +85,8 @@ export function DailySummaryPage({ state }: { state: AppState }) {
       bg: 'bg-violet-500/10',
     },
     {
-      label: 'Near 120-Day Review',
-      value: summary.near120.length,
+      label: `Near ${maxCycleDays}-Day Review`,
+      value: summary.cycleReview.length,
       icon: Clock,
       color: 'text-amber-400',
       bg: 'bg-amber-500/10',
@@ -134,27 +155,35 @@ export function DailySummaryPage({ state }: { state: AppState }) {
           </div>
         </Card>
 
-        {/* Near 120-day review */}
-        <Card title="Positions Near 120-Day Review">
+        {/* Near cycle review */}
+        <Card title={`Positions Near ${maxCycleDays}-Day Review`}>
           <div className="p-5">
-            {summary.near120.length === 0 ? (
-              <p className="text-sm text-slate-500">No positions are approaching 120-day review.</p>
+            {summary.cycleReview.length === 0 ? (
+              <p className="text-sm text-slate-500">{`No positions are approaching ${maxCycleDays}-day review.`}</p>
             ) : (
               <div className="space-y-2">
-                {summary.near120.map((p) => {
-                  const days = calcDaysToReview(p.open_date, state.activeProfile?.max_recycle_days || 120);
-                  return (
-                    <div key={p.id} className="flex items-center justify-between rounded-lg bg-slate-800/40 p-3">
+                {summary.cycleReview.map((entry) => (
+                  <div key={entry.position.id} className="flex items-center justify-between rounded-lg bg-slate-800/40 p-3">
+                    <div className="space-y-1">
                       <div>
-                        <span className="font-semibold text-slate-200">{p.ticker}</span>
-                        <span className="text-xs text-slate-500 ml-2">Opened {p.open_date}</span>
+                        <span className="font-semibold text-slate-200">{entry.position.ticker}</span>
+                        <span className="text-xs text-slate-500 ml-2">Opened {entry.position.open_date}</span>
                       </div>
-                      <Badge variant={days <= 5 ? 'error' : 'warning'} dot>
-                        {days} days left
-                      </Badge>
+                      <div className="flex items-center gap-4 text-xs text-slate-500">
+                        <span>Days Open: <span className="text-slate-300 tabular-nums">{entry.daysOpen}</span></span>
+                        <span>Cycle Target: <span className="text-slate-300 tabular-nums">{entry.maxCycleDays} days</span></span>
+                        {!entry.overdue ? (
+                          <span>Days Remaining: <span className="text-amber-400 tabular-nums">{entry.daysRemaining}</span></span>
+                        ) : (
+                          <span className="text-red-400">Review overdue by {entry.overdueBy} days</span>
+                        )}
+                      </div>
                     </div>
-                  );
-                })}
+                    <Badge variant={entry.overdue ? 'error' : 'warning'} dot>
+                      {entry.overdue ? 'Overdue' : `${entry.daysRemaining} days left`}
+                    </Badge>
+                  </div>
+                ))}
               </div>
             )}
           </div>

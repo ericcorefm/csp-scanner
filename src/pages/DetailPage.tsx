@@ -530,7 +530,7 @@ export function DetailPage({
                   label="Strike Dist from Support"
                   value={effectiveSupportDist != null ? `${effectiveSupportDist}%` : 'Unavailable'}
                 />
-                <StatRow label="Recycle Date (120d)" value={recycleDate} />
+                <StatRow label={`Recycle Date (${state.activeProfile?.max_recycle_days ?? 120}d)`} value={recycleDate} />
               </div>
             </div>
           </Card>

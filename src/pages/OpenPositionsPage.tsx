@@ -19,7 +19,7 @@ const statusVariants: Record<PositionStatus, 'success' | 'warning' | 'error' | '
   'BTC Ready': 'success',
   'Support Warning': 'warning',
   'Trend Warning': 'warning',
-  '120-Day Review': 'error',
+  'Cycle Review': 'error',
 };
 
 export function OpenPositionsPage({ state }: { state: AppState }) {

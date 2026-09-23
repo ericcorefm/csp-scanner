@@ -199,7 +199,7 @@ export type PositionStatus =
   | 'BTC Ready'
   | 'Support Warning'
   | 'Trend Warning'
-  | '120-Day Review';
+  | 'Cycle Review';
 
 export interface ClosedPosition {
   id?: string;

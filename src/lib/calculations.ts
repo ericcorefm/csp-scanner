@@ -156,7 +156,7 @@ export function calcPositionStatus(
   const threshold = btcTarget * 1.15;
   const nearThreshold = btcTarget * 1.30;
 
-  if (daysOpen >= maxRecycleDays) return '120-Day Review';
+  if (daysOpen >= maxRecycleDays) return 'Cycle Review';
   if (trendClassification === 'Downtrend') return 'Trend Warning';
   if (stockPrice < primarySupport * 0.98) return 'Support Warning';
   if (currentMid <= btcTarget) return 'BTC Ready';
