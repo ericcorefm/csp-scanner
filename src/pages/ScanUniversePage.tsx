@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Plus, Trash2, RotateCcw, Power, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, Power, AlertCircle, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { Page } from '@/components/Layout';
 import { Card, Badge } from '@/components/ui';
@@ -13,6 +13,35 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
   const entries = state.scanUniverseEntries;
   const activeCount = entries.filter((e) => e.enabled).length;
   const disabledCount = entries.filter((e) => !e.enabled).length;
+
+  // Derive per-ticker scan status from the most recent universe candidates
+  const universeStatus = useMemo(() => {
+    const statusMap = new Map<string, 'qualified' | 'pending' | 'rejected'>();
+    const bestByTicker = new Map<string, typeof state.universeCandidates[number]>();
+    for (const c of state.universeCandidates) {
+      const key = c.ticker.toUpperCase();
+      const existing = bestByTicker.get(key);
+      if (!existing) {
+        bestByTicker.set(key, c);
+      }
+    }
+    for (const [ticker, c] of bestByTicker) {
+      if (c.qualified && !c.technical_pending) statusMap.set(ticker, 'qualified');
+      else if (c.technical_pending) statusMap.set(ticker, 'pending');
+      else statusMap.set(ticker, 'rejected');
+    }
+    return statusMap;
+  }, [state.universeCandidates]);
+
+  const qualifiedCount = useMemo(() =>
+    entries.filter((e) => universeStatus.get(e.symbol.toUpperCase()) === 'qualified').length
+  , [entries, universeStatus]);
+  const pendingCount = useMemo(() =>
+    entries.filter((e) => universeStatus.get(e.symbol.toUpperCase()) === 'pending').length
+  , [entries, universeStatus]);
+  const rejectedCount = useMemo(() =>
+    entries.filter((e) => universeStatus.get(e.symbol.toUpperCase()) === 'rejected').length
+  , [entries, universeStatus]);
 
   const allSelected = entries.length > 0 && selected.size === entries.length;
   const someSelected = selected.size > 0 && selected.size < entries.length;
@@ -117,7 +146,19 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
         </Card>
         <Card className="px-4 py-3">
           <div className="flex items-center gap-3">
-            <span className="text-2xl font-semibold tabular-nums text-emerald-400">{activeCount}</span>
+            <span className="text-2xl font-semibold tabular-nums text-emerald-400">{qualifiedCount}</span>
+            <span className="text-sm text-slate-400">qualified</span>
+          </div>
+        </Card>
+        <Card className="px-4 py-3">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl font-semibold tabular-nums text-amber-400">{pendingCount}</span>
+            <span className="text-sm text-slate-400">pending</span>
+          </div>
+        </Card>
+        <Card className="px-4 py-3">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl font-semibold tabular-nums text-slate-300">{activeCount}</span>
             <span className="text-sm text-slate-400">active</span>
           </div>
         </Card>
@@ -242,10 +283,24 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
                       </Badge>
                     </td>
                     <td className="px-4 py-2.5">
-                      <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${entry.enabled ? 'text-emerald-400' : 'text-slate-500'}`}>
-                        <span className={`h-1.5 w-1.5 rounded-full ${entry.enabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-                        {entry.enabled ? 'Active' : 'Disabled'}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${entry.enabled ? 'text-emerald-400' : 'text-slate-500'}`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${entry.enabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+                          {entry.enabled ? 'Active' : 'Disabled'}
+                        </span>
+                        {universeStatus.has(entry.symbol.toUpperCase()) && (
+                          <span className={`inline-flex items-center gap-1 text-xs ${
+                            universeStatus.get(entry.symbol.toUpperCase()) === 'qualified' ? 'text-emerald-400' :
+                            universeStatus.get(entry.symbol.toUpperCase()) === 'pending' ? 'text-amber-400' :
+                            'text-red-400'
+                          }`}>
+                            {universeStatus.get(entry.symbol.toUpperCase()) === 'qualified' && <CheckCircle2 className="h-3 w-3" />}
+                            {universeStatus.get(entry.symbol.toUpperCase()) === 'pending' && <AlertTriangle className="h-3 w-3" />}
+                            {universeStatus.get(entry.symbol.toUpperCase()) === 'rejected' && <XCircle className="h-3 w-3" />}
+                            {universeStatus.get(entry.symbol.toUpperCase())}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
                       <button

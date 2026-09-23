@@ -41,7 +41,11 @@ export function Layout({ children, currentPage, onNavigate, state }: LayoutProps
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const bestPerTicker = selectBestContractPerTicker(state.candidates);
-  const qualifiedCount = new Set(bestPerTicker.filter((c) => c.qualified).map((c) => c.ticker)).size;
+  const isUniverseMode = state.scanMode === 'universe';
+  const qualifiedTickers = bestPerTicker.filter((c) =>
+    isUniverseMode ? (c.qualified && !c.technical_pending) : c.qualified
+  );
+  const qualifiedCount = new Set(qualifiedTickers.map((c) => c.ticker)).size;
   const rejectedCount = new Set(bestPerTicker.filter((c) => !c.qualified).map((c) => c.ticker)).size;
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
 

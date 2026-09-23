@@ -385,21 +385,22 @@ export function useAppState() {
       // ── Debug: trace scan pipeline ──
       {
         const raw = results.length;
-        const qualifiedContracts = results.filter((r) => r.qualified);
-        const pendingContracts = results.filter((r) => r.qualified && r.technical_pending);
-        const rejectedContracts = results.filter((r) => !r.qualified);
-        const uniqueQualifiedTickers = new Set(qualifiedContracts.map((r) => r.ticker.toUpperCase()));
+        const fullyQualified = results.filter((r) => r.qualified && !r.technical_pending);
+        const pending = results.filter((r) => r.qualified && r.technical_pending);
+        const rejected = results.filter((r) => !r.qualified);
+        const uniqueQualifiedTickers = new Set(fullyQualified.map((r) => r.ticker.toUpperCase()));
+        const uniquePendingTickers = new Set(pending.map((r) => r.ticker.toUpperCase()));
         const bestByTicker = selectBestContractPerTicker(results);
-        const displayedQualified = bestByTicker.filter((c) => c.qualified);
-        console.log(`[SCAN PIPELINE] mode=${scanMode} raw=${raw} qualified=${qualifiedContracts.length} (pending=${pendingContracts.length}) rejected=${rejectedContracts.length} uniqueQualifiedTickers=${uniqueQualifiedTickers.size} bestByTicker=${bestByTicker.length} displayedQualified=${displayedQualified.length}`);
-        if (qualifiedContracts.length === 0 && raw > 0) {
+        const displayedQualified = bestByTicker.filter((c) => c.qualified && !c.technical_pending);
+        console.log(`[SCAN PIPELINE] mode=${scanMode} raw=${raw} fullyQualified=${fullyQualified.length} pending=${pending.length} rejected=${rejected.length} qualifiedTickers=${uniqueQualifiedTickers.size} pendingTickers=${uniquePendingTickers.size} bestByTicker=${bestByTicker.length} displayedQualified=${displayedQualified.length}`);
+        if (fullyQualified.length === 0 && raw > 0) {
           const reasonCounts = new Map<string, number>();
-          for (const r of rejectedContracts) {
+          for (const r of rejected) {
             for (const reason of (r.rejection_reasons || [])) {
               reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
             }
           }
-          console.log(`[SCAN PIPELINE] No qualified contracts. Rejection reasons:`, Object.fromEntries(reasonCounts));
+          console.log(`[SCAN PIPELINE] No fully-qualified contracts. Rejection reasons:`, Object.fromEntries(reasonCounts));
         }
       }
       // Cache results per mode so switching tabs restores them
@@ -481,36 +482,59 @@ export function useAppState() {
         setScanError(`Scan completed, but saving scan history failed: ${detail}`);
       }
 
-      // ── Universe mode cleanup: remove tickers with zero qualified contracts ──
+      // ── Universe mode sync: disable non-qualifying tickers, keep pending ──
       if (scanMode === 'universe') {
         try {
-          const qualifiedTickers = new Set(
+          // A ticker is "fully qualified" if it has at least one contract
+          // that passes all rules AND has technical data available.
+          // "Pending" = all contracts are technical_pending (data unavailable).
+          // "Rejected" = at least one contract was fully evaluated and none qualified.
+          const fullyQualifiedTickers = new Set(
             results
-              .filter((r) => r.qualified)
+              .filter((r) => r.qualified && !r.technical_pending)
+              .map((r) => r.ticker.toUpperCase())
+          );
+          const pendingTickers = new Set(
+            results
+              .filter((r) => r.technical_pending)
               .map((r) => r.ticker.toUpperCase())
           );
 
-          const removeSymbols = universeSymbols
+          // Tickers to disable: were scanned, have results, none fully qualified, none pending
+          const disableSymbols = universeSymbols
             .map((s) => s.toUpperCase())
-            .filter((s) => !qualifiedTickers.has(s));
+            .filter((s) =>
+              !fullyQualifiedTickers.has(s) &&
+              !pendingTickers.has(s) &&
+              results.some((r) => r.ticker.toUpperCase() === s)
+            );
 
-          if (removeSymbols.length > 0) {
-            const { error: cleanupError } = await supabase
+          if (disableSymbols.length > 0) {
+            const { error: disableError } = await supabase
               .from('scan_universe')
-              .delete()
-              .in('symbol', removeSymbols);
+              .update({ enabled: false })
+              .in('symbol', disableSymbols);
 
-            if (!cleanupError) {
-              setScanUniverse((prev) => prev.filter((s) => !removeSymbols.includes(s.toUpperCase())));
-              setScanUniverseEntries((prev) => prev.filter((e) => !removeSymbols.includes(e.symbol.toUpperCase())));
-              await loadScanUniverse();
-              setScanError(`${removeSymbols.length} non-qualifying ticker${removeSymbols.length > 1 ? 's' : ''} removed from Scan Universe.`);
-            } else {
-              console.error('[Universe Cleanup] Failed to remove non-qualifying tickers:', cleanupError);
+            if (disableError) {
+              console.error('[Universe Sync] Failed to disable non-qualifying tickers:', disableError);
             }
           }
-        } catch (cleanupErr) {
-          console.error('[Universe Cleanup] Error during cleanup:', cleanupErr);
+
+          // Reload universe state from the database so both pages agree
+          await loadScanUniverse();
+
+          const qualifiedCount = fullyQualifiedTickers.size;
+          const pendingCount = pendingTickers.size - fullyQualifiedTickers.size;
+          const disabledCount = disableSymbols.length;
+          const parts: string[] = [];
+          if (qualifiedCount > 0) parts.push(`${qualifiedCount} qualified`);
+          if (pendingCount > 0) parts.push(`${pendingCount} pending`);
+          if (disabledCount > 0) parts.push(`${disabledCount} disabled`);
+          if (parts.length > 0) {
+            setScanError(`Scan Universe synced: ${parts.join(', ')}.`);
+          }
+        } catch (syncErr) {
+          console.error('[Universe Sync] Error during sync:', syncErr);
         }
       }
     } catch (err) {
@@ -857,6 +881,7 @@ export function useAppState() {
     settingsChanged,
     savedCandidatesLoaded,
     hasUniverseScanned,
+    universeCandidates,
   };
 }
 

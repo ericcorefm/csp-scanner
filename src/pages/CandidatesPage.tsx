@@ -45,10 +45,22 @@ export function CandidatesPage({
 
   const filtered = useMemo(() => {
     let list = displayCandidates.filter((c) => {
-      if (c.qualified) return true;
-      if (showPending && !c.qualified && c.technical_pending) return true;
-      if (showRejected && !c.qualified && !c.technical_pending) return true;
-      return false;
+      // In universe mode: only fully-qualified contracts show by default.
+      // Pending (qualified but missing technical data) and rejected are hidden
+      // unless their respective toggles are on.
+      // In discovery mode: all qualified contracts (including pending) show by default.
+      if (isDiscovery) {
+        if (c.qualified) return true;
+        if (showPending && !c.qualified && c.technical_pending) return true;
+        if (showRejected && !c.qualified && !c.technical_pending) return true;
+        return false;
+      } else {
+        if (c.qualified && !c.technical_pending) return true;
+        if (showPending && c.qualified && c.technical_pending) return true;
+        if (showPending && !c.qualified && c.technical_pending) return true;
+        if (showRejected && !c.qualified) return true;
+        return false;
+      }
     });
     list = [...list].sort((a, b) => {
       let aVal = a[sortKey as keyof CandidateScan];
@@ -143,7 +155,7 @@ export function CandidatesPage({
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
             <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
-            <ScanCountItem label="Candidate Tickers" value={new Set(displayCandidates.filter((c) => c.qualified).map((c) => c.ticker)).size} color="text-emerald-400" />
+            <ScanCountItem label="Candidate Tickers" value={new Set(displayCandidates.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} color="text-emerald-400" />
             <ScanCountItem label="Contracts Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
             <ScanCountItem
               label="Last Scan"
@@ -192,8 +204,8 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {new Set(filtered.filter((c) => c.qualified).map((c) => c.ticker)).size} qualified
-            {showPending && ` · ${new Set(filtered.filter((c) => !c.qualified && c.technical_pending).map((c) => c.ticker)).size} pending`}
+            {new Set(filtered.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} qualified
+            {showPending && ` · ${new Set(filtered.filter((c) => c.technical_pending && !(isDiscovery ? c.qualified : (c.qualified && !c.technical_pending))).map((c) => c.ticker)).size} pending`}
             {showRejected && ` · ${new Set(filtered.filter((c) => !c.qualified && !c.technical_pending).map((c) => c.ticker)).size} rejected`}
           </p>
         </div>
@@ -251,7 +263,7 @@ export function CandidatesPage({
                     <tr
                       onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
                       className={`cursor-pointer transition-colors ${
-                        c.qualified ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
+                        (isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)) ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">
