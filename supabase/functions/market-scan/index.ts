@@ -924,6 +924,7 @@ async function scanSymbol(
   verbose: boolean,
   analyzeMode: boolean,
   bulkStockPrice: number | null = null,
+  allowLiveHistory: boolean = false,
 ): Promise<ScanSymbolResult> {
   const r: ScanSymbolResult = {
     candidates: [],
@@ -937,7 +938,7 @@ async function scanSymbol(
   // Step 1: Stock snapshot via shared function (cached per ticker)
   // For discovery/universe mode, bulkStockPrice from grouped daily is passed in.
   // For analyze mode, bulkStockPrice is null so getStockSnapshot falls back to history.
-  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice, analyzeMode);
+  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice, analyzeMode || allowLiveHistory);
   let bars = snapshot.historicalBars;
   let stockPrice: number | null = snapshot.currentPrice;
   r.stockSource = snapshot.source;
@@ -1330,6 +1331,14 @@ async function scanSymbol(
     const technicalPending = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable;
     r.evaluated++;
     if (qualified && !technicalPending) r.qualified++; else r.rejected++;
+
+    // Debug logging for specific tickers in scan mode (universe/discovery)
+    if (['CIFR', 'WULF'].includes(symbol.toUpperCase()) && !analyzeMode) {
+      const supportDistPct = primarySupport !== null && primarySupport > 0
+        ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1))
+        : null;
+      console.log(`[UNIVERSE DEBUG] ${symbol} | strike=${strike} | exp=${expiration} | stockPrice=${stockPrice} | trend=${trendClass} | primarySupport=${primarySupport} | supportDist=${supportDistPct}% | netCROI=${netCroi} | PC=${pc} | qualified=${qualified} | technicalPending=${technicalPending} | reasons=${JSON.stringify(reasons)}`);
+    }
 
     const premiumSourceOut = premiumSource as string;
 
@@ -1761,7 +1770,7 @@ serve(async (req) => {
           const upper = sym.ticker.toUpperCase();
           // Use grouped daily price; if missing, use persistent cache fallback
           const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, price)
+          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, price, scanMode === 'universe')
             .catch((err) => {
               console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
               return null;
