@@ -459,6 +459,39 @@ export function useAppState() {
         console.error('Scan completed, but candidate_scans persistence failed:', persistError);
         setScanError(`Scan completed, but saving scan history failed: ${detail}`);
       }
+
+      // ── Universe mode cleanup: remove tickers with zero qualified contracts ──
+      if (scanMode === 'universe') {
+        try {
+          const qualifiedTickers = new Set(
+            results
+              .filter((r) => r.qualified && !r.technical_pending)
+              .map((r) => r.ticker.toUpperCase())
+          );
+
+          const removeSymbols = universeSymbols
+            .map((s) => s.toUpperCase())
+            .filter((s) => !qualifiedTickers.has(s));
+
+          if (removeSymbols.length > 0) {
+            const { error: cleanupError } = await supabase
+              .from('scan_universe')
+              .delete()
+              .in('symbol', removeSymbols);
+
+            if (!cleanupError) {
+              setScanUniverse((prev) => prev.filter((s) => !removeSymbols.includes(s.toUpperCase())));
+              setScanUniverseEntries((prev) => prev.filter((e) => !removeSymbols.includes(e.symbol.toUpperCase())));
+              await loadScanUniverse();
+              setScanError(`${removeSymbols.length} non-qualifying ticker${removeSymbols.length > 1 ? 's' : ''} removed from Scan Universe.`);
+            } else {
+              console.error('[Universe Cleanup] Failed to remove non-qualifying tickers:', cleanupError);
+            }
+          }
+        } catch (cleanupErr) {
+          console.error('[Universe Cleanup] Error during cleanup:', cleanupErr);
+        }
+      }
     } catch (err) {
       const message = formatDataError(err);
       const modeLabel = scanMode === 'universe' ? 'universe results' : 'results';
