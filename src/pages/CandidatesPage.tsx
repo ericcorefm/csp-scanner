@@ -108,7 +108,7 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
-  const colCount = 19;
+  const colCount = 16;
 
   return (
     <div className="space-y-4">
@@ -242,10 +242,7 @@ export function CandidatesPage({
                 <SortHeader k="strike" label="Strike" align="right" />
                 <SortHeader k="expiration" label="Expiration" />
                 <SortHeader k="dte" label="DTE" align="right" />
-                <SortHeader k="bid" label="Bid" align="right" />
-                <SortHeader k="mid" label="Mid" align="right" />
-                <SortHeader k="ask" label="Ask" align="right" />
-                <SortHeader k="suggested_sto" label="STO Target" align="right" />
+                <SortHeader k="suggested_sto" label="Premium" align="right" />
                 <SortHeader k="suggested_btc" label="BTC" align="right" />
                 <SortHeader k="net_croi" label="Net CROI" align="right" />
                 <SortHeader k="premium_capture" label="PC" align="right" />
@@ -294,16 +291,7 @@ export function CandidatesPage({
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-200 font-medium">${formatNum(c.strike)}</td>
                       <td className="px-3 py-2.5 text-slate-400 text-xs whitespace-nowrap">{c.expiration}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{c.dte}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {c.bid > 0 ? `${formatNum(c.bid)}` : DASH}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {c.mid > 0 ? `${formatNum(c.mid)}` : DASH}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
-                        {c.ask > 0 ? `${formatNum(c.ask)}` : DASH}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium" title={c.quote_timestamp ? `Quote: ${c.quote_timestamp}` : undefined}>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-sky-400 font-medium">
                         {hasNoPremium ? DASH : `${formatNum(c.suggested_sto)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">

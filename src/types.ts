@@ -160,11 +160,6 @@ export interface CandidateScan {
   strike_distance_from_support: number | null;
   has_quotes: boolean;
   premium_source?: PremiumSource;
-  quote_timestamp?: string | null;
-  quote_source?: string | null;
-  underlying_price?: number | null;
-  underlying_price_timestamp?: string | null;
-  underlying_price_source?: string | null;
   scan_mode?: 'discovery' | 'universe';
 }
 

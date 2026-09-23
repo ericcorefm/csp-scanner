@@ -156,11 +156,6 @@ function normalizeContract(c: any): ContractAnalysis {
     pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
     has_quotes: c?.has_quotes,
     premium_source: c?.premium_source,
-    quote_timestamp: c?.quote_timestamp ?? null,
-    quote_source: c?.quote_source ?? null,
-    underlying_price: num(c?.underlying_price),
-    underlying_price_timestamp: c?.underlying_price_timestamp ?? null,
-    underlying_price_source: c?.underlying_price_source ?? null,
     strike_distance_from_stock: num(c?.strike_distance_from_stock),
     strike_distance_from_support: num(c?.strike_distance_from_support),
   };
@@ -315,11 +310,6 @@ function normalizeCandidateScan(c: any): CandidateScan {
     strike_distance_from_support: num(c?.strike_distance_from_support),
     has_quotes: !!c?.has_quotes,
     premium_source: c?.premium_source,
-    quote_timestamp: c?.quote_timestamp ?? null,
-    quote_source: c?.quote_source ?? null,
-    underlying_price: num(c?.underlying_price),
-    underlying_price_timestamp: c?.underlying_price_timestamp ?? null,
-    underlying_price_source: c?.underlying_price_source ?? null,
   };
 }
 

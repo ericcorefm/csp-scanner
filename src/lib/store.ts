@@ -467,11 +467,6 @@ export function useAppState() {
           has_quotes: Boolean(r.has_quotes),
           stock_source: r.stock_source ?? null,
           premium_source: r.premium_source ?? null,
-          quote_timestamp: r.quote_timestamp ?? null,
-          quote_source: r.quote_source ?? null,
-          underlying_price: r.underlying_price ?? null,
-          underlying_price_timestamp: r.underlying_price_timestamp ?? null,
-          underlying_price_source: r.underlying_price_source ?? null,
           scan_mode: scanMode,
         }));
 

@@ -593,10 +593,7 @@ function AnalyzeResult({
                       {[
                         { label: 'Strike' },
                         { label: 'DTE' },
-                        { label: 'Bid' },
-                        { label: 'Mid' },
-                        { label: 'Ask' },
-                        { label: 'STO Target' },
+                        { label: 'Premium' },
                         { label: 'BTC' },
                         { label: 'CROI' },
                         { label: 'PC' },
@@ -636,16 +633,7 @@ function AnalyzeResult({
                             {isClosest && <span className="ml-1 text-amber-400 text-xs">★</span>}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.dte}</td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                            {noQuote || c.bid <= 0 ? DASH : `${formatNum(c.bid)}`}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-300">
-                            {noQuote || c.mid <= 0 ? DASH : `${formatNum(c.mid)}`}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                            {noQuote || c.ask <= 0 ? DASH : `${formatNum(c.ask)}`}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-sky-400 font-medium" title={c.quote_timestamp ? `Quote: ${c.quote_timestamp}` : undefined}>
+                          <td className="px-3 py-2 text-right tabular-nums text-sky-400 font-medium">
                             {noQuote ? DASH : `${formatNum(c.suggested_sto)}`}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-sky-300">
