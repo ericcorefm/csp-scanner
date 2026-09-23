@@ -41,8 +41,8 @@ export function Layout({ children, currentPage, onNavigate, state }: LayoutProps
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const bestPerTicker = selectBestContractPerTicker(state.candidates);
-  const qualifiedCount = new Set(bestPerTicker.filter((c) => c.qualified && !c.technical_pending).map((c) => c.ticker)).size;
-  const rejectedCount = new Set(bestPerTicker.filter((c) => !c.qualified || c.technical_pending).map((c) => c.ticker)).size;
+  const qualifiedCount = new Set(bestPerTicker.filter((c) => c.qualified).map((c) => c.ticker)).size;
+  const rejectedCount = new Set(bestPerTicker.filter((c) => !c.qualified).map((c) => c.ticker)).size;
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
 
   const handleNav = (page: Page) => {

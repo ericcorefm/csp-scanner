@@ -45,9 +45,9 @@ export function CandidatesPage({
 
   const filtered = useMemo(() => {
     let list = displayCandidates.filter((c) => {
-      if (c.qualified && !c.technical_pending) return true;
-      if (showPending && c.technical_pending) return true;
-      if (showRejected && !c.qualified) return true;
+      if (c.qualified) return true;
+      if (showPending && !c.qualified && c.technical_pending) return true;
+      if (showRejected && !c.qualified && !c.technical_pending) return true;
       return false;
     });
     list = [...list].sort((a, b) => {
@@ -143,7 +143,7 @@ export function CandidatesPage({
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
             <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
-            <ScanCountItem label="Candidate Tickers" value={new Set(displayCandidates.filter((c) => c.qualified && !c.technical_pending).map((c) => c.ticker)).size} color="text-emerald-400" />
+            <ScanCountItem label="Candidate Tickers" value={new Set(displayCandidates.filter((c) => c.qualified).map((c) => c.ticker)).size} color="text-emerald-400" />
             <ScanCountItem label="Contracts Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
             <ScanCountItem
               label="Last Scan"
@@ -192,9 +192,9 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {new Set(filtered.filter((c) => c.qualified && !c.technical_pending).map((c) => c.ticker)).size} qualified
-            {showPending && ` · ${new Set(filtered.filter((c) => c.technical_pending).map((c) => c.ticker)).size} pending`}
-            {showRejected && ` · ${new Set(filtered.filter((c) => !c.qualified).map((c) => c.ticker)).size} rejected`}
+            {new Set(filtered.filter((c) => c.qualified).map((c) => c.ticker)).size} qualified
+            {showPending && ` · ${new Set(filtered.filter((c) => !c.qualified && c.technical_pending).map((c) => c.ticker)).size} pending`}
+            {showRejected && ` · ${new Set(filtered.filter((c) => !c.qualified && !c.technical_pending).map((c) => c.ticker)).size} rejected`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -251,7 +251,7 @@ export function CandidatesPage({
                     <tr
                       onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
                       className={`cursor-pointer transition-colors ${
-                        c.qualified && !c.technical_pending ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
+                        c.qualified ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">

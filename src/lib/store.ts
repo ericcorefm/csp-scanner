@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
-import { reapplyHardFilters } from '@/lib/bestContract';
+import { reapplyHardFilters, selectBestContractPerTicker } from '@/lib/bestContract';
 import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates, fetchCachedBars, type TechFetchError } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
 import type {
@@ -381,6 +381,27 @@ export function useAppState() {
       setScanCounts(newCounts);
       setNoFilterMode(newNoFilter);
       setRawSample(newRawSample);
+
+      // ── Debug: trace scan pipeline ──
+      {
+        const raw = results.length;
+        const qualifiedContracts = results.filter((r) => r.qualified);
+        const pendingContracts = results.filter((r) => r.qualified && r.technical_pending);
+        const rejectedContracts = results.filter((r) => !r.qualified);
+        const uniqueQualifiedTickers = new Set(qualifiedContracts.map((r) => r.ticker.toUpperCase()));
+        const bestByTicker = selectBestContractPerTicker(results);
+        const displayedQualified = bestByTicker.filter((c) => c.qualified);
+        console.log(`[SCAN PIPELINE] mode=${scanMode} raw=${raw} qualified=${qualifiedContracts.length} (pending=${pendingContracts.length}) rejected=${rejectedContracts.length} uniqueQualifiedTickers=${uniqueQualifiedTickers.size} bestByTicker=${bestByTicker.length} displayedQualified=${displayedQualified.length}`);
+        if (qualifiedContracts.length === 0 && raw > 0) {
+          const reasonCounts = new Map<string, number>();
+          for (const r of rejectedContracts) {
+            for (const reason of (r.rejection_reasons || [])) {
+              reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+            }
+          }
+          console.log(`[SCAN PIPELINE] No qualified contracts. Rejection reasons:`, Object.fromEntries(reasonCounts));
+        }
+      }
       // Cache results per mode so switching tabs restores them
       if (scanMode === 'discovery') {
         setDiscoveryCandidates(results);
@@ -465,7 +486,7 @@ export function useAppState() {
         try {
           const qualifiedTickers = new Set(
             results
-              .filter((r) => r.qualified && !r.technical_pending)
+              .filter((r) => r.qualified)
               .map((r) => r.ticker.toUpperCase())
           );
 
