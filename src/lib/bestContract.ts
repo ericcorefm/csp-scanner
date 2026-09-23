@@ -90,16 +90,34 @@ export function selectBestContractPerTicker(contracts: CandidateScan[]): Candida
   const result: CandidateScan[] = [];
 
   for (const group of grouped.values()) {
-    if (group.length === 1) {
-      result.push(group[0]);
+    // QUALIFY FIRST: only fully-qualified contracts are eligible for ranking.
+    // Rejected and technical-pending contracts can never win the best slot.
+    const qualifiedOnly = group.filter(
+      (c) => c.qualified && !c.technical_pending,
+    );
+
+    if (qualifiedOnly.length === 0) {
+      // No qualified contracts — return the best non-qualified for display
+      // (so the user can see why it failed), but it will show as rejected.
+      const sorted = [...group].sort((a, b) => {
+        const spA = statusPriority(a);
+        const spB = statusPriority(b);
+        if (spA !== spB) return spA - spB;
+        const volA = a.volume ?? 0;
+        const volB = b.volume ?? 0;
+        return volB - volA;
+      });
+      result.push(sorted[0]);
       continue;
     }
 
-    const sorted = [...group].sort((a, b) => {
-      const spA = statusPriority(a);
-      const spB = statusPriority(b);
-      if (spA !== spB) return spA - spB;
+    if (qualifiedOnly.length === 1) {
+      result.push(qualifiedOnly[0]);
+      continue;
+    }
 
+    // RANK SECOND: among qualified contracts only
+    const sorted = [...qualifiedOnly].sort((a, b) => {
       const volA = a.volume ?? 0;
       const volB = b.volume ?? 0;
       if (volA !== volB) return volB - volA;

@@ -1327,13 +1327,16 @@ async function scanSymbol(
       reasons.push('CROI too low');
     }
 
-    const qualified = reasons.length === 0;
     const technicalPending = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable;
+    // Unified qualification: a contract is only qualified if it has no
+    // rejection reasons AND technical data is available (or technical rules
+    // are off). This must match analyze mode's finalQualified exactly.
+    const qualified = reasons.length === 0 && !technicalPending;
     r.evaluated++;
-    if (qualified && !technicalPending) r.qualified++; else r.rejected++;
+    if (qualified) r.qualified++; else r.rejected++;
 
-    // Debug logging for specific tickers in scan mode (universe/discovery)
-    if (['CIFR', 'WULF'].includes(symbol.toUpperCase()) && !analyzeMode) {
+    // Debug logging for MARA and other specific tickers
+    if (['MARA', 'CIFR', 'WULF'].includes(symbol.toUpperCase())) {
       const supportDistPct = primarySupport !== null && primarySupport > 0
         ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1))
         : null;
@@ -1400,8 +1403,6 @@ async function scanSymbol(
     }
 
     if (analyzeMode) {
-      const finalQualified = reasons.length === 0 && !technicalPending;
-
       analyses.push({
         strike, expiration, dte,
         bid: hasBidAsk ? Number(bid!.toFixed(2)) : 0,
@@ -1416,7 +1417,7 @@ async function scanSymbol(
         net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
-        qualified: finalQualified, technical_pending: technicalPending, pass_fail: passFail,
+        qualified, technical_pending: technicalPending, pass_fail: passFail,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
