@@ -16,11 +16,12 @@ import {
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
-import type { ScanUniverseEntry } from '@/types';
+import type { ScanUniverseEntry, OpenPosition } from '@/types';
 import { Card, Badge, formatNum, formatPct } from '@/components/ui';
 import { getCachedStockPrice } from '@/lib/technicalCache';
 import { TradingViewChart } from '@/components/TradingViewChart';
 import { calcProbabilities } from '@/lib/probability';
+import { calcBtcOptimization, calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcBreakeven } from '@/lib/calculations';
 
 function getFailedRules(c: ContractAnalysis): string[] {
   if (!c.pass_fail || c.pass_fail.length === 0) return [];
@@ -84,6 +85,8 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
   const [filterExpiration, setFilterExpiration] = useState<string>('all');
   const [filterStrike, setFilterStrike] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [selectedContract, setSelectedContract] = useState<ContractAnalysis | null>(null);
+  const [showAddPosition, setShowAddPosition] = useState(false);
   const tickerInputRef = useRef<HTMLInputElement>(null);
   const autoAnalyzeConsumed = useRef(false);
   const result = state.analyzeResult;
@@ -114,6 +117,7 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
     setFilterExpiration('all');
     setFilterStrike('all');
     setFilterStatus('all');
+    setSelectedContract(null);
     state.runAnalyzeTicker(sym);
   };
 
@@ -122,6 +126,7 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
     setFilterExpiration('all');
     setFilterStrike('all');
     setFilterStatus('all');
+    setSelectedContract(null);
     state.clearAnalyzeResult();
     tickerInputRef.current?.focus();
   };
@@ -261,6 +266,22 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
           shownContracts={filteredContracts.length}
           closestMatch={closestMatch}
           displayStockPrice={displayStockPrice}
+          selectedContract={selectedContract}
+          onSelectContract={setSelectedContract}
+          onAddPosition={() => setShowAddPosition(true)}
+        />
+      )}
+
+      {showAddPosition && selectedContract && result && (
+        <AddPositionModal
+          state={state}
+          contract={selectedContract}
+          ticker={result.ticker}
+          companyName={companyNameFor(result.ticker)}
+          displayStockPrice={displayStockPrice}
+          trend={result.trend}
+          primarySupport={result.primary_support}
+          onClose={() => setShowAddPosition(false)}
         />
       )}
 
@@ -294,6 +315,9 @@ function AnalyzeResult({
   shownContracts,
   closestMatch,
   displayStockPrice,
+  selectedContract,
+  onSelectContract,
+  onAddPosition,
 }: {
   result: AnalyzeTickerResponse;
   state: AppState;
@@ -312,6 +336,9 @@ function AnalyzeResult({
   shownContracts: number;
   closestMatch: ContractAnalysis | null;
   displayStockPrice: number | null;
+  selectedContract: ContractAnalysis | null;
+  onSelectContract: (c: ContractAnalysis | null) => void;
+  onAddPosition: () => void;
 }) {
   const maxCycleDays = state.activeProfile?.max_recycle_days ?? 120;
 
@@ -392,7 +419,7 @@ function AnalyzeResult({
         </div>
       )}
 
-      {/* Scan Universe actions — above Stock Summary */}
+      {/* Scan Universe + Add Position actions — above Stock Summary */}
       <div className="flex flex-wrap items-center gap-3">
         {universeEntry?.enabled ? (
           <button
@@ -421,6 +448,15 @@ function AnalyzeResult({
             Add to Scan Universe
           </button>
         )}
+        <button
+          onClick={onAddPosition}
+          disabled={!selectedContract}
+          title={!selectedContract ? 'Select a contract first' : undefined}
+          className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Plus className="h-4 w-4" />
+          + Position
+        </button>
       </div>
 
       {/* Toast feedback */}
@@ -617,6 +653,7 @@ function AnalyzeResult({
                       const status = contractStatus(c);
                       const reason = reasonSummary(c);
                       const isClosest = closestMatch?.strike === c.strike && closestMatch?.expiration === c.expiration;
+                      const isSelected = selectedContract?.strike === c.strike && selectedContract?.expiration === c.expiration;
                       const probs = calcProbabilities({
                         stockPrice: displayStockPrice ?? 0,
                         strike: c.strike,
@@ -627,10 +664,15 @@ function AnalyzeResult({
                         maxCycleDays,
                       });
                       return (
-                        <tr key={i} className={`hover:bg-slate-800/40 transition-colors ${isClosest ? 'ring-1 ring-inset ring-amber-500/20' : ''}`}>
+                        <tr
+                          key={i}
+                          onClick={() => onSelectContract(isSelected ? null : c)}
+                          className={`cursor-pointer transition-colors ${isSelected ? 'bg-sky-500/10 ring-1 ring-inset ring-sky-500/30' : 'hover:bg-slate-800/40'} ${isClosest && !isSelected ? 'ring-1 ring-inset ring-amber-500/20' : ''}`}
+                        >
                           <td className="px-3 py-2 text-right tabular-nums text-slate-200 font-medium">
                             ${formatNum(c.strike)}
                             {isClosest && <span className="ml-1 text-amber-400 text-xs">★</span>}
+                            {isSelected && <span className="ml-1 text-sky-400 text-xs">●</span>}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.dte}</td>
                           <td className="px-3 py-2 text-right tabular-nums text-sky-400 font-medium">
@@ -726,6 +768,265 @@ function StatBox({
       </div>
       <div className="text-sm font-medium text-slate-200 tabular-nums mt-0.5">{value}</div>
       {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+function AddPositionModal({
+  state,
+  contract,
+  ticker,
+  companyName,
+  displayStockPrice,
+  trend,
+  primarySupport,
+  onClose,
+}: {
+  state: AppState;
+  contract: ContractAnalysis;
+  ticker: string;
+  companyName: string | null;
+  displayStockPrice: number | null;
+  trend: string;
+  primarySupport: number | null;
+  onClose: () => void;
+}) {
+  const profile = state.activeProfile;
+  const today = new Date().toISOString().split('T')[0];
+
+  const [contracts, setContracts] = useState('1');
+  const [openDate, setOpenDate] = useState(today);
+  const [actualSto, setActualSto] = useState(String(contract.suggested_sto ?? ''));
+  const [broker, setBroker] = useState('');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [duplicateWarning, setDuplicateWarning] = useState(false);
+
+  const stoNum = parseFloat(actualSto);
+  const contractsNum = parseInt(contracts) || 1;
+
+  const recalc = useMemo(() => {
+    if (!profile || isNaN(stoNum) || stoNum <= 0) return null;
+    const { best } = calcBtcOptimization(stoNum, contract.strike, contractsNum, profile, true);
+    const btcTarget = best ? best.btc_price : 0.01;
+    const netProfit = calcNetProfit(stoNum, btcTarget, contractsNum, profile.round_trip_commission);
+    const netCroi = calcCroiFromCollateral(netProfit, contract.strike, contractsNum);
+    const pc = calcPremiumCapture(stoNum, btcTarget);
+    const breakeven = calcBreakeven(contract.strike, stoNum);
+    return { btcTarget, netProfit, netCroi, pc, breakeven };
+  }, [profile, stoNum, contractsNum, contract.strike]);
+
+  const isQualified = contract.qualified;
+  const duplicateExists = state.openPositions.some(
+    (p) =>
+      p.ticker.toUpperCase() === ticker.toUpperCase() &&
+      p.strike === contract.strike &&
+      p.expiration === contract.expiration,
+  );
+
+  useEffect(() => {
+    setDuplicateWarning(duplicateExists);
+  }, [duplicateExists]);
+
+  const handleSave = async () => {
+    if (!profile || isNaN(stoNum) || stoNum <= 0) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const btcTarget = recalc?.btcTarget ?? 0.01;
+      const netProfit = recalc?.netProfit ?? 0;
+      const netCroi = recalc?.netCroi ?? 0;
+      const pc = recalc?.pc ?? 0;
+      const breakeven = recalc?.breakeven ?? contract.strike - stoNum;
+
+      const newPos: Partial<OpenPosition> = {
+        ticker,
+        company_name: companyName ?? '',
+        strike: contract.strike,
+        expiration: contract.expiration,
+        contracts: contractsNum,
+        open_date: openDate,
+        actual_sto: stoNum,
+        current_bid: contract.bid,
+        current_ask: contract.ask,
+        current_mid: contract.mid,
+        btc_target: parseFloat(btcTarget.toFixed(2)),
+        net_target_profit: parseFloat(netProfit.toFixed(2)),
+        net_croi: parseFloat(netCroi.toFixed(2)),
+        premium_capture: parseFloat(pc.toFixed(1)),
+        collateral: contract.strike * 100 * contractsNum,
+        breakeven: parseFloat(breakeven.toFixed(2)),
+        stock_price: displayStockPrice ?? 0,
+        trend_classification: trend,
+        primary_support: primarySupport ?? 0,
+        support_status: 'Stable',
+        position_status: 'Waiting',
+        days_open: 0,
+        days_to_review: profile.max_recycle_days,
+        strategy_profile_id: profile.id,
+      };
+
+      await state.addOpenPosition(newPos);
+      setSaveSuccess(true);
+      setTimeout(() => {
+        onClose();
+      }, 1500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to add position';
+      setSaveError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-lg rounded-xl border border-slate-700 bg-slate-900 max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
+          <h2 className="text-lg font-semibold text-slate-100">Add Position</h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 transition-colors">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {saveSuccess ? (
+          <div className="p-8 text-center">
+            <CheckCircle2 className="h-10 w-10 mx-auto mb-3 text-emerald-400" />
+            <p className="text-sm font-medium text-emerald-400">Position added</p>
+            <p className="text-xs text-slate-500 mt-1">{ticker} ${formatNum(contract.strike)} Put · {contract.expiration}</p>
+          </div>
+        ) : (
+          <div className="space-y-4 p-5">
+            {/* Contract summary */}
+            <div className="rounded-lg border border-slate-800 bg-slate-800/40 p-4">
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div><span className="text-slate-500">Ticker:</span> <span className="font-semibold text-slate-200">{ticker}</span></div>
+                <div><span className="text-slate-500">Type:</span> <span className="text-slate-200">Put</span></div>
+                <div><span className="text-slate-500">Strike:</span> <span className="text-slate-200 tabular-nums">${formatNum(contract.strike)}</span></div>
+                <div><span className="text-slate-500">Expiration:</span> <span className="text-slate-200">{contract.expiration}</span></div>
+                <div><span className="text-slate-500">DTE:</span> <span className="text-slate-300 tabular-nums">{contract.dte}</span></div>
+                <div><span className="text-slate-500">Stock Price:</span> <span className="text-slate-300 tabular-nums">{displayStockPrice != null ? `${formatNum(displayStockPrice)}` : 'Unavailable'}</span></div>
+              </div>
+            </div>
+
+            {/* Qualification warning */}
+            {!isQualified && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>This contract does not currently qualify under the active strategy.</span>
+              </div>
+            )}
+
+            {/* Duplicate warning */}
+            {duplicateWarning && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>An open position already exists for this contract. You can still add another lot.</span>
+              </div>
+            )}
+
+            {/* Form fields */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Contracts</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={contracts}
+                  onChange={(e) => setContracts(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Open Date</label>
+                <input
+                  type="date"
+                  value={openDate}
+                  onChange={(e) => setOpenDate(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-sm text-slate-400 mb-1">Actual STO Fill</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={actualSto}
+                  onChange={(e) => setActualSto(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100"
+                  placeholder="0.00"
+                  autoFocus
+                />
+                <p className="text-xs text-slate-500 mt-1">Prefilled from scanner quote. Edit to match your actual fill.</p>
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Broker <span className="text-slate-600">(optional)</span></label>
+                <input
+                  type="text"
+                  value={broker}
+                  onChange={(e) => setBroker(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100"
+                  placeholder="e.g. Tastytrade"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Notes <span className="text-slate-600">(optional)</span></label>
+                <input
+                  type="text"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100"
+                  placeholder=""
+                />
+              </div>
+            </div>
+
+            {/* Live recalculation preview */}
+            {recalc && (
+              <div className="rounded-lg border border-slate-800 bg-slate-800/30 p-4">
+                <div className="text-xs text-slate-500 mb-2">Recalculated from actual fill</div>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div><span className="text-slate-500">BTC Target:</span> <span className="text-sky-300 tabular-nums">${formatNum(recalc.btcTarget)}</span></div>
+                  <div><span className="text-slate-500">Net Profit:</span> <span className="text-slate-300 tabular-nums">${formatNum(recalc.netProfit)}</span></div>
+                  <div><span className="text-slate-500">Net CROI:</span> <span className="text-emerald-400 tabular-nums">{formatPct(recalc.netCroi)}</span></div>
+                  <div><span className="text-slate-500">Premium Capture:</span> <span className="text-slate-300 tabular-nums">{formatPct(recalc.pc)}</span></div>
+                  <div><span className="text-slate-500">Breakeven:</span> <span className="text-slate-300 tabular-nums">${formatNum(recalc.breakeven)}</span></div>
+                  <div><span className="text-slate-500">Collateral:</span> <span className="text-slate-300 tabular-nums">${formatNum(contract.strike * 100 * contractsNum)}</span></div>
+                </div>
+              </div>
+            )}
+
+            {saveError && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+                {saveError}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={onClose}
+                className="px-4 py-2 rounded-lg text-sm text-slate-400 hover:bg-slate-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving || isNaN(stoNum) || stoNum <= 0}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium hover:bg-emerald-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                {saving ? 'Saving...' : 'Save Position'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
