@@ -1441,7 +1441,7 @@ async function scanSymbol(
         net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
-        qualified, rejection_reasons: reasons,
+        qualified: qualified && !technicalPending, rejection_reasons: reasons,
         technical_pending: technicalPending,
         pass_fail: passFail,
         strategy_profile_id: profile.id,
