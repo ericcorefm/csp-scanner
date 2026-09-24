@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Plus, Trash2, RotateCcw, Power, AlertCircle, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, Power, AlertCircle, CheckCircle2, XCircle, AlertTriangle, EyeOff, Eye } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { Page } from '@/components/Layout';
 import { Card, Badge } from '@/components/ui';
@@ -9,6 +9,7 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showDisabled, setShowDisabled] = useState(false);
 
   const entries = state.scanUniverseEntries;
   const activeCount = entries.filter((e) => e.enabled).length;
@@ -43,8 +44,19 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
     entries.filter((e) => universeStatus.get(e.symbol.toUpperCase()) === 'rejected').length
   , [entries, universeStatus]);
 
-  const allSelected = entries.length > 0 && selected.size === entries.length;
-  const someSelected = selected.size > 0 && selected.size < entries.length;
+  // A row is "hidden" if it's disabled OR rejected. Show only active/pending by default.
+  const visibleEntries = useMemo(() => {
+    if (showDisabled) return entries;
+    return entries.filter((e) => {
+      if (!e.enabled) return false;
+      const status = universeStatus.get(e.symbol.toUpperCase());
+      if (status === 'rejected') return false;
+      return true;
+    });
+  }, [entries, showDisabled, universeStatus]);
+
+  const allSelected = visibleEntries.length > 0 && selected.size === visibleEntries.length;
+  const someSelected = selected.size > 0 && selected.size < visibleEntries.length;
 
   const toggleRow = (symbol: string) => {
     setSelected((prev) => {
@@ -59,7 +71,7 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
     if (allSelected) {
       setSelected(new Set());
     } else {
-      setSelected(new Set(entries.map((e) => e.symbol)));
+      setSelected(new Set(visibleEntries.map((e) => e.symbol)));
     }
   };
 
@@ -200,8 +212,20 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
           </div>
           <div className="flex items-center gap-2 ml-auto">
             <button
+              onClick={() => setShowDisabled((v) => !v)}
+              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                showDisabled
+                  ? 'border-amber-600/50 text-amber-400 bg-amber-900/10'
+                  : 'border-slate-700 text-slate-300 hover:bg-slate-800'
+              }`}
+              title={showDisabled ? 'Showing disabled/rejected tickers' : 'Click to show disabled/rejected tickers'}
+            >
+              {showDisabled ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+              {showDisabled ? 'Hide Disabled' : 'Show Disabled'}
+            </button>
+            <button
               onClick={toggleSelectAll}
-              disabled={entries.length === 0 || actionLoading}
+              disabled={visibleEntries.length === 0 || actionLoading}
               className="flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {allSelected ? 'Deselect All' : 'Select All'}
@@ -238,7 +262,7 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
                     type="checkbox"
                     checked={allSelected}
                     onChange={toggleSelectAll}
-                    disabled={entries.length === 0 || actionLoading}
+                    disabled={visibleEntries.length === 0 || actionLoading}
                     className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-sky-500 focus:ring-sky-500/40 cursor-pointer"
                   />
                 </th>
@@ -251,10 +275,12 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
-              {entries.map((entry) => {
+              {visibleEntries.map((entry) => {
                 const isChecked = selected.has(entry.symbol);
+                const status = universeStatus.get(entry.symbol.toUpperCase());
+                const isHidden = !entry.enabled || status === 'rejected';
                 return (
-                  <tr key={entry.id} className={`hover:bg-slate-800/40 transition-colors ${!entry.enabled ? 'opacity-50' : ''}`}>
+                  <tr key={entry.id} className={`hover:bg-slate-800/40 transition-colors ${isHidden ? 'opacity-50' : ''}`}>
                     <td className="px-4 py-2.5" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
@@ -288,16 +314,16 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
                           <span className={`h-1.5 w-1.5 rounded-full ${entry.enabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />
                           {entry.enabled ? 'Active' : 'Disabled'}
                         </span>
-                        {universeStatus.has(entry.symbol.toUpperCase()) && (
+                        {status && (
                           <span className={`inline-flex items-center gap-1 text-xs ${
-                            universeStatus.get(entry.symbol.toUpperCase()) === 'qualified' ? 'text-emerald-400' :
-                            universeStatus.get(entry.symbol.toUpperCase()) === 'pending' ? 'text-amber-400' :
+                            status === 'qualified' ? 'text-emerald-400' :
+                            status === 'pending' ? 'text-amber-400' :
                             'text-red-400'
                           }`}>
-                            {universeStatus.get(entry.symbol.toUpperCase()) === 'qualified' && <CheckCircle2 className="h-3 w-3" />}
-                            {universeStatus.get(entry.symbol.toUpperCase()) === 'pending' && <AlertTriangle className="h-3 w-3" />}
-                            {universeStatus.get(entry.symbol.toUpperCase()) === 'rejected' && <XCircle className="h-3 w-3" />}
-                            {universeStatus.get(entry.symbol.toUpperCase())}
+                            {status === 'qualified' && <CheckCircle2 className="h-3 w-3" />}
+                            {status === 'pending' && <AlertTriangle className="h-3 w-3" />}
+                            {status === 'rejected' && <XCircle className="h-3 w-3" />}
+                            {status}
                           </span>
                         )}
                       </div>
@@ -319,6 +345,19 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
                   </tr>
                 );
               })}
+              {visibleEntries.length === 0 && entries.length > 0 && !showDisabled && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-slate-500">
+                    No active tickers to display. {disabledCount} disabled. {rejectedCount} rejected.
+                    <button
+                      onClick={() => setShowDisabled(true)}
+                      className="ml-2 text-sky-400 hover:text-sky-300 hover:underline"
+                    >
+                      Show Disabled
+                    </button>
+                  </td>
+                </tr>
+              )}
               {entries.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-4 py-12 text-center text-slate-500">
