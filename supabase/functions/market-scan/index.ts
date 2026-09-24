@@ -2071,6 +2071,98 @@ serve(async (req) => {
         for (const r of resultsB) { if (r) candidatesB.push(...r.candidates); }
       }
 
+      // ── STAGE 2 for A/B: Cache warming (mirrors live scan logic) ──
+      // Both profiles get the same cache-warming treatment so pending tickers
+      // have their history fetched and re-scanned, exactly like the live scan.
+      const AB_MAX_HISTORY_FETCHES = 4;
+
+      async function abWarmPending(
+        candidates: any[],
+        prof: Profile,
+        noFilter: boolean,
+        label: string,
+      ): Promise<void> {
+        const hasActiveTech =
+          !noFilter &&
+          !isSectionOff(prof, 'technical_rules_enabled') &&
+          (prof.rsi_min != null || prof.rsi_max != null ||
+            prof.require_ma20_above_ma50 === true || prof.require_ma50_above_ma200 === true ||
+            prof.require_price_above_ma200 === true || prof.exclude_downtrend_no_support === true);
+        const supportDistNeedsHistory = !noFilter &&
+          !isSectionOff(prof, 'support_distance_enabled') &&
+          (prof.minimum_support_distance_pct != null || prof.maximum_support_distance_pct != null);
+        const historyNeeded = hasActiveTech || supportDistNeedsHistory;
+        if (!historyNeeded) return;
+
+        const pendingTickers = new Map<string, { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }>();
+        for (const c of candidates) {
+          if (c.technical_pending && (!c.rejection_reasons || c.rejection_reasons.length === 0)) {
+            const existing = pendingTickers.get(c.ticker);
+            const croi = c.net_croi || 0;
+            const oi = c.open_interest || 0;
+            const vol = c.volume || 0;
+            if (!existing || croi > existing.bestCroi) {
+              pendingTickers.set(c.ticker, { ticker: c.ticker, bestCroi: croi, bestOi: Math.max(oi, existing?.bestOi || 0), bestVolume: Math.max(vol, existing?.bestVolume || 0), cachedBars: 0 });
+            }
+          }
+        }
+
+        const needsFetch: { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }[] = [];
+        for (const info of pendingTickers.values()) {
+          const upper = info.ticker.toUpperCase();
+          const cachedBars = await loadCachedHistory(upper, 260);
+          info.cachedBars = cachedBars.length;
+          const needsMA200 = hasActiveTech && (prof.require_ma50_above_ma200 || prof.require_price_above_ma200);
+          const requiredBars = needsMA200 ? 200 : 60;
+          if (cachedBars.length < requiredBars) {
+            needsFetch.push(info);
+          }
+        }
+
+        needsFetch.sort((a, b) => {
+          const aHasCroi = a.bestCroi > 0 ? 1 : 0;
+          const bHasCroi = b.bestCroi > 0 ? 1 : 0;
+          if (aHasCroi !== bHasCroi) return bHasCroi - aHasCroi;
+          if (a.bestOi !== b.bestOi) return b.bestOi - a.bestOi;
+          return b.bestVolume - a.bestVolume;
+        });
+
+        const toFetch = needsFetch.slice(0, AB_MAX_HISTORY_FETCHES);
+        console.log(`[AB-TEST ${label}] ${needsFetch.length} tickers need history, fetching top ${toFetch.length}`);
+
+        for (const info of toFetch) {
+          const upper = info.ticker.toUpperCase();
+          stockCache.delete(upper);
+          const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null, true);
+          const finalBars = snapshot.historicalBars.length;
+
+          if (finalBars >= 60) {
+            console.log(`[AB-TEST ${label}] ${upper} | fetched ${finalBars} bars, re-scanning`);
+            const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
+            const rerunResult = await scanSymbol(upper, '', prof, apiKey, openTickers, noFilter, today, fmt, false, false, price, false);
+            if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
+              for (let ci = candidates.length - 1; ci >= 0; ci--) {
+                if (candidates[ci].ticker === upper) candidates.splice(ci, 1);
+              }
+              candidates.push(...rerunResult.candidates);
+            }
+          } else {
+            console.log(`[AB-TEST ${label}] ${upper} | fetch returned only ${finalBars} bars — still pending`);
+          }
+        }
+      }
+
+      await abWarmPending(candidatesA, profileA, noFilterA, 'A');
+      await abWarmPending(candidatesB, profileB, noFilterB, 'B');
+
+      // Log SOFI specifically if present in either profile
+      const sofiA = candidatesA.find((c) => c.ticker === 'SOFI');
+      const sofiB = candidatesB.find((c) => c.ticker === 'SOFI');
+      if (sofiA || sofiB) {
+        console.log(`[AB-TEST SOFI] A: qualified=${sofiA?.qualified ?? 'N/A'}, pending=${sofiA?.technical_pending ?? 'N/A'}, reasons=${JSON.stringify(sofiA?.rejection_reasons ?? [])}, pendingReasons=${JSON.stringify(sofiA?.pending_reasons ?? [])}, netCROI=${sofiA?.net_croi ?? 'N/A'}, PC=${sofiA?.premium_capture ?? 'N/A'}, OI=${sofiA?.open_interest ?? 'N/A'}, vol=${sofiA?.volume ?? 'N/A'}, supportDist=${sofiA?.strike_distance_from_support ?? 'N/A'}`);
+        console.log(`[AB-TEST SOFI] B: qualified=${sofiB?.qualified ?? 'N/A'}, pending=${sofiB?.technical_pending ?? 'N/A'}, reasons=${JSON.stringify(sofiB?.rejection_reasons ?? [])}, pendingReasons=${JSON.stringify(sofiB?.pending_reasons ?? [])}, netCROI=${sofiB?.net_croi ?? 'N/A'}, PC=${sofiB?.premium_capture ?? 'N/A'}, OI=${sofiB?.open_interest ?? 'N/A'}, vol=${sofiB?.volume ?? 'N/A'}, supportDist=${sofiB?.strike_distance_from_support ?? 'N/A'}`);
+      }
+
       // Build comparison maps keyed by ticker|strike|expiration
       const keyOf = (c: any) => `${c.ticker}|${c.strike}|${c.expiration}`;
       const mapA = new Map<string, any>();
