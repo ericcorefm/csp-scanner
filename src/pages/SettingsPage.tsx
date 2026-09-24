@@ -84,6 +84,12 @@ const sections: SectionDef[] = [
       { key: 'require_ma50_above_ma200', label: 'Require MA50 > MA200', type: 'boolean' },
       { key: 'require_price_above_ma200', label: 'Require Price > MA200', type: 'boolean' },
       { key: 'exclude_downtrend_no_support', label: 'Exclude Downtrend Without Support', type: 'boolean' },
+    ],
+  },
+  {
+    title: 'Support Distance',
+    enabledKey: 'support_distance_enabled',
+    fields: [
       { key: 'minimum_support_distance_pct', label: 'Minimum Support Distance', type: 'number', unit: '%', step: '1', placeholder: 'No minimum', help: 'Minimum percentage the put strike must be below the calculated primary support level. Leave blank for no minimum.' },
       { key: 'maximum_support_distance_pct', label: 'Maximum Support Distance', type: 'number', unit: '%', step: '1', placeholder: 'No maximum', help: 'Maximum percentage the put strike may be below the calculated primary support level. Leave blank for no maximum.' },
     ],

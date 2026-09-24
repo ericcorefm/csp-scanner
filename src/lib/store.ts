@@ -62,6 +62,7 @@ const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'>
   exclude_downtrend_no_support: true,
   minimum_support_distance_pct: null,
   maximum_support_distance_pct: null,
+  support_distance_enabled: true,
   min_dte: 365,
   minimum_stock_price: null,
   maximum_stock_price: null,

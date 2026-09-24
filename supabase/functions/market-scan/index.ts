@@ -51,6 +51,7 @@ type Profile = {
   spread_enabled: boolean;
   short_interest_enabled: boolean;
   technical_rules_enabled: boolean;
+  support_distance_enabled: boolean;
 };
 
 type HistoryBar = { date: string; open: number; high: number; low: number; close: number; volume: number };
@@ -1383,27 +1384,30 @@ async function scanSymbol(
             reasons.push('Downtrend without support');
             r.techRejections!.downtrend_no_support++;
           }
-          // Support distance
-          if (primarySupport !== null && primarySupport > 0) {
-            const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-            if (profile.minimum_support_distance_pct != null && supportDistPct < profile.minimum_support_distance_pct) {
-              reasons.push('Support distance too low');
-              r.techRejections!.support_dist_below_min++;
-            }
-            if (profile.maximum_support_distance_pct != null && supportDistPct > profile.maximum_support_distance_pct) {
-              reasons.push('Support distance too high');
-              r.techRejections!.support_dist_above_max++;
-            }
-          } else {
-            if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
-              pendingReasons.push('Support distance not evaluated — support unavailable');
-            }
-          }
         } else {
           // Technical data (history bars) unavailable — Pending
           if (!pendingReasons.includes('Missing technical data')) {
             pendingReasons.push('Missing technical data');
             r.techRejections!.technical_data_missing++;
+          }
+        }
+      }
+
+      // ── SUPPORT DISTANCE SECTION (independent of technical_rules_enabled) ──
+      if (!isSectionOff(profile, 'support_distance_enabled')) {
+        if (primarySupport !== null && primarySupport > 0) {
+          const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
+          if (profile.minimum_support_distance_pct != null && supportDistPct < profile.minimum_support_distance_pct) {
+            reasons.push('Support distance too low');
+            r.techRejections!.support_dist_below_min++;
+          }
+          if (profile.maximum_support_distance_pct != null && supportDistPct > profile.maximum_support_distance_pct) {
+            reasons.push('Support distance too high');
+            r.techRejections!.support_dist_above_max++;
+          }
+        } else if (canComputeBaseTechnicals) {
+          if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
+            pendingReasons.push('Support distance not evaluated — support unavailable');
           }
         }
       }
@@ -1460,7 +1464,7 @@ async function scanSymbol(
     // (data needed to evaluate a rule is temporarily unavailable).
     const hasRejections = reasons.length > 0;
     const hasPending = pendingReasons.length > 0;
-    const technicalPending = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !canComputeBaseTechnicals;
+    const technicalPending = !noFilterMode && (!isSectionOff(profile, 'technical_rules_enabled') || !isSectionOff(profile, 'support_distance_enabled')) && !canComputeBaseTechnicals;
     const isPending = !hasRejections && (hasPending || technicalPending);
     const qualified = !hasRejections && !isPending;
     r.evaluated++;
@@ -1531,18 +1535,19 @@ async function scanSymbol(
           }
           const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport);
           passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
-          if (primarySupport !== null && primarySupport > 0) {
-            const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-            const distMinOk = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
-            const distMaxOk = profile.maximum_support_distance_pct == null || supportDistPct <= profile.maximum_support_distance_pct;
-            const distOk = distMinOk && distMaxOk;
-            const distLabel = `${profile.minimum_support_distance_pct != null ? profile.minimum_support_distance_pct + '%' : 'no min'}–${profile.maximum_support_distance_pct != null ? profile.maximum_support_distance_pct + '%' : 'no max'}`;
-            passFail.push({ rule: `Support distance ${distLabel} (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
-          } else {
-            passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
-          }
         } else {
           passFail.push({ rule: 'Technical history unavailable', pass: true, status: 'not_evaluated' });
+        }
+      }
+      if (!isSectionOff(profile, 'support_distance_enabled')) {
+        if (primarySupport !== null && primarySupport > 0) {
+          const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
+          const distMinOk = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
+          const distMaxOk = profile.maximum_support_distance_pct == null || supportDistPct <= profile.maximum_support_distance_pct;
+          const distOk = distMinOk && distMaxOk;
+          const distLabel = `${profile.minimum_support_distance_pct != null ? profile.minimum_support_distance_pct + '%' : 'no min'}–${profile.maximum_support_distance_pct != null ? profile.maximum_support_distance_pct + '%' : 'no max'}`;
+          passFail.push({ rule: `Support distance ${distLabel} (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
+        } else {
           passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
         }
       }
@@ -1769,6 +1774,7 @@ serve(async (req) => {
       isSectionOff(profile, 'spread_enabled') &&
       isSectionOff(profile, 'short_interest_enabled') &&
       isSectionOff(profile, 'technical_rules_enabled') &&
+      isSectionOff(profile, 'support_distance_enabled') &&
       profile.exclude_existing_positions === false;
 
     console.log(`mode=${mode}, scanMode=${scanMode}, noFilterMode=${noFilterMode}`);
