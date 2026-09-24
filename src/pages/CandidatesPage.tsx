@@ -1,5 +1,5 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check, Stethoscope } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
@@ -17,16 +17,6 @@ const rejectionColors: Record<string, 'error' | 'warning'> = {
   'Existing position': 'warning',
   'Short interest warning': 'warning',
   'Insufficient liquidity': 'error',
-  'RSI below minimum': 'error',
-  'RSI above maximum': 'error',
-  'MA20 not above MA50': 'error',
-  'MA50 not above MA200': 'error',
-  'Price not above MA200': 'error',
-  'Support distance too low': 'error',
-  'Support distance too high': 'error',
-  'Missing technical data': 'warning',
-  'Stock price below minimum': 'error',
-  'Stock price above maximum': 'error',
 };
 
 const DASH = <span className="text-slate-600">--</span>;
@@ -44,8 +34,6 @@ export function CandidatesPage({
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [quoteModalRow, setQuoteModalRow] = useState<string | null>(null);
-
-  const [showDebug, setShowDebug] = useState(true);
 
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
@@ -122,37 +110,6 @@ export function CandidatesPage({
 
   const colCount = 16;
 
-  const closestMatches = useMemo(() => {
-    const all = state.candidates;
-    if (all.length === 0) return [];
-    const withData = all.map((c) => {
-      const failedRules = c.rejection_reasons.length;
-      const passFailFails = c.pass_fail?.filter((p) => p.status === 'fail').length ?? 0;
-      const totalFails = Math.max(failedRules, passFailFails);
-      return { candidate: c, totalFails, failedRules, passFailFails };
-    });
-    withData.sort((a, b) => {
-      if (a.totalFails !== b.totalFails) return a.totalFails - b.totalFails;
-      return (b.candidate.net_croi ?? 0) - (a.candidate.net_croi ?? 0);
-    });
-    return withData.slice(0, 20);
-  }, [state.candidates]);
-
-  const priceAboveMa200 = (c: CandidateScan): boolean | null => {
-    const pf = c.pass_fail?.find((p) => p.rule.startsWith('Price > MA200'));
-    if (pf) return pf.pass;
-    return null;
-  };
-
-  const getRsi = (c: CandidateScan): number | null => {
-    const pf = c.pass_fail?.find((p) => p.rule.startsWith('RSI'));
-    if (pf) {
-      const match = pf.rule.match(/\(([\d.]+)\)/);
-      if (match) return parseFloat(match[1]);
-    }
-    return null;
-  };
-
   return (
     <div className="space-y-4">
       {state.scanning && (
@@ -194,14 +151,13 @@ export function CandidatesPage({
 
       {state.scanCounts && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Qualification Summary</div>
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-8 gap-4">
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
             <ScanCountItem label="Contracts Evaluated" value={state.scanCounts.contracts_evaluated} color="text-sky-400" />
             <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
-            <ScanCountItem label="Pending" value={Math.max(0, state.scanCounts.contracts_evaluated - state.scanCounts.qualified - state.scanCounts.rejected)} color="text-amber-400" />
             <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-red-400" />
+            <ScanCountItem label="Pending" value={Math.max(0, state.scanCounts.contracts_evaluated - state.scanCounts.qualified - state.scanCounts.rejected)} color="text-amber-400" />
             <ScanCountItem label="Qualified Tickers" value={state.scanCounts.unique_qualified_tickers ?? new Set(displayCandidates.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} color="text-emerald-400" />
             <ScanCountItem
               label="Last Scan"
@@ -211,29 +167,16 @@ export function CandidatesPage({
           </div>
           {state.scanCounts.rejection_breakdown && Object.keys(state.scanCounts.rejection_breakdown).length > 0 && (
             <div className="mt-3 pt-3 border-t border-slate-800">
-              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Rejected By</div>
-              <div className="flex flex-wrap gap-x-5 gap-y-2">
+              <div className="text-xs text-slate-500 mb-2">Rejected by:</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
                 {Object.entries(state.scanCounts.rejection_breakdown)
                   .sort((a, b) => b[1] - a[1])
-                  .map(([reason, count]) => {
-                    const totalEvaluated = state.scanCounts!.contracts_evaluated || 1;
-                    const pct = Math.round((count / totalEvaluated) * 100);
-                    return (
-                      <div key={reason} className="flex items-center gap-2 text-xs">
-                        <span className="text-slate-400">{reason}</span>
-                        <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
-                        <span className="text-slate-600 tabular-nums">({pct}%)</span>
-                      </div>
-                    );
-                  })}
-              </div>
-              <div className="mt-2 flex gap-4 text-xs">
-                <span className="text-slate-500">
-                  Any-failure (contracts with {'>='}1 rejection): <span className="font-semibold text-slate-300 tabular-nums">{state.scanCounts.rejected}</span>
-                </span>
-                <span className="text-slate-500">
-                  Primary reason (first rejection): <span className="font-semibold text-slate-300 tabular-nums">{state.scanCounts.rejected}</span>
-                </span>
+                  .map(([reason, count]) => (
+                    <div key={reason} className="flex items-center gap-1.5 text-xs">
+                      <span className="text-slate-400">{reason}</span>
+                      <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
+                    </div>
+                  ))}
               </div>
             </div>
           )}
@@ -274,103 +217,6 @@ export function CandidatesPage({
           </div>
         </div>
       </div>
-
-      {/* Diagnostic: Top 20 Closest Matches */}
-      {state.scanCounts && (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/50 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
-            <div className="flex items-center gap-2">
-              <Stethoscope className="h-4 w-4 text-amber-400" />
-              <span className="text-sm font-semibold text-slate-200">Top 20 Closest Matches</span>
-              <span className="text-xs text-slate-500">(diagnostic — sorted by fewest failed rules, then highest CROI)</span>
-            </div>
-            <button
-              onClick={() => setShowDebug(!showDebug)}
-              className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
-            >
-              {showDebug ? 'Hide' : 'Show'}
-            </button>
-          </div>
-          {showDebug && (
-            <div className="overflow-x-auto">
-              {closestMatches.length === 0 ? (
-                <div className="py-6 text-center text-sm text-slate-500">
-                  No contracts returned from last scan. Run Rescan to populate this table.
-                </div>
-              ) : (
-                <table className="w-full text-sm">
-                  <thead className="border-b border-slate-800 bg-slate-900/80">
-                    <tr>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-left whitespace-nowrap">Ticker</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">Strike</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-left whitespace-nowrap">Expiration</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">DTE</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">CROI</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">PC</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">OI</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">Volume</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">RSI</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-center whitespace-nowrap">Price &gt; MA200?</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-right whitespace-nowrap">Support Dist %</th>
-                      <th className="px-3 py-2 text-xs font-medium text-slate-400 text-left whitespace-nowrap">Failed Rules</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {closestMatches.map(({ candidate: c, totalFails, failedRules }) => (
-                      <tr
-                        key={`${c.ticker}-${c.strike}-${c.expiration}`}
-                        onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
-                        className={`cursor-pointer transition-colors hover:bg-slate-800/40 ${c.qualified ? 'bg-emerald-500/5' : ''}`}
-                      >
-                        <td className="px-3 py-2 font-semibold text-slate-100">{c.ticker}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200">${formatNum(c.strike)}</td>
-                        <td className="px-3 py-2 text-slate-400 text-xs whitespace-nowrap">{c.expiration}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.dte}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">
-                          {c.net_croi > 0 ? (
-                            <span className={c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-slate-300'}>{formatPct(c.net_croi)}</span>
-                          ) : <span className="text-slate-600">--</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-300">
-                          {c.premium_capture > 0 ? formatPct(c.premium_capture) : <span className="text-slate-600">--</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                          {c.open_interest > 0 ? c.open_interest.toLocaleString() : <span className="text-slate-600">--</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                          {c.volume > 0 ? c.volume : <span className="text-slate-600">--</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                          {getRsi(c) !== null ? getRsi(c)!.toFixed(1) : <span className="text-slate-600">--</span>}
-                        </td>
-                        <td className="px-3 py-2 text-center">
-                          {priceAboveMa200(c) === true && <Check className="h-3.5 w-3.5 text-emerald-400 mx-auto" />}
-                          {priceAboveMa200(c) === false && <XCircle className="h-3.5 w-3.5 text-red-400 mx-auto" />}
-                          {priceAboveMa200(c) === null && <span className="text-slate-600 text-xs">n/a</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                          {c.strike_distance_from_support != null ? `${c.strike_distance_from_support}%` : <span className="text-slate-600">--</span>}
-                        </td>
-                        <td className="px-3 py-2">
-                          <div className="flex flex-wrap gap-1">
-                            <span className={`inline-flex items-center justify-center rounded px-1.5 py-0.5 text-xs font-semibold tabular-nums ${totalFails === 0 ? 'bg-emerald-500/20 text-emerald-300' : totalFails <= 2 ? 'bg-amber-500/20 text-amber-300' : 'bg-red-500/20 text-red-300'}`}>
-                              {totalFails} fail{totalFails === 1 ? '' : 's'}
-                            </span>
-                            {c.rejection_reasons.slice(0, 3).map((r) => (
-                              <span key={r} className="text-xs text-slate-500">{r}</span>
-                            ))}
-                            {c.rejection_reasons.length > 3 && <span className="text-xs text-slate-600">+{c.rejection_reasons.length - 3} more</span>}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
