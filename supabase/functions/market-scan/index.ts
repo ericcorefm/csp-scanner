@@ -38,6 +38,11 @@ type Profile = {
   exclude_downtrend_no_support: boolean;
   minimum_support_distance_pct: number;
   maximum_support_distance_pct: number;
+  rsi_min: number;
+  rsi_max: number;
+  require_ma20_above_ma50: boolean;
+  require_ma50_above_ma200: boolean;
+  require_price_above_ma200: boolean;
   order_strike_enabled: boolean;
   expiration_enabled: boolean;
   croi_pc_enabled: boolean;
@@ -1247,17 +1252,37 @@ async function scanSymbol(
       if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
       if (!isSectionOff(profile, 'order_strike_enabled') && profile.max_strike != null && strike > profile.max_strike) reasons.push('Strike too high');
       if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
+        const tech = r.technical;
+        if (tech) {
+          if (profile.rsi_min > 0 && tech.rsi < profile.rsi_min) {
+            if (!reasons.includes('RSI below minimum')) reasons.push('RSI below minimum');
+          }
+          if (profile.rsi_max > 0 && tech.rsi > profile.rsi_max) {
+            if (!reasons.includes('RSI above maximum')) reasons.push('RSI above maximum');
+          }
+          if (profile.require_ma20_above_ma50 && tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 <= tech.ma50) {
+            if (!reasons.includes('MA20 not above MA50')) reasons.push('MA20 not above MA50');
+          }
+          if (profile.require_ma50_above_ma200 && tech.ma50 > 0 && tech.ma200 > 0 && tech.ma50 <= tech.ma200) {
+            if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
+          }
+          if (profile.require_price_above_ma200 && tech.ma200 > 0 && stockPrice !== null && stockPrice > 0 && stockPrice <= tech.ma200) {
+            if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
+          }
+        }
         if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
         if (primarySupport !== null && primarySupport > 0) {
           const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
           if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
           if (supportDistPct > profile.maximum_support_distance_pct) reasons.push('Support distance too high');
         }
+      } else if (!noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable) {
+        if (!reasons.includes('Missing technical data')) reasons.push('Missing technical data');
       }
       // OI and volume rules are non-premium — they come from the contract itself
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         if (oi < profile.min_target_oi) reasons.push('OI too low');
-        if (volume < 10) reasons.push('Insufficient liquidity');
+        if (volume < profile.preferred_daily_volume) reasons.push('Insufficient liquidity');
       }
       // Stock-price filter applied at contract level (not as a symbol-level abort)
       // so that option chain availability is accurately reflected in scan counts.
@@ -1361,10 +1386,33 @@ async function scanSymbol(
       }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi, status: oi >= profile.min_target_oi ? 'pass' : 'fail' });
-        passFail.push({ rule: `Sufficient liquidity (volume >= 10)`, pass: volume >= 10, status: volume >= 10 ? 'pass' : 'fail' });
+        passFail.push({ rule: `Sufficient liquidity (volume >= ${profile.preferred_daily_volume})`, pass: volume >= profile.preferred_daily_volume, status: volume >= profile.preferred_daily_volume ? 'pass' : 'fail' });
       }
       if (!isSectionOff(profile, 'technical_rules_enabled')) {
         if (technicalDataAvailable) {
+          const tech = r.technical;
+          if (tech) {
+            if (profile.rsi_min > 0) {
+              const rsiOk = tech.rsi >= profile.rsi_min;
+              passFail.push({ rule: `RSI >= ${profile.rsi_min} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
+            }
+            if (profile.rsi_max > 0) {
+              const rsiOk = tech.rsi <= profile.rsi_max;
+              passFail.push({ rule: `RSI <= ${profile.rsi_max} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
+            }
+            if (profile.require_ma20_above_ma50) {
+              const maOk = tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 > tech.ma50;
+              passFail.push({ rule: `MA20 > MA50 (${tech.ma20} vs ${tech.ma50})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+            }
+            if (profile.require_ma50_above_ma200) {
+              const maOk = tech.ma50 > 0 && tech.ma200 > 0 && tech.ma50 > tech.ma200;
+              passFail.push({ rule: `MA50 > MA200 (${tech.ma50} vs ${tech.ma200})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+            }
+            if (profile.require_price_above_ma200) {
+              const priceOk = tech.ma200 > 0 && stockPrice !== null && stockPrice > 0 && stockPrice > tech.ma200;
+              passFail.push({ rule: `Price > MA200 (${stockPrice} vs ${tech.ma200})`, pass: priceOk, status: priceOk ? 'pass' : 'fail' });
+            }
+          }
           const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport);
           passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
           if (primarySupport !== null && primarySupport > 0) {
@@ -1377,7 +1425,7 @@ async function scanSymbol(
             passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
           }
         } else {
-          passFail.push({ rule: 'Technical history unavailable — not used to reject contract', pass: true, status: 'not_evaluated' });
+          passFail.push({ rule: 'Technical history unavailable', pass: false, status: 'fail' });
           passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
         }
       }
