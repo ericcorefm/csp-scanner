@@ -220,6 +220,28 @@ export function CandidatesPage({
               </div>
             </div>
           )}
+          {state.scanCounts.technical_cache && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <div className="text-xs text-slate-500 mb-2">Technical Cache:</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-slate-400">Tickers with 200+ bars</span>
+                  <span className="font-semibold text-emerald-400 tabular-nums">{state.scanCounts.technical_cache.tickers_with_200_plus_bars}</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-slate-400">Tickers with 60-199 bars</span>
+                  <span className="font-semibold text-sky-400 tabular-nums">{state.scanCounts.technical_cache.tickers_with_60_plus_bars}</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-slate-400">Tickers missing history</span>
+                  <span className="font-semibold text-amber-400 tabular-nums">{state.scanCounts.technical_cache.tickers_missing_history}</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-slate-600 mt-1.5">
+                Use Analyze Ticker to populate history for individual tickers. Tickers with 60+ bars but fewer than 200 will be Pending for MA200 rules.
+              </div>
+            </div>
+          )}
           {state.scanCounts.closest_matches && state.scanCounts.closest_matches.length > 0 && (
             <div className="mt-3 pt-3 border-t border-slate-800">
               <div className="text-xs text-amber-400 mb-2 font-medium">20 Closest Matches (qualified tickers = 0):</div>

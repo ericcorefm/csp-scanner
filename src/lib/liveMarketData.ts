@@ -42,6 +42,11 @@ export interface ScanCounts {
     stock_above_max: number;
     strike_above_max: number;
   };
+  technical_cache?: {
+    tickers_with_60_plus_bars: number;
+    tickers_with_200_plus_bars: number;
+    tickers_missing_history: number;
+  };
   closest_matches?: ClosestMatch[];
 }
 
