@@ -1956,6 +1956,216 @@ serve(async (req) => {
       });
     }
 
+    // ── AB-TEST MODE: deterministic A/B regression test ──
+    // Scans the same symbols with two profiles and compares results.
+    // Profile A: technical_rules_enabled = false
+    // Profile B: technical_rules_enabled = true, all individual rules null/false
+    // Both profiles share the same stock price cache (intra-request), so
+    // stock data is identical. Option chains are fetched fresh per scan but
+    // are effectively identical seconds apart.
+    if (mode === 'ab-test') {
+      const abScanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
+      const abSymbols: string[] = Array.isArray(body.symbols)
+        ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean)
+        : [];
+
+      let abSymbolList: { ticker: string; company_name: string | null }[];
+      if (abScanMode === 'universe' && abSymbols.length > 0) {
+        abSymbolList = abSymbols.map((t) => ({ ticker: t, company_name: null }));
+      } else if (abScanMode === 'universe') {
+        abSymbolList = await fetchScanUniverse();
+      } else {
+        abSymbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
+      }
+
+      if (abSymbolList.length === 0) {
+        return json({ success: false, error: 'No symbols to scan for A/B test' });
+      }
+
+      // Build Profile A: technical_rules_enabled = false
+      const profileA: Profile = { ...profile, technical_rules_enabled: false };
+      // Build Profile B: technical_rules_enabled = true, all rules null/false
+      const profileB: Profile = {
+        ...profile,
+        technical_rules_enabled: true,
+        rsi_min: null,
+        rsi_max: null,
+        require_ma20_above_ma50: false,
+        require_ma50_above_ma200: false,
+        require_price_above_ma200: false,
+        exclude_downtrend_no_support: false,
+      };
+
+      // hasActiveTechnicalRule assertion for Profile B
+      const abHasActiveRule =
+        profileB.technical_rules_enabled &&
+        (profileB.rsi_min != null ||
+          profileB.rsi_max != null ||
+          profileB.require_ma20_above_ma50 === true ||
+          profileB.require_ma50_above_ma200 === true ||
+          profileB.require_price_above_ma200 === true ||
+          profileB.exclude_downtrend_no_support === true);
+      console.log(`[AB-TEST] hasActiveTechnicalRule(Profile B) = ${abHasActiveRule}`);
+      console.assert(!abHasActiveRule, 'AB-TEST: Profile B incorrectly detects an active technical rule');
+
+      const noFilterA =
+        isSectionOff(profileA, 'order_strike_enabled') &&
+        isSectionOff(profileA, 'expiration_enabled') &&
+        isSectionOff(profileA, 'croi_pc_enabled') &&
+        isSectionOff(profileA, 'cycle_liquidity_enabled') &&
+        isSectionOff(profileA, 'spread_enabled') &&
+        isSectionOff(profileA, 'short_interest_enabled') &&
+        isSectionOff(profileA, 'technical_rules_enabled') &&
+        isSectionOff(profileA, 'support_distance_enabled') &&
+        profileA.exclude_existing_positions === false;
+
+      const noFilterB =
+        isSectionOff(profileB, 'order_strike_enabled') &&
+        isSectionOff(profileB, 'expiration_enabled') &&
+        isSectionOff(profileB, 'croi_pc_enabled') &&
+        isSectionOff(profileB, 'cycle_liquidity_enabled') &&
+        isSectionOff(profileB, 'spread_enabled') &&
+        isSectionOff(profileB, 'short_interest_enabled') &&
+        isSectionOff(profileB, 'technical_rules_enabled') &&
+        isSectionOff(profileB, 'support_distance_enabled') &&
+        profileB.exclude_existing_positions === false;
+
+      console.log(`[AB-TEST] noFilterA=${noFilterA}, noFilterB=${noFilterB}`);
+
+      // Bulk stock prices (shared between both scans)
+      const abAllTickers = abSymbolList.map((s) => s.ticker.toUpperCase());
+      const { priceMap: abBulkPriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+      let abBulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
+      if (abBulkPriceMap.size === 0) {
+        abBulkCachedPrices = await bulkLoadCachedStockPrices(abAllTickers);
+      }
+
+      const AB_BATCH = 5;
+      const candidatesA: any[] = [];
+      const candidatesB: any[] = [];
+
+      for (let i = 0; i < abSymbolList.length; i += AB_BATCH) {
+        const batch = abSymbolList.slice(i, i + AB_BATCH);
+        console.log(`[AB-TEST] Batch ${Math.floor(i / AB_BATCH) + 1}/${Math.ceil(abSymbolList.length / AB_BATCH)}: ${batch.map((b) => b.ticker).join(', ')}`);
+
+        // Scan with Profile A
+        const resultsA = await Promise.all(
+          batch.map((sym) => {
+            const upper = sym.ticker.toUpperCase();
+            const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
+            return scanSymbol(sym.ticker, sym.company_name || '', profileA, apiKey, openTickers, noFilterA, today, fmt, false, false, price, abScanMode === 'universe')
+              .catch((err) => { console.error(`[AB-TEST A] ${sym.ticker} failed: ${err}`); return null; });
+          })
+        );
+        for (const r of resultsA) { if (r) candidatesA.push(...r.candidates); }
+
+        // Scan with Profile B (same stockCache, same bulk prices)
+        const resultsB = await Promise.all(
+          batch.map((sym) => {
+            const upper = sym.ticker.toUpperCase();
+            const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
+            return scanSymbol(sym.ticker, sym.company_name || '', profileB, apiKey, openTickers, noFilterB, today, fmt, false, false, price, abScanMode === 'universe')
+              .catch((err) => { console.error(`[AB-TEST B] ${sym.ticker} failed: ${err}`); return null; });
+          })
+        );
+        for (const r of resultsB) { if (r) candidatesB.push(...r.candidates); }
+      }
+
+      // Build comparison maps keyed by ticker|strike|expiration
+      const keyOf = (c: any) => `${c.ticker}|${c.strike}|${c.expiration}`;
+      const mapA = new Map<string, any>();
+      const mapB = new Map<string, any>();
+      for (const c of candidatesA) mapA.set(keyOf(c), c);
+      for (const c of candidatesB) mapB.set(keyOf(c), c);
+
+      const allKeys = new Set([...mapA.keys(), ...mapB.keys()]);
+      const diffs: any[] = [];
+      let identical = 0;
+
+      for (const key of allKeys) {
+        const cA = mapA.get(key);
+        const cB = mapB.get(key);
+        const qA = cA?.qualified ?? false;
+        const qB = cB?.qualified ?? false;
+        const pA = cA?.technical_pending ?? false;
+        const pB = cB?.technical_pending ?? false;
+        const rA = cA?.rejection_reasons ?? [];
+        const rB = cB?.rejection_reasons ?? [];
+        const pendingA = cA?.pending_reasons ?? [];
+        const pendingB = cB?.pending_reasons ?? [];
+
+        const reasonsMatch = JSON.stringify(rA) === JSON.stringify(rB);
+        const pendingMatch = JSON.stringify(pendingA) === JSON.stringify(pendingB);
+        const statusMatch = qA === qB && pA === pB && reasonsMatch && pendingMatch;
+
+        if (statusMatch) {
+          identical++;
+        } else {
+          diffs.push({
+            key,
+            ticker: cA?.ticker ?? cB?.ticker,
+            strike: cA?.strike ?? cB?.strike,
+            expiration: cA?.expiration ?? cB?.expiration,
+            profile_a: {
+              qualified: qA,
+              pending: pA,
+              rejection_reasons: rA,
+              pending_reasons: pendingA,
+              net_croi: cA?.net_croi ?? null,
+              premium_capture: cA?.premium_capture ?? null,
+            },
+            profile_b: {
+              qualified: qB,
+              pending: pB,
+              rejection_reasons: rB,
+              pending_reasons: pendingB,
+              net_croi: cB?.net_croi ?? null,
+              premium_capture: cB?.premium_capture ?? null,
+            },
+          });
+        }
+      }
+
+      const qualifiedA = candidatesA.filter((c) => c.qualified);
+      const qualifiedB = candidatesB.filter((c) => c.qualified);
+      const qualifiedTickersA = new Set(qualifiedA.map((c) => c.ticker));
+      const qualifiedTickersB = new Set(qualifiedB.map((c) => c.ticker));
+
+      console.log(`[AB-TEST] Profile A: ${qualifiedA.length} qualified contracts, ${qualifiedTickersA.size} tickers`);
+      console.log(`[AB-TEST] Profile B: ${qualifiedB.length} qualified contracts, ${qualifiedTickersB.size} tickers`);
+      console.log(`[AB-TEST] Identical: ${identical}, Diffs: ${diffs.length}`);
+
+      return json({
+        success: true,
+        mode: 'ab-test',
+        has_active_technical_rule_profile_b: abHasActiveRule,
+        assertion_passed: !abHasActiveRule,
+        profile_a: {
+          technical_rules_enabled: false,
+          qualified_contracts: qualifiedA.length,
+          qualified_tickers: Array.from(qualifiedTickersA).sort(),
+          total_candidates: candidatesA.length,
+        },
+        profile_b: {
+          technical_rules_enabled: true,
+          rsi_min: null,
+          rsi_max: null,
+          require_ma20_above_ma50: false,
+          require_ma50_above_ma200: false,
+          require_price_above_ma200: false,
+          exclude_downtrend_no_support: false,
+          qualified_contracts: qualifiedB.length,
+          qualified_tickers: Array.from(qualifiedTickersB).sort(),
+          total_candidates: candidatesB.length,
+        },
+        identical_contracts: identical,
+        different_contracts: diffs.length,
+        diffs: diffs.slice(0, 50),
+        test_passed: diffs.length === 0 && qualifiedTickersA.size === qualifiedTickersB.size,
+        scanned_at: new Date().toISOString(),
+      });
+    }
+
     // ── DISCOVERY / UNIVERSE MODE ──
     let symbolList: { ticker: string; company_name: string | null }[];
     if (scanMode === 'universe') {
