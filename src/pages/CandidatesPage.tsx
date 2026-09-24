@@ -1,5 +1,5 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check, Bug } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
@@ -30,7 +30,6 @@ export function CandidatesPage({
 }) {
   const [showRejected, setShowRejected] = useState(false);
   const [showPending, setShowPending] = useState(false);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -166,175 +165,6 @@ export function CandidatesPage({
               isText
             />
           </div>
-          {showDiagnostics && state.scanCounts.rejection_breakdown && Object.keys(state.scanCounts.rejection_breakdown).length > 0 && (
-            <div className="mt-3 pt-3 border-t border-slate-800">
-              <div className="text-xs text-slate-500 mb-2">Rejected by:</div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-                {Object.entries(state.scanCounts.rejection_breakdown)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([reason, count]) => (
-                    <div key={reason} className="flex items-center gap-1.5 text-xs">
-                      <span className="text-slate-400">{reason}</span>
-                      <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          )}
-          {showDiagnostics && state.scanCounts.technical_rejections && (
-            <div className="mt-3 pt-3 border-t border-slate-800">
-              <div className="text-xs text-slate-500 mb-2">Technical Rejections:</div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-                {[
-                  ['RSI below minimum', state.scanCounts.technical_rejections.rsi_below_min],
-                  ['RSI above maximum', state.scanCounts.technical_rejections.rsi_above_max],
-                  ['MA20 <= MA50', state.scanCounts.technical_rejections.ma20_not_above_ma50],
-                  ['MA50 <= MA200', state.scanCounts.technical_rejections.ma50_not_above_ma200],
-                  ['Price <= MA200', state.scanCounts.technical_rejections.price_not_above_ma200],
-                  ['Downtrend without support', state.scanCounts.technical_rejections.downtrend_no_support],
-                  ['Support distance below min', state.scanCounts.technical_rejections.support_dist_below_min],
-                  ['Support distance above max', state.scanCounts.technical_rejections.support_dist_above_max],
-                  ['Technical data missing', state.scanCounts.technical_rejections.technical_data_missing],
-                ].filter(([, count]) => count > 0).map(([label, count]) => (
-                  <div key={label as string} className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-400">{label}</span>
-                    <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {showDiagnostics && state.scanCounts.order_strike_rejections && (
-            <div className="mt-3 pt-3 border-t border-slate-800">
-              <div className="text-xs text-slate-500 mb-2">Order & Strike Rejections:</div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-                {[
-                  ['Stock price below minimum', state.scanCounts.order_strike_rejections.stock_below_min],
-                  ['Stock price above maximum', state.scanCounts.order_strike_rejections.stock_above_max],
-                  ['Strike above maximum', state.scanCounts.order_strike_rejections.strike_above_max],
-                ].filter(([, count]) => count > 0).map(([label, count]) => (
-                  <div key={label as string} className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-400">{label}</span>
-                    <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="mt-3 pt-3 border-t border-slate-800">
-            <button
-              onClick={() => setShowDiagnostics(!showDiagnostics)}
-              className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              <Bug className="h-3.5 w-3.5" />
-              {showDiagnostics ? 'Hide diagnostics' : 'Show diagnostics'}
-            </button>
-          </div>
-          {state.scanCounts.technical_cache && (
-            <div className="mt-3 pt-3 border-t border-slate-800">
-              <div className="text-xs text-slate-500 mb-2">Technical Cache:</div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-                <div className="flex items-center gap-1.5 text-xs">
-                  <span className="text-slate-400">Tickers with 200+ bars</span>
-                  <span className="font-semibold text-emerald-400 tabular-nums">{state.scanCounts.technical_cache.tickers_with_200_plus_bars}</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-xs">
-                  <span className="text-slate-400">Tickers with 60-199 bars</span>
-                  <span className="font-semibold text-sky-400 tabular-nums">{state.scanCounts.technical_cache.tickers_with_60_plus_bars}</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-xs">
-                  <span className="text-slate-400">Tickers missing history</span>
-                  <span className="font-semibold text-amber-400 tabular-nums">{state.scanCounts.technical_cache.tickers_missing_history}</span>
-                </div>
-              </div>
-              <div className="text-[11px] text-slate-600 mt-1.5">
-                Market Discovery progressively warms the cache by fetching history for up to 4 pending tickers per scan. Tickers with 60+ bars but fewer than 200 will be Pending for MA200 rules.
-              </div>
-              {(state.scanCounts.technical_cache.history_fetched_this_scan != null) && (
-                <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-2">
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-400">History fetched this scan</span>
-                    <span className="font-semibold text-emerald-400 tabular-nums">{state.scanCounts.technical_cache.history_fetched_this_scan}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-400">Still pending history</span>
-                    <span className="font-semibold text-amber-400 tabular-nums">{state.scanCounts.technical_cache.still_pending_history ?? 0}</span>
-                  </div>
-                  {(state.scanCounts.technical_cache.massive_history_403 ?? 0) > 0 && (
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <span className="text-slate-400">Massive 403s</span>
-                      <span className="font-semibold text-red-400 tabular-nums">{state.scanCounts.technical_cache.massive_history_403}</span>
-                    </div>
-                  )}
-                  {(state.scanCounts.technical_cache.massive_history_429 ?? 0) > 0 && (
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <span className="text-slate-400">Massive 429s</span>
-                      <span className="font-semibold text-red-400 tabular-nums">{state.scanCounts.technical_cache.massive_history_429}</span>
-                    </div>
-                  )}
-                  {(state.scanCounts.technical_cache.cache_save_failures ?? 0) > 0 && (
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <span className="text-slate-400">Cache save failures</span>
-                      <span className="font-semibold text-red-400 tabular-nums">{state.scanCounts.technical_cache.cache_save_failures}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-          {showDiagnostics && state.scanCounts.closest_matches && state.scanCounts.closest_matches.length > 0 && (
-            <div className="mt-3 pt-3 border-t border-slate-800">
-              <div className="text-xs text-amber-400 mb-2 font-medium">20 Closest Matches (qualified tickers = 0):</div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-slate-500">
-                      <th className="px-2 py-1 text-left">Ticker</th>
-                      <th className="px-2 py-1 text-right">Price</th>
-                      <th className="px-2 py-1 text-right">Strike</th>
-                      <th className="px-2 py-1 text-right">RSI</th>
-                      <th className="px-2 py-1 text-right">MA20</th>
-                      <th className="px-2 py-1 text-right">MA50</th>
-                      <th className="px-2 py-1 text-right">MA200</th>
-                      <th className="px-2 py-1 text-right">Support</th>
-                      <th className="px-2 py-1 text-right">Sup Dist%</th>
-                      <th className="px-2 py-1 text-right">CROI</th>
-                      <th className="px-2 py-1 text-right">PC</th>
-                      <th className="px-2 py-1 text-right">OI</th>
-                      <th className="px-2 py-1 text-right">Vol</th>
-                      <th className="px-2 py-1 text-left">Failed Rules</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/40">
-                    {state.scanCounts.closest_matches.map((m, i) => (
-                      <tr key={i} className="text-slate-300">
-                        <td className="px-2 py-1 font-medium text-slate-100">{m.ticker}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.price != null ? formatNum(m.price) : '--'}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">${formatNum(m.strike)}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.rsi != null ? formatNum(m.rsi, 1) : '--'}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.ma20 != null ? formatNum(m.ma20) : '--'}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.ma50 != null ? formatNum(m.ma50) : '--'}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.ma200 != null ? formatNum(m.ma200) : '--'}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.primary_support != null ? formatNum(m.primary_support) : '--'}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.support_distance != null ? `${formatNum(m.support_distance, 1)}%` : '--'}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{formatNum(m.net_croi, 1)}%</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{formatNum(m.premium_capture, 1)}%</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.open_interest.toLocaleString()}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">{m.volume}</td>
-                        <td className="px-2 py-1 text-left">
-                          <div className="flex flex-wrap gap-1">
-                            {m.failed_rules.map((r) => (
-                              <span key={r} className="inline-block rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-400">{r}</span>
-                            ))}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
