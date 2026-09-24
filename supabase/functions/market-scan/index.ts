@@ -36,10 +36,10 @@ type Profile = {
   allow_penny_increments: boolean;
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
-  minimum_support_distance_pct: number;
-  maximum_support_distance_pct: number;
-  rsi_min: number;
-  rsi_max: number;
+  minimum_support_distance_pct: number | null;
+  maximum_support_distance_pct: number | null;
+  rsi_min: number | null;
+  rsi_max: number | null;
   require_ma20_above_ma50: boolean;
   require_ma50_above_ma200: boolean;
   require_price_above_ma200: boolean;
@@ -1533,10 +1533,11 @@ async function scanSymbol(
           passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
           if (primarySupport !== null && primarySupport > 0) {
             const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-            const distMinOk = profile.minimum_support_distance_pct != null && supportDistPct >= profile.minimum_support_distance_pct;
-            const distMaxOk = profile.maximum_support_distance_pct != null && supportDistPct <= profile.maximum_support_distance_pct;
+            const distMinOk = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
+            const distMaxOk = profile.maximum_support_distance_pct == null || supportDistPct <= profile.maximum_support_distance_pct;
             const distOk = distMinOk && distMaxOk;
-            passFail.push({ rule: `Support distance ${profile.minimum_support_distance_pct}%–${profile.maximum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
+            const distLabel = `${profile.minimum_support_distance_pct != null ? profile.minimum_support_distance_pct + '%' : 'no min'}–${profile.maximum_support_distance_pct != null ? profile.maximum_support_distance_pct + '%' : 'no max'}`;
+            passFail.push({ rule: `Support distance ${distLabel} (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
           } else {
             passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
           }

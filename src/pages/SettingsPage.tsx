@@ -78,14 +78,14 @@ const sections: SectionDef[] = [
     title: 'Technical Rules',
     enabledKey: 'technical_rules_enabled',
     fields: [
-      { key: 'rsi_min', label: 'RSI Minimum', type: 'integer' },
-      { key: 'rsi_max', label: 'RSI Maximum', type: 'integer' },
+      { key: 'rsi_min', label: 'RSI Minimum', type: 'integer', placeholder: 'No minimum' },
+      { key: 'rsi_max', label: 'RSI Maximum', type: 'integer', placeholder: 'No maximum' },
       { key: 'require_ma20_above_ma50', label: 'Require MA20 > MA50', type: 'boolean' },
       { key: 'require_ma50_above_ma200', label: 'Require MA50 > MA200', type: 'boolean' },
       { key: 'require_price_above_ma200', label: 'Require Price > MA200', type: 'boolean' },
       { key: 'exclude_downtrend_no_support', label: 'Exclude Downtrend Without Support', type: 'boolean' },
-      { key: 'minimum_support_distance_pct', label: 'Minimum Support Distance', type: 'number', unit: '%', step: '1', help: 'Minimum percentage the put strike must be below the calculated primary support level.' },
-      { key: 'maximum_support_distance_pct', label: 'Maximum Support Distance', type: 'number', unit: '%', step: '1', help: 'Maximum percentage the put strike may be below the calculated primary support level.' },
+      { key: 'minimum_support_distance_pct', label: 'Minimum Support Distance', type: 'number', unit: '%', step: '1', placeholder: 'No minimum', help: 'Minimum percentage the put strike must be below the calculated primary support level. Leave blank for no minimum.' },
+      { key: 'maximum_support_distance_pct', label: 'Maximum Support Distance', type: 'number', unit: '%', step: '1', placeholder: 'No maximum', help: 'Maximum percentage the put strike may be below the calculated primary support level. Leave blank for no maximum.' },
     ],
   },
 ];
@@ -109,6 +109,10 @@ const NULLABLE_PRICE_KEYS: (keyof StrategyProfile)[] = [
 
 const NULLABLE_PERCENT_KEYS: (keyof StrategyProfile)[] = [
   'preferred_croi_max',
+  'rsi_min',
+  'rsi_max',
+  'minimum_support_distance_pct',
+  'maximum_support_distance_pct',
 ];
 
 export function SettingsPage({ state }: { state: AppState }) {
@@ -260,7 +264,7 @@ export function SettingsPage({ state }: { state: AppState }) {
             disabled={disabled}
             className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
           />
-          <span className="text-xs text-slate-500">%</span>
+          {field.unit === '%' && <span className="text-xs text-slate-500">%</span>}
         </div>
       );
     }

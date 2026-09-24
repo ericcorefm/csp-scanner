@@ -12,8 +12,8 @@ export interface StrategyProfile {
   preferred_daily_volume: number;
   preferred_spread_pct: number;
   max_spread_pct: number;
-  rsi_min: number;
-  rsi_max: number;
+  rsi_min: number | null;
+  rsi_max: number | null;
   require_ma20_above_ma50: boolean;
   require_ma50_above_ma200: boolean;
   require_price_above_ma200: boolean;
@@ -24,8 +24,8 @@ export interface StrategyProfile {
   allow_penny_increments: boolean;
   exclude_existing_positions: boolean;
   exclude_downtrend_no_support: boolean;
-  minimum_support_distance_pct: number;
-  maximum_support_distance_pct: number;
+  minimum_support_distance_pct: number | null;
+  maximum_support_distance_pct: number | null;
   min_dte: number;
   minimum_stock_price: number | null;
   maximum_stock_price: number | null;
