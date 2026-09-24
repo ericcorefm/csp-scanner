@@ -54,6 +54,27 @@ export interface ScanCounts {
     warm_diagnostics?: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[];
   };
   closest_matches?: ClosestMatch[];
+  support_distance_debug?: SupportDistanceDebugCounts;
+}
+
+export interface SupportDistanceDebugCounts {
+  before: number;
+  passed: number;
+  below_min: number;
+  above_max: number;
+  missing_support: number;
+  details: SupportDistanceDebugEntry[];
+}
+
+export interface SupportDistanceDebugEntry {
+  ticker: string;
+  strike: number;
+  primarySupport: number | null;
+  supportDistancePct: number | null;
+  passesMin: boolean;
+  passesMax: boolean;
+  finalSupportDistancePass: boolean;
+  status: 'pass' | 'fail_below_min' | 'fail_above_max' | 'pending_missing_support';
 }
 
 export interface ClosestMatch {

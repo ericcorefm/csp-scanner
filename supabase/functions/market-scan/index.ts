@@ -740,6 +740,26 @@ type OrderStrikeRejections = {
   strike_above_max: number;
 };
 
+type SupportDistanceDebugEntry = {
+  ticker: string;
+  strike: number;
+  primarySupport: number | null;
+  supportDistancePct: number | null;
+  passesMin: boolean;
+  passesMax: boolean;
+  finalSupportDistancePass: boolean;
+  status: 'pass' | 'fail_below_min' | 'fail_above_max' | 'pending_missing_support';
+};
+
+type SupportDistanceDebug = {
+  before: number;
+  passed: number;
+  below_min: number;
+  above_max: number;
+  missing_support: number;
+  details: SupportDistanceDebugEntry[];
+};
+
 type ScanSymbolResult = {
   candidates: any[];
   chainStatus: ChainStatus;
@@ -777,6 +797,7 @@ type ScanSymbolResult = {
   techRejections?: TechnicalRejections;
   orderStrikeRejections?: OrderStrikeRejections;
   historyBarCount?: number;
+  supportDistanceDebug?: SupportDistanceDebug;
 };
 
 // ── Cache-first stock history fetcher ──
@@ -965,6 +986,7 @@ async function scanSymbol(
     techRejections: { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 },
     orderStrikeRejections: { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 },
     historyBarCount: 0,
+    supportDistanceDebug: { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] },
   };
 
   // Step 1: Stock snapshot via shared function (cached per ticker)
@@ -1397,18 +1419,42 @@ async function scanSymbol(
       if (!isSectionOff(profile, 'support_distance_enabled')) {
         if (primarySupport !== null && primarySupport > 0) {
           const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-          if (profile.minimum_support_distance_pct != null && supportDistPct < profile.minimum_support_distance_pct) {
+          const passesMin = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
+          const passesMax = profile.maximum_support_distance_pct == null || supportDistPct <= profile.maximum_support_distance_pct;
+          const finalSupportDistancePass = passesMin && passesMax;
+          if (!passesMin) {
             reasons.push('Support distance too low');
             r.techRejections!.support_dist_below_min++;
           }
-          if (profile.maximum_support_distance_pct != null && supportDistPct > profile.maximum_support_distance_pct) {
+          if (!passesMax) {
             reasons.push('Support distance too high');
             r.techRejections!.support_dist_above_max++;
           }
-        } else if (canComputeBaseTechnicals) {
-          if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
-            pendingReasons.push('Support distance not evaluated — support unavailable');
+          r.supportDistanceDebug!.before++;
+          if (finalSupportDistancePass) r.supportDistanceDebug!.passed++;
+          else if (!passesMin) r.supportDistanceDebug!.below_min++;
+          else if (!passesMax) r.supportDistanceDebug!.above_max++;
+          r.supportDistanceDebug!.details.push({
+            ticker: symbol, strike, primarySupport,
+            supportDistancePct: Number(supportDistPct.toFixed(2)),
+            passesMin, passesMax, finalSupportDistancePass,
+            status: finalSupportDistancePass ? 'pass' : !passesMin ? 'fail_below_min' : 'fail_above_max',
+          });
+          console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=${primarySupport.toFixed(2)} | supportDistPct=${supportDistPct.toFixed(2)}% | passesMin=${passesMin} | passesMax=${passesMax} | finalPass=${finalSupportDistancePass}`);
+        } else {
+          r.supportDistanceDebug!.before++;
+          r.supportDistanceDebug!.missing_support++;
+          r.supportDistanceDebug!.details.push({
+            ticker: symbol, strike, primarySupport: null,
+            supportDistancePct: null, passesMin: false, passesMax: false,
+            finalSupportDistancePass: false, status: 'pending_missing_support',
+          });
+          if (canComputeBaseTechnicals) {
+            if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
+              pendingReasons.push('Support distance not evaluated — support unavailable');
+            }
           }
+          console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=null | supportDistPct=null | status=Pending — Support unavailable`);
         }
       }
 
@@ -1933,6 +1979,7 @@ serve(async (req) => {
     let rawSample: any = null;
     let verboseCount = 0;
     const techRejTotals = { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 };
+    const supportDistanceDebugTotals = { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] as any[] };
     const orderStrikeRejTotals = { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 };
     // Technical cache diagnostics
     let tickersWith60PlusBars = 0, tickersWith200PlusBars = 0, tickersMissingHistory = 0;
@@ -1986,6 +2033,14 @@ serve(async (req) => {
           orderStrikeRejTotals.stock_below_min += result.orderStrikeRejections.stock_below_min;
           orderStrikeRejTotals.stock_above_max += result.orderStrikeRejections.stock_above_max;
           orderStrikeRejTotals.strike_above_max += result.orderStrikeRejections.strike_above_max;
+        }
+        if (result.supportDistanceDebug) {
+          supportDistanceDebugTotals.before += result.supportDistanceDebug.before;
+          supportDistanceDebugTotals.passed += result.supportDistanceDebug.passed;
+          supportDistanceDebugTotals.below_min += result.supportDistanceDebug.below_min;
+          supportDistanceDebugTotals.above_max += result.supportDistanceDebug.above_max;
+          supportDistanceDebugTotals.missing_support += result.supportDistanceDebug.missing_support;
+          supportDistanceDebugTotals.details.push(...result.supportDistanceDebug.details);
         }
         // Track technical cache stats
         const barCount = result.historyBarCount ?? 0;
@@ -2215,6 +2270,7 @@ serve(async (req) => {
         warm_diagnostics: warmDiagnostics,
       },
       closest_matches: closestMatches,
+      support_distance_debug: supportDistanceDebugTotals,
     };
 
     console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));

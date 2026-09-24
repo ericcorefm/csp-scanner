@@ -1,7 +1,7 @@
 import { useState, useMemo, Fragment } from 'react';
 import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
-import type { ScanMode } from '@/lib/liveMarketData';
+import type { ScanMode, SupportDistanceDebugCounts } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
@@ -166,6 +166,10 @@ export function CandidatesPage({
             />
           </div>
         </div>
+      )}
+
+      {state.scanCounts?.support_distance_debug && state.scanCounts.support_distance_debug.before > 0 && (
+        <SupportDistanceDebugPanel debug={state.scanCounts.support_distance_debug} />
       )}
 
       {/* Scan Mode Selector */}
@@ -427,6 +431,77 @@ function ScanCountItem({ label, value, color = 'text-slate-200', isText = false 
     <div className="text-center">
       <div className="text-xs text-slate-500">{label}</div>
       <div className={`text-sm font-semibold ${isText ? '' : 'tabular-nums'} ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+function SupportDistanceDebugPanel({ debug }: { debug: SupportDistanceDebugCounts }) {
+  const [showDetails, setShowDetails] = useState(false);
+  return (
+    <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-4 py-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-sky-300">Support Distance Debug</h3>
+        <button
+          onClick={() => setShowDetails(!showDetails)}
+          className="text-xs text-sky-400 hover:text-sky-200 transition-colors"
+        >
+          {showDetails ? 'Hide details' : 'Show details'}
+        </button>
+      </div>
+      <div className="mt-2 grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="text-center">
+          <div className="text-xs text-slate-500">Before Support Distance</div>
+          <div className="text-sm font-semibold tabular-nums text-slate-200">{debug.before}</div>
+        </div>
+        <div className="text-center">
+          <div className="text-xs text-slate-500">Passed</div>
+          <div className="text-sm font-semibold tabular-nums text-emerald-400">{debug.passed}</div>
+        </div>
+        <div className="text-center">
+          <div className="text-xs text-slate-500">Below Minimum</div>
+          <div className="text-sm font-semibold tabular-nums text-red-400">{debug.below_min}</div>
+        </div>
+        <div className="text-center">
+          <div className="text-xs text-slate-500">Above Maximum</div>
+          <div className="text-sm font-semibold tabular-nums text-red-400">{debug.above_max}</div>
+        </div>
+        <div className="text-center">
+          <div className="text-xs text-slate-500">Missing Support</div>
+          <div className="text-sm font-semibold tabular-nums text-amber-400">{debug.missing_support}</div>
+        </div>
+      </div>
+      {showDetails && debug.details.length > 0 && (
+        <div className="mt-3 max-h-64 overflow-y-auto rounded border border-slate-800 bg-slate-900/80">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-slate-900 border-b border-slate-800">
+              <tr>
+                <th className="px-2 py-1.5 text-left text-slate-500">Ticker</th>
+                <th className="px-2 py-1.5 text-right text-slate-500">Strike</th>
+                <th className="px-2 py-1.5 text-right text-slate-500">Primary Support</th>
+                <th className="px-2 py-1.5 text-right text-slate-500">Support Dist %</th>
+                <th className="px-2 py-1.5 text-center text-slate-500">Passes Min</th>
+                <th className="px-2 py-1.5 text-center text-slate-500">Passes Max</th>
+                <th className="px-2 py-1.5 text-center text-slate-500">Final</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60">
+              {debug.details.map((d, i) => (
+                <tr key={i}>
+                  <td className="px-2 py-1.5 text-slate-300 font-medium">{d.ticker}</td>
+                  <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">${d.strike}</td>
+                  <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">{d.primarySupport != null ? `${d.primarySupport.toFixed(2)}` : '--'}</td>
+                  <td className="px-2 py-1.5 text-right tabular-nums text-slate-300">{d.supportDistancePct != null ? `${d.supportDistancePct}%` : '--'}</td>
+                  <td className={`px-2 py-1.5 text-center ${d.passesMin ? 'text-emerald-400' : 'text-red-400'}`}>{d.passesMin ? 'Yes' : 'No'}</td>
+                  <td className={`px-2 py-1.5 text-center ${d.passesMax ? 'text-emerald-400' : 'text-red-400'}`}>{d.passesMax ? 'Yes' : 'No'}</td>
+                  <td className={`px-2 py-1.5 text-center font-medium ${d.status === 'pass' ? 'text-emerald-400' : d.status === 'pending_missing_support' ? 'text-amber-400' : 'text-red-400'}`}>
+                    {d.status === 'pass' ? 'Pass' : d.status === 'pending_missing_support' ? 'Pending' : 'Fail'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
