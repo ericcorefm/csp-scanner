@@ -792,7 +792,8 @@ function AddPositionModal({
   onClose: () => void;
 }) {
   const profile = state.activeProfile;
-  const today = new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
   const [contracts, setContracts] = useState('1');
   const [openDate, setOpenDate] = useState(today);
@@ -831,9 +832,34 @@ function AddPositionModal({
   }, [duplicateExists]);
 
   const handleSave = async () => {
-    if (!profile || isNaN(stoNum) || stoNum <= 0) return;
-    setSaving(true);
     setSaveError(null);
+
+    if (!ticker) {
+      setSaveError('Ticker is required.');
+      return;
+    }
+    if (!contract.strike || contract.strike <= 0) {
+      setSaveError('Strike must be greater than 0.');
+      return;
+    }
+    if (!contract.expiration) {
+      setSaveError('Expiration is required.');
+      return;
+    }
+    if (contractsNum < 1) {
+      setSaveError('Contracts must be at least 1.');
+      return;
+    }
+    if (isNaN(stoNum) || stoNum <= 0) {
+      setSaveError('Actual STO Fill must be a positive number.');
+      return;
+    }
+    if (!openDate) {
+      setSaveError('Open date is required.');
+      return;
+    }
+
+    setSaving(true);
     try {
       const btcTarget = recalc?.btcTarget ?? 0.01;
       const netProfit = recalc?.netProfit ?? 0;
@@ -864,8 +890,8 @@ function AddPositionModal({
         support_status: 'Stable',
         position_status: 'Waiting',
         days_open: 0,
-        days_to_review: profile.max_recycle_days,
-        strategy_profile_id: profile.id,
+        days_to_review: profile?.max_recycle_days,
+        strategy_profile_id: profile?.id,
       };
 
       await state.addOpenPosition(newPos);
@@ -874,8 +900,10 @@ function AddPositionModal({
         onClose();
       }, 1500);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to add position';
-      setSaveError(msg);
+      console.error('[AddPosition] Failed:', err);
+      const supabaseErr = err as { code?: string; message?: string; details?: string; hint?: string };
+      const msg = supabaseErr?.message || (err instanceof Error ? err.message : 'Failed to add position');
+      setSaveError(`Failed to add position: ${msg}`);
     } finally {
       setSaving(false);
     }
