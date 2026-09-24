@@ -38,7 +38,7 @@ function formatDataError(err: unknown): string {
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
   name: 'My CSP Default',
   is_default: true,
-  max_strike: 25,
+  max_strike: null,
   max_strikes_per_ticker: 1,
   min_net_croi: 3.5,
   preferred_croi_max: 4.0,

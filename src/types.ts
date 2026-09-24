@@ -2,7 +2,7 @@ export interface StrategyProfile {
   id: string;
   name: string;
   is_default: boolean;
-  max_strike: number;
+  max_strike: number | null;
   max_strikes_per_ticker: number;
   min_net_croi: number;
   preferred_croi_max: number;

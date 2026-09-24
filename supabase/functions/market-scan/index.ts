@@ -20,7 +20,7 @@ const MAX_CANDIDATES = 50;
 
 type Profile = {
   id: string;
-  max_strike: number;
+  max_strike: number | null;
   max_strikes_per_ticker: number;
   min_dte: number;
   minimum_stock_price: number | null;
@@ -1013,7 +1013,7 @@ async function scanSymbol(
   chainParams.set('contract_type', 'put');
 
   // Server-side strike filter (if Order & Strike enabled)
-  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled') && profile.max_strike != null) {
     chainParams.set('strike_price.lte', String(profile.max_strike));
   }
 
@@ -1197,11 +1197,11 @@ async function scanSymbol(
   }
 
   // ── Pre-filtering: strike (client-side safety net, server already filtered) ──
-  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled')) {
+  if (!noFilterMode && !isSectionOff(profile, 'order_strike_enabled') && profile.max_strike != null) {
     const before = filteredContracts.length;
     filteredContracts = filteredContracts.filter((c: any) => {
       const s = Number(c.details.strike_price);
-      if (s > profile.max_strike) return false;
+      if (s > profile.max_strike!) return false;
       return true;
     });
     r.filteredByStrike = before - filteredContracts.length;
@@ -1245,7 +1245,7 @@ async function scanSymbol(
     const reasons: string[] = [];
     if (!noFilterMode) {
       if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-      if (!isSectionOff(profile, 'order_strike_enabled') && strike > profile.max_strike) reasons.push('Strike too high');
+      if (!isSectionOff(profile, 'order_strike_enabled') && profile.max_strike != null && strike > profile.max_strike) reasons.push('Strike too high');
       if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
         if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
         if (primarySupport !== null && primarySupport > 0) {
@@ -1349,7 +1349,9 @@ async function scanSymbol(
     const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
     if (!noFilterMode) {
       if (!isSectionOff(profile, 'order_strike_enabled')) {
-        passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
+        if (profile.max_strike != null) {
+          passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
+        }
         if (primarySupport !== null && primarySupport > 0) {
           const belowSupport = strike < primarySupport;
           passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: belowSupport, status: belowSupport ? 'pass' : 'fail' });

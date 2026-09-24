@@ -23,7 +23,7 @@ export function reapplyHardFilters(contracts: CandidateScan[], profile: Strategy
     const reasons = [...(c.rejection_reasons || [])];
 
     if (profile.order_strike_enabled) {
-      if (c.strike > profile.max_strike && !reasons.includes('Strike too high')) {
+      if (profile.max_strike != null && c.strike > profile.max_strike && !reasons.includes('Strike too high')) {
         reasons.push('Strike too high');
       }
       if (profile.minimum_stock_price != null && c.stock_price != null && c.stock_price > 0) {

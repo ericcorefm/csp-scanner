@@ -28,8 +28,8 @@ const sections: SectionDef[] = [
     fields: [
       { key: 'minimum_stock_price', label: 'Minimum Stock Price', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no minimum stock price.' },
       { key: 'maximum_stock_price', label: 'Maximum Stock Price', type: 'number', unit: '$', step: '0.5', help: 'Leave blank for no maximum stock price.' },
-      { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5' },
-      { key: 'max_strikes_per_ticker', label: 'Max Strikes Per Ticker', type: 'integer', help: 'Maximum number of candidate strikes returned per ticker in scan results.' },
+      { key: 'max_strike', label: 'Maximum Put Strike', type: 'number', unit: '$', step: '0.5', placeholder: 'No maximum', help: 'Leave blank for no maximum put strike filter.' },
+      { key: 'max_strikes_per_ticker', label: 'Max Strikes Per Ticker', type: 'integer', min: 1, help: 'Maximum number of candidate strikes returned per ticker in scan results. Must be at least 1.' },
     ],
   },
   {
@@ -104,6 +104,7 @@ const nonToggleSections: { title: string; fields: FieldDef[] }[] = [
 const NULLABLE_PRICE_KEYS: (keyof StrategyProfile)[] = [
   'minimum_stock_price',
   'maximum_stock_price',
+  'max_strike',
 ];
 
 export function SettingsPage({ state }: { state: AppState }) {
@@ -231,7 +232,7 @@ export function SettingsPage({ state }: { state: AppState }) {
               const val = parseFloat(e.target.value);
               updateField(field.key, isNaN(val) ? null : val);
             }}
-            placeholder="—"
+            placeholder={field.placeholder || '—'}
             disabled={disabled}
             className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
           />
@@ -250,8 +251,28 @@ export function SettingsPage({ state }: { state: AppState }) {
           min={field.min}
           value={String(profile[field.key])}
           onChange={(e) => {
-            const val = field.type === 'integer' ? parseInt(e.target.value) : parseFloat(e.target.value);
-            updateField(field.key, isNaN(val) ? 0 : val);
+            const raw = e.target.value;
+            if (field.type === 'integer') {
+              const parsed = parseInt(raw);
+              if (raw === '' || isNaN(parsed)) {
+                updateField(field.key, field.min ?? 0);
+              } else if (field.min != null && parsed < field.min) {
+                updateField(field.key, field.min);
+              } else {
+                updateField(field.key, parsed);
+              }
+            } else {
+              const val = parseFloat(raw);
+              updateField(field.key, isNaN(val) ? (field.min ?? 0) : val);
+            }
+          }}
+          onBlur={(e) => {
+            if (field.type === 'integer' && field.min != null) {
+              const parsed = parseInt(e.target.value);
+              if (isNaN(parsed) || parsed < field.min) {
+                updateField(field.key, field.min);
+              }
+            }
           }}
           disabled={disabled}
           className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums disabled:opacity-40 disabled:cursor-not-allowed"
