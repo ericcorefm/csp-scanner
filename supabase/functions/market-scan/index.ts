@@ -1577,7 +1577,7 @@ async function scanSymbol(
         passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi, status: oi >= profile.min_target_oi ? 'pass' : 'fail' });
         passFail.push({ rule: `Sufficient liquidity (volume >= ${profile.preferred_daily_volume})`, pass: volume >= profile.preferred_daily_volume, status: volume >= profile.preferred_daily_volume ? 'pass' : 'fail' });
       }
-      if (!isSectionOff(profile, 'technical_rules_enabled')) {
+      if (hasActiveTechnicalRule) {
         if (canComputeBaseTechnicals) {
           const tech = r.technical;
           if (tech) {
@@ -1610,8 +1610,10 @@ async function scanSymbol(
               }
             }
           }
-          const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport);
-          passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
+          if (profile.exclude_downtrend_no_support) {
+            const trendOk = !(trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport);
+            passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
+          }
         } else {
           passFail.push({ rule: 'Technical history unavailable', pass: true, status: 'not_evaluated' });
         }
@@ -1856,6 +1858,7 @@ serve(async (req) => {
 
     console.log(`mode=${mode}, scanMode=${scanMode}, noFilterMode=${noFilterMode}`);
     console.log(`[PROFILE] min_stock_price=${profile.minimum_stock_price}, max_stock_price=${profile.maximum_stock_price}, max_strike=${profile.max_strike}, min_dte=${profile.min_dte}, max_strikes_per_ticker=${profile.max_strikes_per_ticker}, order_strike_enabled=${profile.order_strike_enabled}, expiration_enabled=${profile.expiration_enabled}`);
+    console.log(`[PROFILE TECH] technical_rules_enabled=${profile.technical_rules_enabled}, rsi_min=${profile.rsi_min}, rsi_max=${profile.rsi_max}, require_ma20_above_ma50=${profile.require_ma20_above_ma50}, require_ma50_above_ma200=${profile.require_ma50_above_ma200}, require_price_above_ma200=${profile.require_price_above_ma200}, exclude_downtrend_no_support=${profile.exclude_downtrend_no_support}`);
 
     // ── ANALYZE MODE: deep-analyze a single ticker ──
     if (mode === 'analyze') {
