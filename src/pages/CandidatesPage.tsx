@@ -1,5 +1,5 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check, Bug } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
@@ -30,6 +30,7 @@ export function CandidatesPage({
 }) {
   const [showRejected, setShowRejected] = useState(false);
   const [showPending, setShowPending] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -165,7 +166,7 @@ export function CandidatesPage({
               isText
             />
           </div>
-          {state.scanCounts.rejection_breakdown && Object.keys(state.scanCounts.rejection_breakdown).length > 0 && (
+          {showDiagnostics && state.scanCounts.rejection_breakdown && Object.keys(state.scanCounts.rejection_breakdown).length > 0 && (
             <div className="mt-3 pt-3 border-t border-slate-800">
               <div className="text-xs text-slate-500 mb-2">Rejected by:</div>
               <div className="flex flex-wrap gap-x-4 gap-y-1.5">
@@ -180,7 +181,7 @@ export function CandidatesPage({
               </div>
             </div>
           )}
-          {state.scanCounts.technical_rejections && (
+          {showDiagnostics && state.scanCounts.technical_rejections && (
             <div className="mt-3 pt-3 border-t border-slate-800">
               <div className="text-xs text-slate-500 mb-2">Technical Rejections:</div>
               <div className="flex flex-wrap gap-x-4 gap-y-1.5">
@@ -203,7 +204,7 @@ export function CandidatesPage({
               </div>
             </div>
           )}
-          {state.scanCounts.order_strike_rejections && (
+          {showDiagnostics && state.scanCounts.order_strike_rejections && (
             <div className="mt-3 pt-3 border-t border-slate-800">
               <div className="text-xs text-slate-500 mb-2">Order & Strike Rejections:</div>
               <div className="flex flex-wrap gap-x-4 gap-y-1.5">
@@ -220,6 +221,15 @@ export function CandidatesPage({
               </div>
             </div>
           )}
+          <div className="mt-3 pt-3 border-t border-slate-800">
+            <button
+              onClick={() => setShowDiagnostics(!showDiagnostics)}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              <Bug className="h-3.5 w-3.5" />
+              {showDiagnostics ? 'Hide diagnostics' : 'Show diagnostics'}
+            </button>
+          </div>
           {state.scanCounts.technical_cache && (
             <div className="mt-3 pt-3 border-t border-slate-800">
               <div className="text-xs text-slate-500 mb-2">Technical Cache:</div>
@@ -272,7 +282,7 @@ export function CandidatesPage({
               )}
             </div>
           )}
-          {state.scanCounts.closest_matches && state.scanCounts.closest_matches.length > 0 && (
+          {showDiagnostics && state.scanCounts.closest_matches && state.scanCounts.closest_matches.length > 0 && (
             <div className="mt-3 pt-3 border-t border-slate-800">
               <div className="text-xs text-amber-400 mb-2 font-medium">20 Closest Matches (qualified tickers = 0):</div>
               <div className="overflow-x-auto">
