@@ -45,7 +45,7 @@ const sections: SectionDef[] = [
     fields: [
       { key: 'filter_strikes_croi', label: 'Filter Strikes by CROI', type: 'boolean' },
       { key: 'min_net_croi', label: 'Minimum Net CROI', type: 'number', unit: '%', step: '0.1' },
-      { key: 'preferred_croi_max', label: 'Preferred CROI Maximum', type: 'number', unit: '%', step: '0.1' },
+      { key: 'preferred_croi_max', label: 'Preferred CROI Maximum', type: 'number', unit: '%', step: '0.1', placeholder: 'No preference', help: 'Leave blank for no preferred maximum. This is a ranking preference only — it does not reject contracts.' },
       { key: 'max_premium_capture', label: 'Maximum Premium Capture', type: 'number', unit: '%', step: '1' },
     ],
   },
@@ -105,6 +105,10 @@ const NULLABLE_PRICE_KEYS: (keyof StrategyProfile)[] = [
   'minimum_stock_price',
   'maximum_stock_price',
   'max_strike',
+];
+
+const NULLABLE_PERCENT_KEYS: (keyof StrategyProfile)[] = [
+  'preferred_croi_max',
 ];
 
 export function SettingsPage({ state }: { state: AppState }) {
@@ -236,6 +240,27 @@ export function SettingsPage({ state }: { state: AppState }) {
             disabled={disabled}
             className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
           />
+        </div>
+      );
+    }
+
+    if (NULLABLE_PERCENT_KEYS.includes(field.key)) {
+      return (
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            step={field.step}
+            min={field.min}
+            value={profile[field.key] === null || profile[field.key] === undefined ? '' : String(profile[field.key])}
+            onChange={(e) => {
+              const val = parseFloat(e.target.value);
+              updateField(field.key, isNaN(val) ? null : val);
+            }}
+            placeholder={field.placeholder || '—'}
+            disabled={disabled}
+            className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-right text-slate-100 tabular-nums placeholder:text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
+          />
+          <span className="text-xs text-slate-500">%</span>
         </div>
       );
     }

@@ -5,7 +5,7 @@ export interface StrategyProfile {
   max_strike: number | null;
   max_strikes_per_ticker: number;
   min_net_croi: number;
-  preferred_croi_max: number;
+  preferred_croi_max: number | null;
   max_premium_capture: number;
   max_recycle_days: number;
   min_target_oi: number;

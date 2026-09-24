@@ -1815,6 +1815,22 @@ serve(async (req) => {
     candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
     const capped = candidates.slice(0, MAX_CANDIDATES * 10);
 
+    // Build rejection reason breakdown from all candidates
+    const rejectionBreakdown: Record<string, number> = {};
+    for (const c of candidates) {
+      if (c.rejection_reasons && Array.isArray(c.rejection_reasons)) {
+        for (const reason of c.rejection_reasons) {
+          rejectionBreakdown[reason] = (rejectionBreakdown[reason] || 0) + 1;
+        }
+      }
+    }
+
+    // Count unique qualified tickers
+    const qualifiedTickers = new Set<string>();
+    for (const c of candidates) {
+      if (c.qualified) qualifiedTickers.add(c.ticker);
+    }
+
     const scan_counts = {
       symbols_in_universe: symbolList.length,
       symbols_returned: symbolsScanned,
@@ -1830,6 +1846,8 @@ serve(async (req) => {
       rejected: totalRejected,
       pages_fetched: totalPagesFetched,
       contracts_found: totalContractsFound,
+      rejection_breakdown: rejectionBreakdown,
+      unique_qualified_tickers: qualifiedTickers.size,
     };
 
     console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));

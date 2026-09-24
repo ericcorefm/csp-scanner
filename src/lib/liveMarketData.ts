@@ -23,6 +23,8 @@ export interface ScanCounts {
   rejected: number;
   pages_fetched: number;
   contracts_found: number;
+  rejection_breakdown?: Record<string, number>;
+  unique_qualified_tickers?: number;
 }
 
 export interface LiveScanResponse {

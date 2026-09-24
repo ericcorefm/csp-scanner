@@ -154,15 +154,30 @@ export function CandidatesPage({
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
-            <ScanCountItem label="Contracts Found" value={state.scanCounts.puts_returned} color="text-sky-400" />
-            <ScanCountItem label="Candidate Tickers" value={new Set(displayCandidates.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} color="text-emerald-400" />
-            <ScanCountItem label="Contracts Rejected" value={state.scanCounts.rejected} color="text-slate-400" />
+            <ScanCountItem label="Contracts Evaluated" value={state.scanCounts.contracts_evaluated} color="text-sky-400" />
+            <ScanCountItem label="Qualified Contracts" value={state.scanCounts.qualified} color="text-emerald-400" />
+            <ScanCountItem label="Qualified Tickers" value={state.scanCounts.unique_qualified_tickers ?? new Set(displayCandidates.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} color="text-emerald-400" />
             <ScanCountItem
               label="Last Scan"
               value={state.lastScanAt ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '--'}
               isText
             />
           </div>
+          {state.scanCounts.rejection_breakdown && Object.keys(state.scanCounts.rejection_breakdown).length > 0 && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <div className="text-xs text-slate-500 mb-2">Rejection Breakdown</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {Object.entries(state.scanCounts.rejection_breakdown)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([reason, count]) => (
+                    <div key={reason} className="flex items-center gap-1.5 text-xs">
+                      <span className="text-slate-400">{reason}</span>
+                      <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
