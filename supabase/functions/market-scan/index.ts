@@ -1982,19 +1982,50 @@ serve(async (req) => {
         return json({ success: false, error: 'No symbols to scan for A/B test' });
       }
 
-      // Build Profile A: technical_rules_enabled = false
-      const profileA: Profile = { ...profile, technical_rules_enabled: false };
-      // Build Profile B: technical_rules_enabled = true, all rules null/false
-      const profileB: Profile = {
-        ...profile,
-        technical_rules_enabled: true,
-        rsi_min: null,
-        rsi_max: null,
-        require_ma20_above_ma50: false,
-        require_ma50_above_ma200: false,
-        require_price_above_ma200: false,
-        exclude_downtrend_no_support: false,
-      };
+      // Clone the active profile exactly — never use defaults or new objects.
+      const abTechFields = [
+        'technical_rules_enabled', 'rsi_min', 'rsi_max',
+        'require_ma20_above_ma50', 'require_ma50_above_ma200',
+        'require_price_above_ma200', 'exclude_downtrend_no_support',
+      ];
+      const profileA: Profile = structuredClone(profile);
+      profileA.technical_rules_enabled = false;
+      const profileB: Profile = structuredClone(profile);
+      profileB.technical_rules_enabled = true;
+      profileB.rsi_min = null;
+      profileB.rsi_max = null;
+      profileB.require_ma20_above_ma50 = false;
+      profileB.require_ma50_above_ma200 = false;
+      profileB.require_price_above_ma200 = false;
+      profileB.exclude_downtrend_no_support = false;
+
+      // Assert all non-technical fields are identical between A and B.
+      const abMismatches: string[] = [];
+      for (const key of Object.keys(profileA) as (keyof Profile)[]) {
+        if (abTechFields.includes(key)) continue;
+        const va = profileA[key];
+        const vb = profileB[key];
+        if (JSON.stringify(va) !== JSON.stringify(vb)) {
+          abMismatches.push(`${key}: A=${JSON.stringify(va)} B=${JSON.stringify(vb)}`);
+        }
+      }
+      if (abMismatches.length > 0) {
+        console.error(`[AB-TEST] Profile construction mismatch: ${abMismatches.join(', ')}`);
+        return json({
+          success: false,
+          error: 'Profile construction mismatch',
+          mismatches: abMismatches,
+        });
+      }
+      console.log('[AB-TEST] All non-technical fields identical between Profile A and B');
+
+      // Support distance must be identical — log assertions.
+      console.assert(profileA.support_distance_enabled === profileB.support_distance_enabled,
+        `[AB-TEST] support_distance_enabled mismatch: A=${profileA.support_distance_enabled} B=${profileB.support_distance_enabled}`);
+      console.assert(profileA.minimum_support_distance_pct === profileB.minimum_support_distance_pct,
+        `[AB-TEST] minimum_support_distance_pct mismatch: A=${profileA.minimum_support_distance_pct} B=${profileB.minimum_support_distance_pct}`);
+      console.assert(profileA.maximum_support_distance_pct === profileB.maximum_support_distance_pct,
+        `[AB-TEST] maximum_support_distance_pct mismatch: A=${profileA.maximum_support_distance_pct} B=${profileB.maximum_support_distance_pct}`);
 
       // hasActiveTechnicalRule assertion for Profile B
       const abHasActiveRule =
@@ -2008,29 +2039,12 @@ serve(async (req) => {
       console.log(`[AB-TEST] hasActiveTechnicalRule(Profile B) = ${abHasActiveRule}`);
       console.assert(!abHasActiveRule, 'AB-TEST: Profile B incorrectly detects an active technical rule');
 
-      const noFilterA =
-        isSectionOff(profileA, 'order_strike_enabled') &&
-        isSectionOff(profileA, 'expiration_enabled') &&
-        isSectionOff(profileA, 'croi_pc_enabled') &&
-        isSectionOff(profileA, 'cycle_liquidity_enabled') &&
-        isSectionOff(profileA, 'spread_enabled') &&
-        isSectionOff(profileA, 'short_interest_enabled') &&
-        isSectionOff(profileA, 'technical_rules_enabled') &&
-        isSectionOff(profileA, 'support_distance_enabled') &&
-        profileA.exclude_existing_positions === false;
-
-      const noFilterB =
-        isSectionOff(profileB, 'order_strike_enabled') &&
-        isSectionOff(profileB, 'expiration_enabled') &&
-        isSectionOff(profileB, 'croi_pc_enabled') &&
-        isSectionOff(profileB, 'cycle_liquidity_enabled') &&
-        isSectionOff(profileB, 'spread_enabled') &&
-        isSectionOff(profileB, 'short_interest_enabled') &&
-        isSectionOff(profileB, 'technical_rules_enabled') &&
-        isSectionOff(profileB, 'support_distance_enabled') &&
-        profileB.exclude_existing_positions === false;
-
-      console.log(`[AB-TEST] noFilterA=${noFilterA}, noFilterB=${noFilterB}`);
+      // Both profiles must use the SAME noFilterMode as the live scan.
+      // Computing it per-profile would make noFilterA != noFilterB because
+      // isSectionOff(profileB, 'technical_rules_enabled') is false.
+      // The live scan computes noFilterMode from the original active profile,
+      // so we reuse that exact value.
+      console.log(`[AB-TEST] Using live noFilterMode=${noFilterMode} for both profiles`);
 
       // Bulk stock prices (shared between both scans)
       const abAllTickers = abSymbolList.map((s) => s.ticker.toUpperCase());
@@ -2053,7 +2067,7 @@ serve(async (req) => {
           batch.map((sym) => {
             const upper = sym.ticker.toUpperCase();
             const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
-            return scanSymbol(sym.ticker, sym.company_name || '', profileA, apiKey, openTickers, noFilterA, today, fmt, false, false, price, abScanMode === 'universe')
+            return scanSymbol(sym.ticker, sym.company_name || '', profileA, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, abScanMode === 'universe')
               .catch((err) => { console.error(`[AB-TEST A] ${sym.ticker} failed: ${err}`); return null; });
           })
         );
@@ -2064,7 +2078,7 @@ serve(async (req) => {
           batch.map((sym) => {
             const upper = sym.ticker.toUpperCase();
             const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
-            return scanSymbol(sym.ticker, sym.company_name || '', profileB, apiKey, openTickers, noFilterB, today, fmt, false, false, price, abScanMode === 'universe')
+            return scanSymbol(sym.ticker, sym.company_name || '', profileB, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, abScanMode === 'universe')
               .catch((err) => { console.error(`[AB-TEST B] ${sym.ticker} failed: ${err}`); return null; });
           })
         );
@@ -2152,8 +2166,8 @@ serve(async (req) => {
         }
       }
 
-      await abWarmPending(candidatesA, profileA, noFilterA, 'A');
-      await abWarmPending(candidatesB, profileB, noFilterB, 'B');
+      await abWarmPending(candidatesA, profileA, noFilterMode, 'A');
+      await abWarmPending(candidatesB, profileB, noFilterMode, 'B');
 
       // Log SOFI specifically if present in either profile
       const sofiA = candidatesA.find((c) => c.ticker === 'SOFI');
