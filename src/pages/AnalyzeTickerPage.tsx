@@ -13,6 +13,7 @@ import {
   BarChart3,
   MinusCircle,
   X,
+  Trophy,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { AnalyzeTickerResponse, ContractAnalysis } from '@/lib/liveMarketData';
@@ -85,6 +86,7 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
   const [filterExpiration, setFilterExpiration] = useState<string>('all');
   const [filterStrike, setFilterStrike] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [viewMode, setViewMode] = useState<'qualified' | 'all'>('qualified');
   const [selectedContract, setSelectedContract] = useState<ContractAnalysis | null>(null);
   const [showAddPosition, setShowAddPosition] = useState(false);
   const tickerInputRef = useRef<HTMLInputElement>(null);
@@ -117,6 +119,7 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
     setFilterExpiration('all');
     setFilterStrike('all');
     setFilterStatus('all');
+    setViewMode('qualified');
     setSelectedContract(null);
     state.runAnalyzeTicker(sym);
   };
@@ -126,6 +129,7 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
     setFilterExpiration('all');
     setFilterStrike('all');
     setFilterStatus('all');
+    setViewMode('qualified');
     setSelectedContract(null);
     state.clearAnalyzeResult();
     tickerInputRef.current?.focus();
@@ -154,8 +158,34 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
     return [...new Set(allContracts.map((c) => c.strike))].sort((a, b) => a - b);
   }, [allContracts]);
 
+  const qualifiedContracts = useMemo(() => allContracts.filter((c) => c.qualified), [allContracts]);
+
+  const bestQualified = useMemo(() => {
+    const qs = qualifiedContracts.slice();
+    qs.sort((a, b) => {
+      if (b.volume !== a.volume) return b.volume - a.volume;
+      if (a.premium_capture !== b.premium_capture) return a.premium_capture - b.premium_capture;
+      if (b.net_croi !== a.net_croi) return b.net_croi - a.net_croi;
+      return b.open_interest - a.open_interest;
+    });
+    return qs[0] ?? null;
+  }, [qualifiedContracts]);
+
+  useEffect(() => {
+    if (qualifiedContracts.length === 1) {
+      setSelectedContract(qualifiedContracts[0]);
+    } else if (qualifiedContracts.length > 1 && bestQualified) {
+      setSelectedContract(bestQualified);
+    } else {
+      setSelectedContract(null);
+    }
+  }, [qualifiedContracts, bestQualified]);
+
   const filteredContracts = useMemo(() => {
     let contracts = allContracts;
+    if (viewMode === 'qualified') {
+      contracts = contracts.filter((c) => c.qualified);
+    }
     if (filterExpiration !== 'all') {
       contracts = contracts.filter((c) => c.expiration === filterExpiration);
     }
@@ -166,7 +196,7 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
       contracts = contracts.filter((c) => contractStatus(c) === filterStatus);
     }
     return contracts;
-  }, [allContracts, filterExpiration, filterStrike, filterStatus]);
+  }, [allContracts, viewMode, filterExpiration, filterStrike, filterStatus]);
 
   const groupedByExpiration = useMemo(() => {
     const groups: Record<string, ContractAnalysis[]> = {};
@@ -269,6 +299,10 @@ export function AnalyzeTickerPage({ state, autoAnalyzeTicker, onConsumeAutoAnaly
           selectedContract={selectedContract}
           onSelectContract={setSelectedContract}
           onAddPosition={() => setShowAddPosition(true)}
+          viewMode={viewMode}
+          setViewMode={setViewMode}
+          bestQualified={bestQualified}
+          qualifiedCount={qualifiedContracts.length}
         />
       )}
 
@@ -318,6 +352,10 @@ function AnalyzeResult({
   selectedContract,
   onSelectContract,
   onAddPosition,
+  viewMode,
+  setViewMode,
+  bestQualified,
+  qualifiedCount,
 }: {
   result: AnalyzeTickerResponse;
   state: AppState;
@@ -339,6 +377,10 @@ function AnalyzeResult({
   selectedContract: ContractAnalysis | null;
   onSelectContract: (c: ContractAnalysis | null) => void;
   onAddPosition: () => void;
+  viewMode: 'qualified' | 'all';
+  setViewMode: (m: 'qualified' | 'all') => void;
+  bestQualified: ContractAnalysis | null;
+  qualifiedCount: number;
 }) {
   const maxCycleDays = state.activeProfile?.max_recycle_days ?? 120;
 
@@ -565,8 +607,29 @@ function AnalyzeResult({
         </Card>
       )}
 
-      {/* Contract filters */}
+      {/* View toggle + Contract filters */}
       {totalContracts > 0 && (
+        <>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex rounded-lg border border-slate-700 bg-slate-900/50 p-0.5">
+            <button
+              onClick={() => setViewMode('qualified')}
+              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${viewMode === 'qualified' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Qualified Only
+            </button>
+            <button
+              onClick={() => setViewMode('all')}
+              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${viewMode === 'all' ? 'bg-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              All Contracts
+            </button>
+          </div>
+          {viewMode === 'qualified' && qualifiedCount > 0 && (
+            <span className="text-xs text-slate-500">{qualifiedCount} qualified of {totalContracts} total</span>
+          )}
+        </div>
+
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
           <div className="flex items-center gap-2 text-sm text-slate-400">
             <Filter className="h-4 w-4" />
@@ -606,6 +669,7 @@ function AnalyzeResult({
             {shownContracts} of {totalContracts} contracts
           </span>
         </div>
+        </>
       )}
 
       {/* Contract Results — all analyzed contracts */}
@@ -653,6 +717,7 @@ function AnalyzeResult({
                       const status = contractStatus(c);
                       const reason = reasonSummary(c);
                       const isClosest = closestMatch?.strike === c.strike && closestMatch?.expiration === c.expiration;
+                      const isBestQualified = bestQualified?.strike === c.strike && bestQualified?.expiration === c.expiration && c.qualified;
                       const isSelected = selectedContract?.strike === c.strike && selectedContract?.expiration === c.expiration;
                       const probs = calcProbabilities({
                         stockPrice: displayStockPrice ?? 0,
@@ -667,11 +732,12 @@ function AnalyzeResult({
                         <tr
                           key={i}
                           onClick={() => onSelectContract(isSelected ? null : c)}
-                          className={`cursor-pointer transition-colors ${isSelected ? 'bg-sky-500/10 ring-1 ring-inset ring-sky-500/30' : 'hover:bg-slate-800/40'} ${isClosest && !isSelected ? 'ring-1 ring-inset ring-amber-500/20' : ''}`}
+                          className={`cursor-pointer transition-colors ${isSelected ? 'bg-sky-500/10 ring-1 ring-inset ring-sky-500/30' : 'hover:bg-slate-800/40'} ${isBestQualified && !isSelected ? 'ring-1 ring-inset ring-emerald-500/20' : ''} ${isClosest && !isSelected && !isBestQualified ? 'ring-1 ring-inset ring-amber-500/20' : ''}`}
                         >
                           <td className="px-3 py-2 text-right tabular-nums text-slate-200 font-medium">
                             ${formatNum(c.strike)}
-                            {isClosest && <span className="ml-1 text-amber-400 text-xs">★</span>}
+                            {isBestQualified && <span className="ml-1 text-emerald-400 text-xs" title="Best Match"><Trophy className="inline h-3 w-3" /></span>}
+                            {isClosest && !isBestQualified && <span className="ml-1 text-amber-400 text-xs">★</span>}
                             {isSelected && <span className="ml-1 text-sky-400 text-xs">●</span>}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-slate-400">{c.dte}</td>
@@ -736,6 +802,21 @@ function AnalyzeResult({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* No qualified contracts empty state */}
+      {viewMode === 'qualified' && qualifiedCount === 0 && totalContracts > 0 && (
+        <div className="py-12 text-center rounded-xl border border-slate-800 bg-slate-900/50">
+          <XCircle className="h-8 w-8 mx-auto mb-2 text-slate-600" />
+          <p className="text-sm text-slate-400">No contracts currently qualify under the active strategy.</p>
+          <button
+            onClick={() => setViewMode('all')}
+            className="mt-3 inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800 transition-colors"
+          >
+            <Filter className="h-3.5 w-3.5" />
+            View All Contracts
+          </button>
         </div>
       )}
 
