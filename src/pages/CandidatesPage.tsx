@@ -238,8 +238,38 @@ export function CandidatesPage({
                 </div>
               </div>
               <div className="text-[11px] text-slate-600 mt-1.5">
-                Use Analyze Ticker to populate history for individual tickers. Tickers with 60+ bars but fewer than 200 will be Pending for MA200 rules.
+                Market Discovery progressively warms the cache by fetching history for up to 4 pending tickers per scan. Tickers with 60+ bars but fewer than 200 will be Pending for MA200 rules.
               </div>
+              {(state.scanCounts.technical_cache.history_fetched_this_scan != null) && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-2">
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="text-slate-400">History fetched this scan</span>
+                    <span className="font-semibold text-emerald-400 tabular-nums">{state.scanCounts.technical_cache.history_fetched_this_scan}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="text-slate-400">Still pending history</span>
+                    <span className="font-semibold text-amber-400 tabular-nums">{state.scanCounts.technical_cache.still_pending_history ?? 0}</span>
+                  </div>
+                  {(state.scanCounts.technical_cache.massive_history_403 ?? 0) > 0 && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-slate-400">Massive 403s</span>
+                      <span className="font-semibold text-red-400 tabular-nums">{state.scanCounts.technical_cache.massive_history_403}</span>
+                    </div>
+                  )}
+                  {(state.scanCounts.technical_cache.massive_history_429 ?? 0) > 0 && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-slate-400">Massive 429s</span>
+                      <span className="font-semibold text-red-400 tabular-nums">{state.scanCounts.technical_cache.massive_history_429}</span>
+                    </div>
+                  )}
+                  {(state.scanCounts.technical_cache.cache_save_failures ?? 0) > 0 && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-slate-400">Cache save failures</span>
+                      <span className="font-semibold text-red-400 tabular-nums">{state.scanCounts.technical_cache.cache_save_failures}</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {state.scanCounts.closest_matches && state.scanCounts.closest_matches.length > 0 && (

@@ -46,6 +46,12 @@ export interface ScanCounts {
     tickers_with_60_plus_bars: number;
     tickers_with_200_plus_bars: number;
     tickers_missing_history: number;
+    history_fetched_this_scan?: number;
+    still_pending_history?: number;
+    massive_history_403?: number;
+    massive_history_429?: number;
+    cache_save_failures?: number;
+    warm_diagnostics?: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[];
   };
   closest_matches?: ClosestMatch[];
 }
@@ -106,7 +112,7 @@ export interface TechnicalData {
   rsi: number;
   ma20: number;
   ma50: number;
-  ma200: number;
+  ma200: number | null;
   macd: number;
   macd_signal: number;
   macd_histogram: number;
@@ -208,7 +214,7 @@ function normalizeAnalyzeResponse(data: any): AnalyzeTickerResponse {
     rsi: num(data.technical.rsi) ?? 0,
     ma20: num(data.technical.ma20) ?? 0,
     ma50: num(data.technical.ma50) ?? 0,
-    ma200: num(data.technical.ma200) ?? 0,
+    ma200: num(data.technical.ma200),
     macd: num(data.technical.macd) ?? 0,
     macd_signal: num(data.technical.macd_signal) ?? 0,
     macd_histogram: num(data.technical.macd_histogram) ?? 0,

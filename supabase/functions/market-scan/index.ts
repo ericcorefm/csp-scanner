@@ -339,10 +339,11 @@ async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<vo
       body: JSON.stringify(rows),
     });
     if (!resp.ok) {
-      console.log(`[Cache] ${ticker} | save failed: HTTP ${resp.status}`);
+      const body = await resp.text().catch(() => 'unreadable');
+      console.log(`[Cache SAVE FAIL] ${ticker} | HTTP ${resp.status} | body: ${body.slice(0, 300)}`);
     }
   } catch (e) {
-    console.log(`[Cache] ${ticker} | save error: ${e instanceof Error ? e.message : String(e)}`);
+    console.log(`[Cache SAVE ERROR] ${ticker} | ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -771,7 +772,7 @@ type ScanSymbolResult = {
   technicalDataAvailable?: boolean;
   historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
   historyError?: string;
-  technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
+  technical?: { rsi: number; ma20: number; ma50: number; ma200: number | null; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
   techRejections?: TechnicalRejections;
   orderStrikeRejections?: OrderStrikeRejections;
   historyBarCount?: number;
@@ -1040,7 +1041,7 @@ async function scanSymbol(
       rsi: Number(rsi(closes).toFixed(1)),
       ma20: Number(sma(closes, 20).toFixed(2)),
       ma50: Number(sma(closes, 50).toFixed(2)),
-      ma200: has200 ? Number(sma(closes, 200).toFixed(2)) : 0,
+      ma200: has200 ? Number(sma(closes, 200).toFixed(2)) : null,
       macd: m.macd,
       macd_signal: m.signal,
       macd_histogram: m.histogram,
@@ -1352,8 +1353,8 @@ async function scanSymbol(
             }
             // MA50 > MA200 — only if toggle ON. Needs 200 bars.
             if (profile.require_ma50_above_ma200) {
-              if (ma200DataAvailable) {
-                if (tech!.ma200 > 0 && tech!.ma50 <= tech!.ma200) {
+              if (ma200DataAvailable && tech!.ma200 !== null) {
+                if (tech!.ma50 <= tech!.ma200) {
                   if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
                   r.techRejections!.ma50_not_above_ma200++;
                 }
@@ -1365,8 +1366,8 @@ async function scanSymbol(
             }
             // Price > MA200 — only if toggle ON. Needs 200 bars.
             if (profile.require_price_above_ma200) {
-              if (ma200DataAvailable) {
-                if (tech!.ma200 > 0 && stockPrice !== null && stockPrice > 0 && stockPrice <= tech!.ma200) {
+              if (ma200DataAvailable && tech!.ma200 !== null) {
+                if (stockPrice !== null && stockPrice > 0 && stockPrice <= tech!.ma200) {
                   if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
                   r.techRejections!.price_not_above_ma200++;
                 }
@@ -1512,16 +1513,16 @@ async function scanSymbol(
               passFail.push({ rule: `MA20 > MA50 (${tech.ma20} vs ${tech.ma50})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
             }
             if (profile.require_ma50_above_ma200) {
-              if (ma200DataAvailable) {
-                const maOk = tech.ma200 > 0 && tech.ma50 > tech.ma200;
+              if (ma200DataAvailable && tech.ma200 !== null) {
+                const maOk = tech.ma50 > tech.ma200;
                 passFail.push({ rule: `MA50 > MA200 (${tech.ma50} vs ${tech.ma200})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
               } else {
                 passFail.push({ rule: 'MA50 > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
               }
             }
             if (profile.require_price_above_ma200) {
-              if (ma200DataAvailable) {
-                const priceOk = tech.ma200 > 0 && stockPrice !== null && stockPrice > 0 && stockPrice > tech.ma200;
+              if (ma200DataAvailable && tech.ma200 !== null) {
+                const priceOk = stockPrice !== null && stockPrice > 0 && stockPrice > tech.ma200;
                 passFail.push({ rule: `Price > MA200 (${stockPrice} vs ${tech.ma200})`, pass: priceOk, status: priceOk ? 'pass' : 'fail' });
               } else {
                 passFail.push({ rule: 'Price > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
@@ -1999,6 +2000,131 @@ serve(async (req) => {
       }
     }
 
+    // ── STAGE 2: Technical cache warming ──
+    // After the main scan, identify tickers that are Pending only because
+    // technical history was unavailable. Fetch history for the best ones,
+    // save to cache, and re-scan them so they get real technical evaluations.
+    // This progressively warms the cache without hammering the Massive API.
+    const MAX_HISTORY_FETCHES_PER_SCAN = 4;
+    let historyFetchedThisScan = 0;
+    let historyFetch403 = 0;
+    let historyFetch429 = 0;
+    let cacheSaveFailures = 0;
+    let stillPendingHistory = 0;
+    const warmDiagnostics: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[] = [];
+
+    const techRulesEnabled = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled');
+    if (techRulesEnabled && scanMode !== 'analyze') {
+      // Find tickers with pending technical data — candidates that have
+      // technical_pending=true and no hard rejections (only pending reasons).
+      // Only fetch history for tickers that survived non-technical screening.
+      const pendingTickers = new Map<string, { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }>();
+
+      for (const c of candidates) {
+        if (c.technical_pending && (!c.rejection_reasons || c.rejection_reasons.length === 0)) {
+          const existing = pendingTickers.get(c.ticker);
+          const croi = c.net_croi || 0;
+          const oi = c.open_interest || 0;
+          const vol = c.volume || 0;
+          if (!existing || croi > existing.bestCroi) {
+            pendingTickers.set(c.ticker, {
+              ticker: c.ticker,
+              bestCroi: croi,
+              bestOi: Math.max(oi, existing?.bestOi || 0),
+              bestVolume: Math.max(vol, existing?.bestVolume || 0),
+              cachedBars: 0,
+            });
+          }
+        }
+      }
+
+      // Check cache for each pending ticker to determine which actually need fetching
+      const needsFetch: { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }[] = [];
+      for (const info of pendingTickers.values()) {
+        const upper = info.ticker.toUpperCase();
+        const cachedBars = await loadCachedHistory(upper, 260);
+        info.cachedBars = cachedBars.length;
+        const needsMA200 = profile.require_ma50_above_ma200 || profile.require_price_above_ma200;
+        const requiredBars = needsMA200 ? 200 : 60;
+        if (cachedBars.length < requiredBars) {
+          needsFetch.push(info);
+        } else {
+          // Already has enough cache — shouldn't be pending, but log anyway
+          warmDiagnostics.push({ ticker: upper, cachedBars: cachedBars.length, requiredBars, fetchAttempted: false, fetchStatus: 'cache_sufficient', finalBars: cachedBars.length });
+        }
+      }
+
+      // Rank: tickers with CROI > 0 first (passing CROI/PC), then by OI, then volume
+      needsFetch.sort((a, b) => {
+        const aHasCroi = a.bestCroi > 0 ? 1 : 0;
+        const bHasCroi = b.bestCroi > 0 ? 1 : 0;
+        if (aHasCroi !== bHasCroi) return bHasCroi - aHasCroi;
+        if (a.bestOi !== b.bestOi) return b.bestOi - a.bestOi;
+        return b.bestVolume - a.bestVolume;
+      });
+
+      const toFetch = needsFetch.slice(0, MAX_HISTORY_FETCHES_PER_SCAN);
+      const skippedPending = needsFetch.length - toFetch.length;
+      stillPendingHistory = skippedPending;
+
+      console.log(`[CacheWarm] ${needsFetch.length} tickers need history, fetching top ${toFetch.length}, ${skippedPending} will remain pending`);
+
+      // Fetch history sequentially (respect Massive rate limits)
+      for (const info of toFetch) {
+        const upper = info.ticker.toUpperCase();
+        const needsMA200 = profile.require_ma50_above_ma200 || profile.require_price_above_ma200;
+        const requiredBars = needsMA200 ? 200 : 60;
+
+        // Invalidate in-memory cache so getStockSnapshot actually fetches
+        stockCache.delete(upper);
+
+        // Fetch history with allowLiveHistory = true
+        const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null, true);
+        const fetchStatus = snapshot.historyHttpStatus === 200 ? 'ok' : `HTTP_${snapshot.historyHttpStatus ?? 'none'}`;
+        const finalBars = snapshot.historicalBars.length;
+
+        if (snapshot.historyHttpStatus === 403) historyFetch403++;
+        if (snapshot.historyHttpStatus === 429) historyFetch429++;
+
+        warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
+
+        if (finalBars >= 60) {
+          historyFetchedThisScan++;
+          console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars, re-scanning`);
+
+          // Re-scan this ticker with the now-cached history.
+          // The in-memory stockCache was populated by the getStockSnapshot call
+          // above, so scanSymbol will find the bars without another Massive call.
+          // Pass allowLiveHistory=false to avoid any further API calls.
+          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
+          const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
+
+          if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
+            // Remove old candidates for this ticker and add the new ones
+            for (let ci = candidates.length - 1; ci >= 0; ci--) {
+              if (candidates[ci].ticker === upper) candidates.splice(ci, 1);
+            }
+            candidates.push(...rerunResult.candidates);
+
+            // Update totals
+            totalQualified += rerunResult.qualified;
+            totalRejected += rerunResult.rejected;
+            totalPending += rerunResult.pending;
+            totalEvaluated += rerunResult.evaluated;
+            if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
+            else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
+          }
+        } else {
+          console.log(`[CacheWarm] ${upper} | fetch returned only ${finalBars} bars — still pending`);
+          stillPendingHistory++;
+        }
+      }
+
+      if (warmDiagnostics.length > 0) {
+        console.log(`[CacheWarm] Diagnostics: ${JSON.stringify(warmDiagnostics)}`);
+      }
+    }
+
     // Send all contracts to the client. The client's selectBestContractPerTicker
     // helper handles one-contract-per-ticker display logic. Keeping all contracts
     // preserves them for Analyze Ticker / Candidate Detail views.
@@ -2074,6 +2200,12 @@ serve(async (req) => {
         tickers_with_60_plus_bars: tickersWith60PlusBars,
         tickers_with_200_plus_bars: tickersWith200PlusBars,
         tickers_missing_history: tickersMissingHistory,
+        history_fetched_this_scan: historyFetchedThisScan,
+        still_pending_history: stillPendingHistory,
+        massive_history_403: historyFetch403,
+        massive_history_429: historyFetch429,
+        cache_save_failures: cacheSaveFailures,
+        warm_diagnostics: warmDiagnostics,
       },
       closest_matches: closestMatches,
     };

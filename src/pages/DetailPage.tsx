@@ -426,7 +426,7 @@ export function DetailPage({
                     <StatRow label="RSI" value={formatNum(extraTech.rsi, 1)} icon={<Activity className="h-3.5 w-3.5 text-slate-500" />} />
                     <StatRow label="20 DMA" value={`$${formatNum(extraTech.ma20)}`} />
                     <StatRow label="50 DMA" value={`$${formatNum(extraTech.ma50)}`} />
-                    <StatRow label="200 DMA" value={`$${formatNum(extraTech.ma200)}`} />
+                    <StatRow label="200 DMA" value={extraTech.ma200 != null ? `${formatNum(extraTech.ma200)}` : 'N/A'} />
                     <StatRow
                       label="MACD"
                       value={`${formatNum(extraTech.macd, 4)} / ${formatNum(extraTech.macd_signal, 4)}`}

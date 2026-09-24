@@ -555,7 +555,7 @@ function AnalyzeResult({
               <StatBox label="RSI" value={formatNum(result.technical.rsi, 1)} icon={<Activity className="h-3.5 w-3.5 text-slate-500" />} />
               <StatBox label="20 DMA" value={`$${formatNum(result.technical.ma20)}`} />
               <StatBox label="50 DMA" value={`$${formatNum(result.technical.ma50)}`} />
-              <StatBox label="200 DMA" value={`$${formatNum(result.technical.ma200)}`} />
+              <StatBox label="200 DMA" value={result.technical.ma200 != null ? `${formatNum(result.technical.ma200)}` : 'N/A'} />
               <StatBox
                 label="MACD"
                 value={`${formatNum(result.technical.macd, 4)} / ${formatNum(result.technical.macd_signal, 4)}`}

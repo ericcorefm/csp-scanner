@@ -68,7 +68,7 @@ export interface TechnicalSnapshot {
   stock_price: number;
   ma20: number;
   ma50: number;
-  ma200: number;
+  ma200: number | null;
   rsi: number;
   macd_line: number;
   macd_signal: number;
