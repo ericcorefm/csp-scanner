@@ -1510,8 +1510,8 @@ async function scanSymbol(
     // (data needed to evaluate a rule is temporarily unavailable).
     const hasRejections = reasons.length > 0;
     const hasPending = pendingReasons.length > 0;
-    const technicalPending = !noFilterMode && (!isSectionOff(profile, 'technical_rules_enabled') || !isSectionOff(profile, 'support_distance_enabled')) && !canComputeBaseTechnicals;
-    const isPending = !hasRejections && (hasPending || technicalPending);
+    const historyDependentRulePending = !noFilterMode && (!isSectionOff(profile, 'technical_rules_enabled') || !isSectionOff(profile, 'support_distance_enabled')) && !canComputeBaseTechnicals;
+    const isPending = !hasRejections && (hasPending || historyDependentRulePending);
     const qualified = !hasRejections && !isPending;
     r.evaluated++;
     if (qualified) r.qualified++;
@@ -2075,8 +2075,12 @@ serve(async (req) => {
     let stillPendingHistory = 0;
     const warmDiagnostics: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[] = [];
 
-    const techRulesEnabled = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled');
-    if (techRulesEnabled && scanMode !== 'analyze') {
+    const technicalRulesNeedHistory = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled');
+    const supportDistanceNeedsHistory = !noFilterMode &&
+      !isSectionOff(profile, 'support_distance_enabled') &&
+      (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
+    const historyNeeded = technicalRulesNeedHistory || supportDistanceNeedsHistory;
+    if (historyNeeded && scanMode !== 'analyze') {
       // Find tickers with pending technical data — candidates that have
       // technical_pending=true and no hard rejections (only pending reasons).
       // Only fetch history for tickers that survived non-technical screening.
@@ -2106,7 +2110,7 @@ serve(async (req) => {
         const upper = info.ticker.toUpperCase();
         const cachedBars = await loadCachedHistory(upper, 260);
         info.cachedBars = cachedBars.length;
-        const needsMA200 = profile.require_ma50_above_ma200 || profile.require_price_above_ma200;
+        const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
         const requiredBars = needsMA200 ? 200 : 60;
         if (cachedBars.length < requiredBars) {
           needsFetch.push(info);
@@ -2134,7 +2138,7 @@ serve(async (req) => {
       // Fetch history sequentially (respect Massive rate limits)
       for (const info of toFetch) {
         const upper = info.ticker.toUpperCase();
-        const needsMA200 = profile.require_ma50_above_ma200 || profile.require_price_above_ma200;
+        const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
         const requiredBars = needsMA200 ? 200 : 60;
 
         // Invalidate in-memory cache so getStockSnapshot actually fetches
