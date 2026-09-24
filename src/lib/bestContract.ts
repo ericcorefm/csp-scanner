@@ -21,6 +21,7 @@ function statusPriority(c: CandidateScan): StatusPriority {
 export function reapplyHardFilters(contracts: CandidateScan[], profile: StrategyProfile): CandidateScan[] {
   return contracts.map((c) => {
     const reasons = [...(c.rejection_reasons || [])];
+    const pendingReasons: string[] = [];
 
     if (profile.order_strike_enabled) {
       if (profile.max_strike != null && c.strike > profile.max_strike && !reasons.includes('Strike too high')) {
@@ -32,8 +33,8 @@ export function reapplyHardFilters(contracts: CandidateScan[], profile: Strategy
         }
       }
       if (profile.minimum_stock_price != null && (c.stock_price == null || c.stock_price <= 0)) {
-        if (!reasons.includes('Stock price unavailable — minimum stock price rule not evaluated')) {
-          reasons.push('Stock price unavailable — minimum stock price rule not evaluated');
+        if (!pendingReasons.includes('Stock price unavailable — minimum stock price rule not evaluated')) {
+          pendingReasons.push('Stock price unavailable — minimum stock price rule not evaluated');
         }
       }
       if (profile.maximum_stock_price != null && c.stock_price != null && c.stock_price > 0) {
@@ -49,14 +50,16 @@ export function reapplyHardFilters(contracts: CandidateScan[], profile: Strategy
       }
     }
 
-    const qualified = reasons.length === 0 && c.qualified;
-    const technical_pending = c.technical_pending;
+    const hasRejections = reasons.length > 0;
+    const hasPending = pendingReasons.length > 0 || c.technical_pending;
+    const isPending = !hasRejections && hasPending;
+    const qualified = !hasRejections && !isPending;
 
     return {
       ...c,
       rejection_reasons: reasons,
       qualified,
-      technical_pending,
+      technical_pending: isPending,
     };
   });
 }
@@ -74,7 +77,7 @@ export function reapplyHardFilters(contracts: CandidateScan[], profile: Strategy
  * All contracts are kept in state for Analyze Ticker / Detail — this helper
  * only controls which single contract is displayed on Today's Candidates.
  */
-export function selectBestContractPerTicker(contracts: CandidateScan[]): CandidateScan[] {
+export function selectBestContractPerTicker(contracts: CandidateScan[], maxPerTicker = 1): CandidateScan[] {
   const grouped = new Map<string, CandidateScan[]>();
 
   for (const contract of contracts) {
@@ -87,6 +90,7 @@ export function selectBestContractPerTicker(contracts: CandidateScan[]): Candida
     }
   }
 
+  const limit = Math.max(1, maxPerTicker);
   const result: CandidateScan[] = [];
 
   for (const group of grouped.values()) {
@@ -116,7 +120,7 @@ export function selectBestContractPerTicker(contracts: CandidateScan[]): Candida
       continue;
     }
 
-    // RANK SECOND: among qualified contracts only
+    // RANK SECOND: among qualified contracts only, then take top N
     const sorted = [...qualifiedOnly].sort((a, b) => {
       const volA = a.volume ?? 0;
       const volB = b.volume ?? 0;
@@ -135,7 +139,7 @@ export function selectBestContractPerTicker(contracts: CandidateScan[]): Candida
       return oiB - oiA;
     });
 
-    result.push(sorted[0]);
+    result.push(...sorted.slice(0, limit));
   }
 
   return result;

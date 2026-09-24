@@ -720,6 +720,24 @@ type StockSnapshot = {
 // for symbols that appear multiple times (e.g. HUT with 20 contracts).
 const stockCache = new Map<string, StockSnapshot>();
 
+type TechnicalRejections = {
+  rsi_below_min: number;
+  rsi_above_max: number;
+  ma20_not_above_ma50: number;
+  ma50_not_above_ma200: number;
+  price_not_above_ma200: number;
+  downtrend_no_support: number;
+  support_dist_below_min: number;
+  support_dist_above_max: number;
+  technical_data_missing: number;
+};
+
+type OrderStrikeRejections = {
+  stock_below_min: number;
+  stock_above_max: number;
+  strike_above_max: number;
+};
+
 type ScanSymbolResult = {
   candidates: any[];
   chainStatus: ChainStatus;
@@ -740,6 +758,7 @@ type ScanSymbolResult = {
   evaluated: number;
   qualified: number;
   rejected: number;
+  pending: number;
   pagesFetched: number;
   rawSample?: any;
   analyses?: any[];
@@ -753,6 +772,8 @@ type ScanSymbolResult = {
   historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
   historyError?: string;
   technical?: { rsi: number; ma20: number; ma50: number; ma200: number; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
+  techRejections?: TechnicalRejections;
+  orderStrikeRejections?: OrderStrikeRejections;
 };
 
 // ── Cache-first stock history fetcher ──
@@ -937,7 +958,9 @@ async function scanSymbol(
     putsReturned: 0, filteredByExpiration: 0, filteredByStrike: 0,
     missingStrike: 0, missingExpiration: 0, missingLastQuote: 0,
     missingBid: 0, zeroBid: 0, missingAsk: 0, zeroAsk: 0, askLtBid: 0, otherInvalid: 0,
-    validQuotes: 0, contractsAwaitingQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pagesFetched: 0,
+    validQuotes: 0, contractsAwaitingQuotes: 0, evaluated: 0, qualified: 0, rejected: 0, pending: 0, pagesFetched: 0,
+    techRejections: { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 },
+    orderStrikeRejections: { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 },
   };
 
   // Step 1: Stock snapshot via shared function (cached per ticker)
@@ -1247,67 +1270,116 @@ async function scanSymbol(
     const sp = hasBidAsk ? spreadPct(bid!, ask!) : 0;
 
     // ── Non-premium qualification rules (applied regardless of premium availability) ──
+    // A contract can be: Qualified, Rejected (failed a rule), or Pending (data
+    // needed to evaluate a rule is temporarily unavailable).
+    // Pending contracts are NOT counted as rejected — they may qualify once
+    // the missing data loads.
     const reasons: string[] = [];
+    const pendingReasons: string[] = [];
     if (!noFilterMode) {
       if (profile.exclude_existing_positions && openTickers.includes(symbol)) reasons.push('Existing position');
-      if (!isSectionOff(profile, 'order_strike_enabled') && profile.max_strike != null && strike > profile.max_strike) reasons.push('Strike too high');
-      if (!isSectionOff(profile, 'technical_rules_enabled') && technicalDataAvailable) {
-        const tech = r.technical;
-        if (tech) {
-          if (profile.rsi_min > 0 && tech.rsi < profile.rsi_min) {
-            if (!reasons.includes('RSI below minimum')) reasons.push('RSI below minimum');
+
+      // ── ORDER & STRIKE SECTION ──
+      if (!isSectionOff(profile, 'order_strike_enabled')) {
+        // Max Put Strike: null/undefined/"" means no strike maximum
+        if (profile.max_strike != null && profile.max_strike !== undefined && strike > profile.max_strike) {
+          reasons.push('Strike too high');
+          r.orderStrikeRejections!.strike_above_max++;
+        }
+        // Stock price filters
+        if (stockPrice !== null && stockPrice > 0) {
+          if (profile.minimum_stock_price != null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
+            if (!reasons.includes('Stock price below minimum')) reasons.push('Stock price below minimum');
+            r.orderStrikeRejections!.stock_below_min++;
           }
-          if (profile.rsi_max > 0 && tech.rsi > profile.rsi_max) {
-            if (!reasons.includes('RSI above maximum')) reasons.push('RSI above maximum');
+          if (profile.maximum_stock_price != null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
+            if (!reasons.includes('Stock price above maximum')) reasons.push('Stock price above maximum');
+            r.orderStrikeRejections!.stock_above_max++;
           }
-          if (profile.require_ma20_above_ma50 && tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 <= tech.ma50) {
-            if (!reasons.includes('MA20 not above MA50')) reasons.push('MA20 not above MA50');
+        } else {
+          // Stock price unavailable — Pending, not Rejected
+          if (profile.minimum_stock_price != null && profile.minimum_stock_price !== undefined) {
+            if (!pendingReasons.includes('Stock price unavailable — minimum stock price rule not evaluated')) {
+              pendingReasons.push('Stock price unavailable — minimum stock price rule not evaluated');
+            }
           }
-          if (profile.require_ma50_above_ma200 && tech.ma50 > 0 && tech.ma200 > 0 && tech.ma50 <= tech.ma200) {
-            if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
-          }
-          if (profile.require_price_above_ma200 && tech.ma200 > 0 && stockPrice !== null && stockPrice > 0 && stockPrice <= tech.ma200) {
-            if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
+          if (profile.maximum_stock_price != null && profile.maximum_stock_price !== undefined) {
+            if (!pendingReasons.includes('Stock price unavailable — maximum stock price rule not evaluated')) {
+              pendingReasons.push('Stock price unavailable — maximum stock price rule not evaluated');
+            }
           }
         }
-        if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport) reasons.push('Downtrend without support');
-        if (primarySupport !== null && primarySupport > 0) {
-          const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-          if (supportDistPct < profile.minimum_support_distance_pct) reasons.push('Support distance too low');
-          if (supportDistPct > profile.maximum_support_distance_pct) reasons.push('Support distance too high');
-        }
-      } else if (!noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable) {
-        if (!reasons.includes('Missing technical data')) reasons.push('Missing technical data');
       }
+
+      // ── TECHNICAL RULES SECTION ──
+      if (!isSectionOff(profile, 'technical_rules_enabled')) {
+        if (technicalDataAvailable) {
+          const tech = r.technical;
+          // RSI: use null-safe checks (rsi_min/rsi_max are always set, but guard anyway)
+          if (tech) {
+            if (profile.rsi_min != null && tech.rsi < profile.rsi_min) {
+              if (!reasons.includes('RSI below minimum')) reasons.push('RSI below minimum');
+              r.techRejections!.rsi_below_min++;
+            }
+            if (profile.rsi_max != null && tech.rsi > profile.rsi_max) {
+              if (!reasons.includes('RSI above maximum')) reasons.push('RSI above maximum');
+              r.techRejections!.rsi_above_max++;
+            }
+            // MA20 > MA50 — only if toggle ON
+            if (profile.require_ma20_above_ma50 && tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 <= tech.ma50) {
+              if (!reasons.includes('MA20 not above MA50')) reasons.push('MA20 not above MA50');
+              r.techRejections!.ma20_not_above_ma50++;
+            }
+            // MA50 > MA200 — only if toggle ON
+            if (profile.require_ma50_above_ma200 && tech.ma50 > 0 && tech.ma200 > 0 && tech.ma50 <= tech.ma200) {
+              if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
+              r.techRejections!.ma50_not_above_ma200++;
+            }
+            // Price > MA200 — only if toggle ON. Uses current stock price, NOT strike
+            if (profile.require_price_above_ma200 && tech.ma200 > 0 && stockPrice !== null && stockPrice > 0 && stockPrice <= tech.ma200) {
+              if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
+              r.techRejections!.price_not_above_ma200++;
+            }
+          }
+          // Downtrend without support — only if toggle ON
+          // Reject ONLY when BOTH: trend is downtrend AND strike >= primarySupport
+          // (i.e., no established support below the strike)
+          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport) {
+            reasons.push('Downtrend without support');
+            r.techRejections!.downtrend_no_support++;
+          }
+          // Support distance: ((primarySupport - strike) / primarySupport) * 100
+          // Only evaluate if primarySupport is available. If support is null,
+          // this is Pending, not Rejected.
+          if (primarySupport !== null && primarySupport > 0) {
+            const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
+            if (profile.minimum_support_distance_pct != null && supportDistPct < profile.minimum_support_distance_pct) {
+              reasons.push('Support distance too low');
+              r.techRejections!.support_dist_below_min++;
+            }
+            if (profile.maximum_support_distance_pct != null && supportDistPct > profile.maximum_support_distance_pct) {
+              reasons.push('Support distance too high');
+              r.techRejections!.support_dist_above_max++;
+            }
+          } else {
+            // Support unavailable — Pending
+            if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
+              pendingReasons.push('Support distance not evaluated — support unavailable');
+            }
+          }
+        } else {
+          // Technical data (history bars) temporarily unavailable — Pending
+          if (!pendingReasons.includes('Missing technical data')) {
+            pendingReasons.push('Missing technical data');
+            r.techRejections!.technical_data_missing++;
+          }
+        }
+      }
+
       // OI and volume rules are non-premium — they come from the contract itself
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         if (oi < profile.min_target_oi) reasons.push('OI too low');
         if (volume < profile.preferred_daily_volume) reasons.push('Insufficient liquidity');
-      }
-      // Stock-price filter applied at contract level (not as a symbol-level abort)
-      // so that option chain availability is accurately reflected in scan counts.
-      if (!isSectionOff(profile, 'order_strike_enabled')) {
-        if (stockPrice !== null && stockPrice > 0) {
-          if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined && stockPrice < profile.minimum_stock_price) {
-            if (!reasons.includes('Stock price below minimum')) reasons.push('Stock price below minimum');
-          }
-          if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined && stockPrice > profile.maximum_stock_price) {
-            if (!reasons.includes('Stock price above maximum')) reasons.push('Stock price above maximum');
-          }
-        } else {
-          // Stock price unavailable and a stock-price rule is active — cannot evaluate.
-          // Mark as pending so it does NOT appear as qualified in Today's Candidates.
-          if (profile.minimum_stock_price !== null && profile.minimum_stock_price !== undefined) {
-            if (!reasons.includes('Stock price unavailable — minimum stock price rule not evaluated')) {
-              reasons.push('Stock price unavailable — minimum stock price rule not evaluated');
-            }
-          }
-          if (profile.maximum_stock_price !== null && profile.maximum_stock_price !== undefined) {
-            if (!reasons.includes('Stock price unavailable — maximum stock price rule not evaluated')) {
-              reasons.push('Stock price unavailable — maximum stock price rule not evaluated');
-            }
-          }
-        }
       }
     }
 
@@ -1352,20 +1424,24 @@ async function scanSymbol(
       reasons.push('CROI too low');
     }
 
+    // A contract is Pending if it has no hard rejections but has pending reasons
+    // (data needed to evaluate a rule is temporarily unavailable).
+    const hasRejections = reasons.length > 0;
+    const hasPending = pendingReasons.length > 0;
     const technicalPending = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && !technicalDataAvailable;
-    // Unified qualification: a contract is only qualified if it has no
-    // rejection reasons AND technical data is available (or technical rules
-    // are off). This must match analyze mode's finalQualified exactly.
-    const qualified = reasons.length === 0 && !technicalPending;
+    const isPending = !hasRejections && (hasPending || technicalPending);
+    const qualified = !hasRejections && !isPending;
     r.evaluated++;
-    if (qualified) r.qualified++; else r.rejected++;
+    if (qualified) r.qualified++;
+    else if (isPending) r.pending++;
+    else r.rejected++;
 
     // Debug logging for MARA and other specific tickers
     if (['MARA', 'CIFR', 'WULF'].includes(symbol.toUpperCase())) {
       const supportDistPct = primarySupport !== null && primarySupport > 0
         ? Number(((primarySupport - strike) / primarySupport * 100).toFixed(1))
         : null;
-      console.log(`[UNIVERSE DEBUG] ${symbol} | strike=${strike} | exp=${expiration} | stockPrice=${stockPrice} | trend=${trendClass} | primarySupport=${primarySupport} | supportDist=${supportDistPct}% | netCROI=${netCroi} | PC=${pc} | qualified=${qualified} | technicalPending=${technicalPending} | reasons=${JSON.stringify(reasons)}`);
+      console.log(`[UNIVERSE DEBUG] ${symbol} | strike=${strike} | exp=${expiration} | stockPrice=${stockPrice} | trend=${trendClass} | primarySupport=${primarySupport} | supportDist=${supportDistPct}% | netCROI=${netCroi} | PC=${pc} | qualified=${qualified} | isPending=${isPending} | reasons=${JSON.stringify(reasons)} | pendingReasons=${JSON.stringify(pendingReasons)}`);
     }
 
     const premiumSourceOut = premiumSource as string;
@@ -1392,11 +1468,11 @@ async function scanSymbol(
         if (technicalDataAvailable) {
           const tech = r.technical;
           if (tech) {
-            if (profile.rsi_min > 0) {
+            if (profile.rsi_min != null) {
               const rsiOk = tech.rsi >= profile.rsi_min;
               passFail.push({ rule: `RSI >= ${profile.rsi_min} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
             }
-            if (profile.rsi_max > 0) {
+            if (profile.rsi_max != null) {
               const rsiOk = tech.rsi <= profile.rsi_max;
               passFail.push({ rule: `RSI <= ${profile.rsi_max} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
             }
@@ -1413,19 +1489,19 @@ async function scanSymbol(
               passFail.push({ rule: `Price > MA200 (${stockPrice} vs ${tech.ma200})`, pass: priceOk, status: priceOk ? 'pass' : 'fail' });
             }
           }
-          const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && strike >= primarySupport);
+          const trendOk = !(profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport);
           passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
           if (primarySupport !== null && primarySupport > 0) {
             const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
-            const distMinOk = supportDistPct >= profile.minimum_support_distance_pct;
-            const distMaxOk = supportDistPct <= profile.maximum_support_distance_pct;
+            const distMinOk = profile.minimum_support_distance_pct != null && supportDistPct >= profile.minimum_support_distance_pct;
+            const distMaxOk = profile.maximum_support_distance_pct != null && supportDistPct <= profile.maximum_support_distance_pct;
             const distOk = distMinOk && distMaxOk;
             passFail.push({ rule: `Support distance ${profile.minimum_support_distance_pct}%–${profile.maximum_support_distance_pct}% (${supportDistPct.toFixed(1)}%)`, pass: distOk, status: distOk ? 'pass' : 'fail' });
           } else {
             passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
           }
         } else {
-          passFail.push({ rule: 'Technical history unavailable', pass: false, status: 'fail' });
+          passFail.push({ rule: 'Technical history unavailable', pass: true, status: 'not_evaluated' });
           passFail.push({ rule: 'Support distance not evaluated — support unavailable', pass: true, status: 'not_evaluated' });
         }
       }
@@ -1467,7 +1543,7 @@ async function scanSymbol(
         net_croi: hasPremium ? Number(netCroi.toFixed(2)) : 0,
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
-        qualified, technical_pending: technicalPending, pass_fail: passFail,
+        qualified, technical_pending: isPending, pass_fail: passFail,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
@@ -1493,7 +1569,8 @@ async function scanSymbol(
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
         qualified, rejection_reasons: reasons,
-        technical_pending: technicalPending,
+        pending_reasons: pendingReasons,
+        technical_pending: isPending,
         pass_fail: passFail,
         strategy_profile_id: profile.id,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
@@ -1804,10 +1881,12 @@ serve(async (req) => {
     let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
     let totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
     let totalValidQuotes = 0, totalAwaitingQuotes = 0;
-    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPagesFetched = 0;
+    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPending = 0, totalPagesFetched = 0;
     let totalContractsFound = 0;
     let rawSample: any = null;
     let verboseCount = 0;
+    const techRejTotals = { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 };
+    const orderStrikeRejTotals = { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 };
 
     const BATCH_SIZE = 5;
     for (let i = 0; i < symbolList.length; i += BATCH_SIZE) {
@@ -1840,8 +1919,25 @@ serve(async (req) => {
         totalEvaluated += result.evaluated;
         totalQualified += result.qualified;
         totalRejected += result.rejected;
+        totalPending += result.pending || 0;
         totalPagesFetched += result.pagesFetched;
         totalContractsFound += result.putsReturned;
+        if (result.techRejections) {
+          techRejTotals.rsi_below_min += result.techRejections.rsi_below_min;
+          techRejTotals.rsi_above_max += result.techRejections.rsi_above_max;
+          techRejTotals.ma20_not_above_ma50 += result.techRejections.ma20_not_above_ma50;
+          techRejTotals.ma50_not_above_ma200 += result.techRejections.ma50_not_above_ma200;
+          techRejTotals.price_not_above_ma200 += result.techRejections.price_not_above_ma200;
+          techRejTotals.downtrend_no_support += result.techRejections.downtrend_no_support;
+          techRejTotals.support_dist_below_min += result.techRejections.support_dist_below_min;
+          techRejTotals.support_dist_above_max += result.techRejections.support_dist_above_max;
+          techRejTotals.technical_data_missing += result.techRejections.technical_data_missing;
+        }
+        if (result.orderStrikeRejections) {
+          orderStrikeRejTotals.stock_below_min += result.orderStrikeRejections.stock_below_min;
+          orderStrikeRejTotals.stock_above_max += result.orderStrikeRejections.stock_above_max;
+          orderStrikeRejTotals.strike_above_max += result.orderStrikeRejections.strike_above_max;
+        }
 
         if (result.chainStatus === 'success') symbolsWithChains++;
         if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') symbolsFailed++;
@@ -1879,6 +1975,35 @@ serve(async (req) => {
       if (c.qualified) qualifiedTickers.add(c.ticker);
     }
 
+    // Build closest-match debug: 20 nearest-miss contracts when qualified tickers = 0
+    let closestMatches: any[] = [];
+    if (totalQualified === 0 && capped.length > 0) {
+      const notQualified = capped.filter((c) => !c.qualified);
+      notQualified.sort((a, b) => {
+        // Sort by fewest rejection reasons, then by highest net_croi
+        const aReasons = (a.rejection_reasons || []).length;
+        const bReasons = (b.rejection_reasons || []).length;
+        if (aReasons !== bReasons) return aReasons - bReasons;
+        return (b.net_croi || 0) - (a.net_croi || 0);
+      });
+      closestMatches = notQualified.slice(0, 20).map((c) => ({
+        ticker: c.ticker,
+        price: c.stock_price,
+        strike: c.strike,
+        rsi: null,
+        ma20: null,
+        ma50: null,
+        ma200: null,
+        primary_support: c.primary_support,
+        support_distance: c.strike_distance_from_support,
+        net_croi: c.net_croi,
+        premium_capture: c.premium_capture,
+        open_interest: c.open_interest,
+        volume: c.volume,
+        failed_rules: [...(c.rejection_reasons || []), ...(c.pending_reasons || [])],
+      }));
+    }
+
     const scan_counts = {
       symbols_in_universe: symbolList.length,
       symbols_returned: symbolsScanned,
@@ -1892,10 +2017,14 @@ serve(async (req) => {
       contracts_evaluated: totalEvaluated,
       qualified: totalQualified,
       rejected: totalRejected,
+      pending: totalPending,
       pages_fetched: totalPagesFetched,
       contracts_found: totalContractsFound,
       rejection_breakdown: rejectionBreakdown,
       unique_qualified_tickers: qualifiedTickers.size,
+      technical_rejections: techRejTotals,
+      order_strike_rejections: orderStrikeRejTotals,
+      closest_matches: closestMatches,
     };
 
     console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));

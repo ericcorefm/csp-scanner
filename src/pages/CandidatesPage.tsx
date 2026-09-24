@@ -39,8 +39,8 @@ export function CandidatesPage({
   const isDiscovery = scanMode === 'discovery';
 
   const displayCandidates = useMemo(
-    () => selectBestContractPerTicker(state.candidates),
-    [state.candidates],
+    () => selectBestContractPerTicker(state.candidates, state.activeProfile?.max_strikes_per_ticker ?? 1),
+    [state.candidates, state.activeProfile?.max_strikes_per_ticker],
   );
 
   const filtered = useMemo(() => {
@@ -157,7 +157,7 @@ export function CandidatesPage({
             <ScanCountItem label="Contracts Evaluated" value={state.scanCounts.contracts_evaluated} color="text-sky-400" />
             <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
             <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-red-400" />
-            <ScanCountItem label="Pending" value={Math.max(0, state.scanCounts.contracts_evaluated - state.scanCounts.qualified - state.scanCounts.rejected)} color="text-amber-400" />
+            <ScanCountItem label="Pending" value={state.scanCounts.pending ?? Math.max(0, state.scanCounts.contracts_evaluated - state.scanCounts.qualified - state.scanCounts.rejected)} color="text-amber-400" />
             <ScanCountItem label="Qualified Tickers" value={state.scanCounts.unique_qualified_tickers ?? new Set(displayCandidates.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} color="text-emerald-400" />
             <ScanCountItem
               label="Last Scan"
@@ -177,6 +177,99 @@ export function CandidatesPage({
                       <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
                     </div>
                   ))}
+              </div>
+            </div>
+          )}
+          {state.scanCounts.technical_rejections && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <div className="text-xs text-slate-500 mb-2">Technical Rejections:</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {[
+                  ['RSI below minimum', state.scanCounts.technical_rejections.rsi_below_min],
+                  ['RSI above maximum', state.scanCounts.technical_rejections.rsi_above_max],
+                  ['MA20 <= MA50', state.scanCounts.technical_rejections.ma20_not_above_ma50],
+                  ['MA50 <= MA200', state.scanCounts.technical_rejections.ma50_not_above_ma200],
+                  ['Price <= MA200', state.scanCounts.technical_rejections.price_not_above_ma200],
+                  ['Downtrend without support', state.scanCounts.technical_rejections.downtrend_no_support],
+                  ['Support distance below min', state.scanCounts.technical_rejections.support_dist_below_min],
+                  ['Support distance above max', state.scanCounts.technical_rejections.support_dist_above_max],
+                  ['Technical data missing', state.scanCounts.technical_rejections.technical_data_missing],
+                ].filter(([, count]) => count > 0).map(([label, count]) => (
+                  <div key={label as string} className="flex items-center gap-1.5 text-xs">
+                    <span className="text-slate-400">{label}</span>
+                    <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {state.scanCounts.order_strike_rejections && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <div className="text-xs text-slate-500 mb-2">Order & Strike Rejections:</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {[
+                  ['Stock price below minimum', state.scanCounts.order_strike_rejections.stock_below_min],
+                  ['Stock price above maximum', state.scanCounts.order_strike_rejections.stock_above_max],
+                  ['Strike above maximum', state.scanCounts.order_strike_rejections.strike_above_max],
+                ].filter(([, count]) => count > 0).map(([label, count]) => (
+                  <div key={label as string} className="flex items-center gap-1.5 text-xs">
+                    <span className="text-slate-400">{label}</span>
+                    <span className="font-semibold text-slate-200 tabular-nums">{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {state.scanCounts.closest_matches && state.scanCounts.closest_matches.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <div className="text-xs text-amber-400 mb-2 font-medium">20 Closest Matches (qualified tickers = 0):</div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-slate-500">
+                      <th className="px-2 py-1 text-left">Ticker</th>
+                      <th className="px-2 py-1 text-right">Price</th>
+                      <th className="px-2 py-1 text-right">Strike</th>
+                      <th className="px-2 py-1 text-right">RSI</th>
+                      <th className="px-2 py-1 text-right">MA20</th>
+                      <th className="px-2 py-1 text-right">MA50</th>
+                      <th className="px-2 py-1 text-right">MA200</th>
+                      <th className="px-2 py-1 text-right">Support</th>
+                      <th className="px-2 py-1 text-right">Sup Dist%</th>
+                      <th className="px-2 py-1 text-right">CROI</th>
+                      <th className="px-2 py-1 text-right">PC</th>
+                      <th className="px-2 py-1 text-right">OI</th>
+                      <th className="px-2 py-1 text-right">Vol</th>
+                      <th className="px-2 py-1 text-left">Failed Rules</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/40">
+                    {state.scanCounts.closest_matches.map((m, i) => (
+                      <tr key={i} className="text-slate-300">
+                        <td className="px-2 py-1 font-medium text-slate-100">{m.ticker}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.price != null ? formatNum(m.price) : '--'}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">${formatNum(m.strike)}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.rsi != null ? formatNum(m.rsi, 1) : '--'}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.ma20 != null ? formatNum(m.ma20) : '--'}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.ma50 != null ? formatNum(m.ma50) : '--'}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.ma200 != null ? formatNum(m.ma200) : '--'}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.primary_support != null ? formatNum(m.primary_support) : '--'}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.support_distance != null ? `${formatNum(m.support_distance, 1)}%` : '--'}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{formatNum(m.net_croi, 1)}%</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{formatNum(m.premium_capture, 1)}%</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.open_interest.toLocaleString()}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{m.volume}</td>
+                        <td className="px-2 py-1 text-left">
+                          <div className="flex flex-wrap gap-1">
+                            {m.failed_rules.map((r) => (
+                              <span key={r} className="inline-block rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-400">{r}</span>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}

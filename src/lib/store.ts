@@ -390,7 +390,7 @@ export function useAppState() {
         const rejected = results.filter((r) => !r.qualified);
         const uniqueQualifiedTickers = new Set(fullyQualified.map((r) => r.ticker.toUpperCase()));
         const uniquePendingTickers = new Set(pending.map((r) => r.ticker.toUpperCase()));
-        const bestByTicker = selectBestContractPerTicker(results);
+        const bestByTicker = selectBestContractPerTicker(results, activeProfile?.max_strikes_per_ticker ?? 1);
         const displayedQualified = bestByTicker.filter((c) => c.qualified && !c.technical_pending);
         console.log(`[SCAN PIPELINE] mode=${scanMode} raw=${raw} fullyQualified=${fullyQualified.length} pending=${pending.length} rejected=${rejected.length} qualifiedTickers=${uniqueQualifiedTickers.size} pendingTickers=${uniquePendingTickers.size} bestByTicker=${bestByTicker.length} displayedQualified=${displayedQualified.length}`);
         if (fullyQualified.length === 0 && raw > 0) {

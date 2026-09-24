@@ -21,10 +21,45 @@ export interface ScanCounts {
   contracts_evaluated: number;
   qualified: number;
   rejected: number;
+  pending?: number;
   pages_fetched: number;
   contracts_found: number;
   rejection_breakdown?: Record<string, number>;
   unique_qualified_tickers?: number;
+  technical_rejections?: {
+    rsi_below_min: number;
+    rsi_above_max: number;
+    ma20_not_above_ma50: number;
+    ma50_not_above_ma200: number;
+    price_not_above_ma200: number;
+    downtrend_no_support: number;
+    support_dist_below_min: number;
+    support_dist_above_max: number;
+    technical_data_missing: number;
+  };
+  order_strike_rejections?: {
+    stock_below_min: number;
+    stock_above_max: number;
+    strike_above_max: number;
+  };
+  closest_matches?: ClosestMatch[];
+}
+
+export interface ClosestMatch {
+  ticker: string;
+  price: number | null;
+  strike: number;
+  rsi: number | null;
+  ma20: number | null;
+  ma50: number | null;
+  ma200: number | null;
+  primary_support: number | null;
+  support_distance: number | null;
+  net_croi: number;
+  premium_capture: number;
+  open_interest: number;
+  volume: number;
+  failed_rules: string[];
 }
 
 export interface LiveScanResponse {
@@ -306,6 +341,7 @@ function normalizeCandidateScan(c: any): CandidateScan {
     qualified: !!c?.qualified,
     technical_pending: c?.technical_pending,
     rejection_reasons: Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [],
+    pending_reasons: Array.isArray(c?.pending_reasons) ? c.pending_reasons : [],
     pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
     strategy_profile_id: c?.strategy_profile_id,
     strike_distance_from_stock: num(c?.strike_distance_from_stock),
