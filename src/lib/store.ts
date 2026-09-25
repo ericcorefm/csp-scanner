@@ -387,7 +387,7 @@ export function useAppState() {
       {
         const raw = results.length;
         const fullyQualified = results.filter((r) => r.qualified && !r.technical_pending);
-        const pending = results.filter((r) => r.qualified && r.technical_pending);
+        const pending = results.filter((r) => r.technical_pending);
         const rejected = results.filter((r) => !r.qualified);
         const uniqueQualifiedTickers = new Set(fullyQualified.map((r) => r.ticker.toUpperCase()));
         const uniquePendingTickers = new Set(pending.map((r) => r.ticker.toUpperCase()));

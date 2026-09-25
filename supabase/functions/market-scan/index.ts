@@ -1001,7 +1001,7 @@ async function scanSymbol(
   const _ma200Active = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && (profile.require_ma50_above_ma200 === true || profile.require_price_above_ma200 === true);
   const _downtrendActive = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && profile.exclude_downtrend_no_support === true;
   const _supportDistActive = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') && (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
-  let _minFetchBars = 60; // default: enough for support/trend
+  let _minFetchBars = 0; // calculated strictly from enabled rules below
   if (_rsiActive) _minFetchBars = Math.max(_minFetchBars, 20);
   if (_ma20Active) _minFetchBars = Math.max(_minFetchBars, 50);
   if (_downtrendActive || _supportDistActive) _minFetchBars = Math.max(_minFetchBars, 60);
@@ -1525,10 +1525,8 @@ async function scanSymbol(
             supportDistancePct: null, passesMin: false, passesMax: false,
             finalSupportDistancePass: false, status: 'pending_missing_support',
           });
-          if (supportDataAvailable) {
-            if (!pendingReasons.includes('Primary support unavailable')) {
-              pendingReasons.push('Primary support unavailable');
-            }
+          if (!pendingReasons.includes('Primary support unavailable')) {
+            pendingReasons.push('Primary support unavailable');
           }
           console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=null | supportDistPct=null | status=Pending — Support unavailable`);
         }
@@ -1612,12 +1610,7 @@ async function scanSymbol(
         if (profile.max_strike != null) {
           passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
         }
-        if (primarySupport !== null && primarySupport > 0) {
-          const belowSupport = strike < primarySupport;
-          passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: belowSupport, status: belowSupport ? 'pass' : 'fail' });
-        } else {
-          passFail.push({ rule: 'Support rule not evaluated — historical data unavailable', pass: true, status: 'not_evaluated' });
-        }
+
       }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi, status: oi >= profile.min_target_oi ? 'pass' : 'fail' });
