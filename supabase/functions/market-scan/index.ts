@@ -348,6 +348,88 @@ async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<vo
   }
 }
 
+// ── Bulk history fetcher using the grouped daily endpoint ──
+// Fetches OHLCV bars for ALL tickers across N trading days in a single
+// API call per day. Much more efficient than per-ticker aggregate calls
+// and works with the Stocks Basic API tier that already provides prices.
+// Returns a map of ticker -> HistoryBar[] for the requested tickers.
+async function fetchGroupedHistoryBars(
+  apiKey: string,
+  today: Date,
+  fmt: (d: Date) => string,
+  targetTickers: Set<string>,
+  minBarsNeeded: number,
+): Promise<{ barsByTicker: Map<string, HistoryBar[]>; daysFetched: number; httpStatus: number | null }> {
+  const barsByTicker = new Map<string, HistoryBar[]>();
+  let daysFetched = 0;
+  let lastHttpStatus: number | null = null;
+
+  // Walk backwards through business days, collecting grouped daily data
+  // until we have enough bars or hit the API call limit.
+  const MAX_GROUPED_CALLS = 5; // Respect the 5 calls/minute Stocks Basic limit
+  const cursor = new Date(today);
+  cursor.setDate(cursor.getDate() - 1); // Start from yesterday
+  let callsMade = 0;
+
+  while (daysFetched < minBarsNeeded && callsMade < MAX_GROUPED_CALLS) {
+    // Skip weekends
+    if (cursor.getDay() === 0 || cursor.getDay() === 6) {
+      cursor.setDate(cursor.getDate() - 1);
+      continue;
+    }
+
+    const dateStr = fmt(cursor);
+    const path = `/v2/aggs/grouped/locale/us/market/stocks/${dateStr}`;
+    const result = await massiveFetch(path, apiKey, 'GROUPED_HIST', `grouped_history_${dateStr}`);
+    callsMade++;
+    lastHttpStatus = result.ok ? 200 : result.status;
+
+    if (!result.ok) {
+      console.log(`[GroupedHist] ${dateStr} failed: HTTP ${result.status}`);
+      if (result.status === 401 || result.status === 403 || result.status === 429) break;
+      cursor.setDate(cursor.getDate() - 1);
+      continue;
+    }
+
+    const results = result.data?.results || [];
+    let barsAdded = 0;
+    for (const r of results) {
+      const ticker = String(r.T || r.ticker || '').toUpperCase();
+      if (!targetTickers.has(ticker)) continue;
+      const close = Number(r.c || r.close || 0);
+      if (!Number.isFinite(close) || close <= 0) continue;
+
+      const bar: HistoryBar = {
+        date: dateStr,
+        open: Number(r.o || r.open || 0),
+        high: Number(r.h || r.high || 0),
+        low: Number(r.l || r.low || 0),
+        close,
+        volume: Number(r.v || r.volume || 0),
+      };
+
+      if (!barsByTicker.has(ticker)) barsByTicker.set(ticker, []);
+      barsByTicker.get(ticker)!.push(bar);
+      barsAdded++;
+    }
+
+    daysFetched++;
+    console.log(`[GroupedHist] ${dateStr} | ${barsAdded} bars for ${targetTickers.size} target tickers (day ${daysFetched}/${minBarsNeeded})`);
+    cursor.setDate(cursor.getDate() - 1);
+  }
+
+  // Sort bars by date for each ticker and save to cache
+  for (const [ticker, bars] of barsByTicker) {
+    bars.sort((a, b) => a.date.localeCompare(b.date));
+    if (bars.length > 0) {
+      await saveCachedHistory(ticker, bars);
+    }
+  }
+
+  console.log(`[GroupedHist] Fetched ${daysFetched} days of history for ${barsByTicker.size}/${targetTickers.size} tickers (calls: ${callsMade})`);
+  return { barsByTicker, daysFetched, httpStatus: lastHttpStatus };
+}
+
 // ── Weekly / Monthly aggregation from daily bars ──
 function aggregateWeeks(daily: HistoryBar[]): HistoryBar[] {
   if (daily.length === 0) return [];
@@ -2171,12 +2253,20 @@ serve(async (req) => {
       (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
     const historyNeeded = technicalRulesNeedHistory || supportDistanceNeedsHistory;
     const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 === true || profile.require_price_above_ma200 === true);
+
     // Compute minimum bars needed for the currently active rules.
-    let minBarsForActiveRules = 15; // RSI default
+    // Each rule contributes its own requirement; RSI needs 15, MA20>MA50 needs 50,
+    // downtrend/support need 60, MA200 rules need 200. If a rule's toggle is OFF,
+    // it contributes zero — we do NOT inflate the requirement just because
+    // Technical Rules master toggle is ON.
+    let minBarsForActiveRules = 0;
+    const needsRSI = technicalRulesNeedHistory && (profile.rsi_min != null || profile.rsi_max != null);
+    if (needsRSI) minBarsForActiveRules = Math.max(minBarsForActiveRules, 15);
     if (profile.require_ma20_above_ma50 === true) minBarsForActiveRules = Math.max(minBarsForActiveRules, 50);
     if (profile.exclude_downtrend_no_support === true) minBarsForActiveRules = Math.max(minBarsForActiveRules, 60);
     if (supportDistanceNeedsHistory) minBarsForActiveRules = Math.max(minBarsForActiveRules, 60);
     if (needsMA200) minBarsForActiveRules = Math.max(minBarsForActiveRules, 200);
+
     if (historyNeeded && scanMode !== 'analyze') {
       // Find tickers with pending technical data — candidates that have
       // technical_pending=true and no hard rejections (only pending reasons).
@@ -2231,53 +2321,118 @@ serve(async (req) => {
 
       console.log(`[CacheWarm] ${needsFetch.length} tickers need history, fetching top ${toFetch.length}, ${skippedPending} will remain pending`);
 
-      // Fetch history sequentially (respect Massive rate limits)
-      for (const info of toFetch) {
-        const upper = info.ticker.toUpperCase();
-        const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
+      // ── BULK GROUPED HISTORY FETCH ──
+      // For sub-200-bar requirements (RSI, MA20>MA50, support distance, downtrend),
+      // use the grouped daily endpoint to fetch history for ALL pending tickers
+      // in bulk. This uses the same API endpoint that already works for stock
+      // prices, avoiding the per-ticker aggregates endpoint which may return 403.
+      // Only use per-ticker aggregates for MA200 (needs 200+ days, too many
+      // grouped daily calls to be practical).
+      const useBulkGrouped = !needsMA200 && minBarsForActiveRules > 0 && toFetch.length > 0;
 
-        // Invalidate in-memory cache so getStockSnapshot actually fetches
-        stockCache.delete(upper);
+      if (useBulkGrouped) {
+        const targetTickers = new Set(toFetch.map((t) => t.ticker.toUpperCase()));
+        const { barsByTicker, daysFetched, httpStatus } = await fetchGroupedHistoryBars(apiKey, today, fmt, targetTickers, minBarsForActiveRules);
 
-        // Fetch history with allowLiveHistory = true
-        const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null, true);
-        const fetchStatus = snapshot.historyHttpStatus === 200 ? 'ok' : `HTTP_${snapshot.historyHttpStatus ?? 'none'}`;
-        const finalBars = snapshot.historicalBars.length;
+        if (httpStatus === 403) historyFetch403++;
+        if (httpStatus === 429) historyFetch429++;
 
-        if (snapshot.historyHttpStatus === 403) historyFetch403++;
-        if (snapshot.historyHttpStatus === 429) historyFetch429++;
+        // Re-scan each ticker that got enough bars
+        for (const info of toFetch) {
+          const upper = info.ticker.toUpperCase();
+          const finalBars = barsByTicker.get(upper)?.length ?? 0;
+          const fetchStatus = finalBars >= minBarsForActiveRules ? 'grouped_ok' : `grouped_partial_${finalBars}`;
 
-        warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
+          warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars: minBarsForActiveRules, fetchAttempted: true, fetchStatus, finalBars });
 
-        if (finalBars >= minBarsForActiveRules) {
-          historyFetchedThisScan++;
-          console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars, re-scanning`);
+          if (finalBars >= minBarsForActiveRules) {
+            historyFetchedThisScan++;
+            // Invalidate in-memory cache so scanSymbol reloads from Supabase
+            stockCache.delete(upper);
 
-          // Re-scan this ticker with the now-cached history.
-          // The in-memory stockCache was populated by the getStockSnapshot call
-          // above, so scanSymbol will find the bars without another Massive call.
-          // Pass allowLiveHistory=false to avoid any further API calls.
-          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-          const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
+            const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
+            const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
 
-          if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
-            // Remove old candidates for this ticker and add the new ones
-            for (let ci = candidates.length - 1; ci >= 0; ci--) {
-              if (candidates[ci].ticker === upper) candidates.splice(ci, 1);
+            if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
+              // Remove old candidates for this ticker, adjusting totals
+              let oldPending = 0, oldQualified = 0, oldRejected = 0, oldEvaluated = 0;
+              for (let ci = candidates.length - 1; ci >= 0; ci--) {
+                if (candidates[ci].ticker === upper) {
+                  if (candidates[ci].technical_pending) oldPending++;
+                  else if (candidates[ci].qualified) oldQualified++;
+                  else oldRejected++;
+                  oldEvaluated++;
+                  candidates.splice(ci, 1);
+                }
+              }
+              candidates.push(...rerunResult.candidates);
+
+              // Update totals: subtract old, add new
+              totalQualified += rerunResult.qualified - oldQualified;
+              totalRejected += rerunResult.rejected - oldRejected;
+              totalPending += rerunResult.pending - oldPending;
+              totalEvaluated += rerunResult.evaluated - oldEvaluated;
+              if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
+              else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
             }
-            candidates.push(...rerunResult.candidates);
-
-            // Update totals
-            totalQualified += rerunResult.qualified;
-            totalRejected += rerunResult.rejected;
-            totalPending += rerunResult.pending;
-            totalEvaluated += rerunResult.evaluated;
-            if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
-            else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
+            console.log(`[CacheWarm] ${upper} | grouped history ${finalBars} bars, re-scan: ${rerunResult.qualified} qualified, ${rerunResult.pending} pending, ${rerunResult.rejected} rejected`);
+          } else {
+            console.log(`[CacheWarm] ${upper} | grouped history only ${finalBars} bars — still pending`);
+            stillPendingHistory++;
           }
-        } else {
-          console.log(`[CacheWarm] ${upper} | fetch returned only ${finalBars} bars — still pending`);
-          stillPendingHistory++;
+        }
+      } else {
+        // Per-ticker aggregate fetch (MA200 or fallback)
+        for (const info of toFetch) {
+          const upper = info.ticker.toUpperCase();
+          const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
+
+          // Invalidate in-memory cache so getStockSnapshot actually fetches
+          stockCache.delete(upper);
+
+          // Fetch history with allowLiveHistory = true
+          const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null, true);
+          const fetchStatus = snapshot.historyHttpStatus === 200 ? 'ok' : `HTTP_${snapshot.historyHttpStatus ?? 'none'}`;
+          const finalBars = snapshot.historicalBars.length;
+
+          if (snapshot.historyHttpStatus === 403) historyFetch403++;
+          if (snapshot.historyHttpStatus === 429) historyFetch429++;
+
+          warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
+
+          if (finalBars >= minBarsForActiveRules) {
+            historyFetchedThisScan++;
+            console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars, re-scanning`);
+
+            const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
+            const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
+
+            if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
+              // Remove old candidates for this ticker, adjusting totals
+              let oldPending = 0, oldQualified = 0, oldRejected = 0, oldEvaluated = 0;
+              for (let ci = candidates.length - 1; ci >= 0; ci--) {
+                if (candidates[ci].ticker === upper) {
+                  if (candidates[ci].technical_pending) oldPending++;
+                  else if (candidates[ci].qualified) oldQualified++;
+                  else oldRejected++;
+                  oldEvaluated++;
+                  candidates.splice(ci, 1);
+                }
+              }
+              candidates.push(...rerunResult.candidates);
+
+              // Update totals: subtract old, add new
+              totalQualified += rerunResult.qualified - oldQualified;
+              totalRejected += rerunResult.rejected - oldRejected;
+              totalPending += rerunResult.pending - oldPending;
+              totalEvaluated += rerunResult.evaluated - oldEvaluated;
+              if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
+              else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
+            }
+          } else {
+            console.log(`[CacheWarm] ${upper} | fetch returned only ${finalBars} bars — still pending`);
+            stillPendingHistory++;
+          }
         }
       }
 
