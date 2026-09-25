@@ -1122,6 +1122,16 @@ async function scanSymbol(
     };
   }
 
+  // RSI-specific audit logging for requested tickers
+  {
+    const RSI_AUDIT_TICKERS = new Set(['XPEV', 'CLSK', 'SOFI', 'RUN', 'RIVN', 'RIOT', 'WULF', 'CIFR', 'PINS', 'RGTI', 'APLD']);
+    if (RSI_AUDIT_TICKERS.has(symbol.toUpperCase())) {
+      const rsiVal = r.technical?.rsi ?? null;
+      const barCount = bars.length;
+      console.log(`[RSI AUDIT] ${symbol} | bars=${barCount} | rsi=${rsiVal} | technical=${r.technical ? 'computed' : 'null'} | rsiActive=${rsiActive} | hasActiveTechnicalRule=${hasActiveTechnicalRule}`);
+    }
+  }
+
   // Step 2: Options chain — build URL with server-side filters to reduce pages
   const chainParams = new URLSearchParams();
   chainParams.set('contract_type', 'put');
@@ -2385,6 +2395,25 @@ serve(async (req) => {
       support_distance_debug: supportDistanceDebugTotals,
     };
 
+    // ── FULL REJECTION AUDIT: count every rejection reason across all candidates ──
+    {
+      const reasonCounts: Record<string, number> = {};
+      let totalQualified = 0, totalPending = 0, totalRejected = 0;
+      for (const c of candidates) {
+        if (c.qualified && !c.technical_pending) { totalQualified++; continue; }
+        if (c.technical_pending) { totalPending++; }
+        else { totalRejected++; }
+        for (const reason of (c.rejection_reasons || [])) {
+          reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+        }
+        for (const reason of (c.pending_reasons || [])) {
+          reasonCounts[`PENDING: ${reason}`] = (reasonCounts[`PENDING: ${reason}`] || 0) + 1;
+        }
+      }
+      console.log(`[REJECTION AUDIT] Qualified=${totalQualified} Pending=${totalPending} Rejected=${totalRejected}`);
+      console.log(`[REJECTION AUDIT] Reasons: ${JSON.stringify(reasonCounts)}`);
+    }
+
     // ── DIAGNOSTIC: classify why contracts are pending or fail RSI/support ──
     {
       let potentialBeforeTech = 0;
@@ -2406,11 +2435,10 @@ serve(async (req) => {
         if (c.technical_pending || pending.length > 0) {
           const hasRSIPending = pending.includes('RSI unavailable') || pending.includes('Missing technical data') || pending.includes('Technical data missing');
           const hasSupportPending = pending.includes('Primary support unavailable') || pending.includes('Support distance not evaluated — support unavailable') || pending.includes('Missing support data');
-          const hasOtherPending = pending.some((p: string) => !hasRSIPending && !hasSupportPending && p !== 'RSI unavailable' && p !== 'Primary support unavailable' && p !== 'Missing technical data' && p !== 'Technical data missing' && p !== 'Support distance not evaluated — support unavailable' && p !== 'Missing support data');
           if (hasRSIPending && hasSupportPending) pendingBoth++;
           else if (hasRSIPending) pendingRSIOnly++;
           else if (hasSupportPending) pendingSupportOnly++;
-          else if (hasOtherPending || pending.length > 0) pendingOther++;
+          else if (pending.length > 0) pendingOther++;
         }
       }
       console.log(`[DIAGNOSTIC] Potential before tech: ${potentialBeforeTech} | Failed RSI: ${failedRSI} | Failed Support: ${failedSupport} | Pending RSI only: ${pendingRSIOnly} | Pending support only: ${pendingSupportOnly} | Pending both: ${pendingBoth} | Pending other: ${pendingOther} | Qualified: ${finalQualified}`);
@@ -2419,8 +2447,25 @@ serve(async (req) => {
       for (const c of candidates) {
         if (c.qualified && !c.technical_pending) {
           const supportDist = c.strike_distance_from_support != null ? Number(c.strike_distance_from_support.toFixed(1)) : null;
-          console.log(`[QUALIFIED] ${c.ticker} | strike=${c.strike} | exp=${c.expiration} | RSI=${c.pass_fail?.find(p => p.rule.startsWith('RSI'))?.pass ? 'pass' : 'n/a'} | primarySupport=${c.primary_support} | supportDist=${supportDist}% | netCROI=${c.net_croi} | PC=${c.premium_capture} | OI=${c.open_interest} | vol=${c.volume} | reasons=${JSON.stringify(c.rejection_reasons)} | pending=${JSON.stringify(c.pending_reasons)}`);
+          const rsiPass = c.pass_fail?.find((p: any) => p.rule.startsWith('RSI'));
+          console.log(`[QUALIFIED] ${c.ticker} | strike=${c.strike} | exp=${c.expiration} | RSI=${rsiPass?.rule || 'n/a'} | primarySupport=${c.primary_support} | supportDist=${supportDist}% | netCROI=${c.net_croi} | PC=${c.premium_capture} | OI=${c.open_interest} | vol=${c.volume} | reasons=${JSON.stringify(c.rejection_reasons)} | pending=${JSON.stringify(c.pending_reasons)}`);
         }
+      }
+    }
+
+    // ── RSI AUDIT: log RSI values for specific tickers of interest ──
+    {
+      const rsiTickers = new Set(['XPEV', 'CLSK', 'SOFI', 'RUN', 'RIVN', 'RIOT', 'WULF', 'CIFR', 'PINS', 'RGTI', 'APLD']);
+      const seen = new Set<string>();
+      for (const c of candidates) {
+        const upper = (c.ticker || '').toUpperCase();
+        if (!rsiTickers.has(upper) || seen.has(upper)) continue;
+        seen.add(upper);
+        const rsiPass = c.pass_fail?.find((p: any) => p.rule.startsWith('RSI'));
+        const rsiVal = rsiPass?.rule.match(/\((\d+\.\d+)\)/)?.[1] ?? null;
+        const status = c.qualified ? 'Qualified' : c.technical_pending ? 'Pending' : 'Rejected';
+        const allReasons = [...(c.rejection_reasons || []), ...(c.pending_reasons || [])];
+        console.log(`[RSI AUDIT] ${upper} | RSI=${rsiVal} | status=${status} | bars=${c.pass_fail?.find((p: any) => p.rule.includes('history'))?.rule || 'unknown'} | reasons=${JSON.stringify(allReasons)}`);
       }
     }
 
