@@ -2768,7 +2768,7 @@ serve(async (req) => {
     // technical history was unavailable. Fetch history for the best ones,
     // save to cache, and re-scan them so they get real technical evaluations.
     // This progressively warms the cache without hammering the Massive API.
-    const MAX_HISTORY_FETCHES_PER_SCAN = 4;
+    const MAX_HISTORY_FETCHES_PER_SCAN = 15;
     let historyFetchedThisScan = 0;
     let historyFetch403 = 0;
     let historyFetch429 = 0;
@@ -2988,6 +2988,29 @@ serve(async (req) => {
       closest_matches: closestMatches,
       support_distance_debug: supportDistanceDebugTotals,
     };
+
+    // ── DIAGNOSTIC: classify why contracts fail RSI/support distance ──
+    {
+      let potentialBeforeTech = 0;
+      let failedRSI = 0, failedSupport = 0;
+      let pendingMissingRSI = 0, pendingMissingSupport = 0;
+      let finalQualified = 0;
+      const techReasons = new Set(['RSI below minimum', 'RSI above maximum', 'Support distance too low', 'Support distance too high']);
+      for (const c of candidates) {
+        const nonTechReasons = (c.rejection_reasons || []).filter((r: string) => !techReasons.has(r));
+        const passedNonTech = nonTechReasons.length === 0;
+        if (!passedNonTech) continue;
+        potentialBeforeTech++;
+        const reasons = c.rejection_reasons || [];
+        const pending = c.pending_reasons || [];
+        if (c.qualified && !c.technical_pending) { finalQualified++; continue; }
+        if (reasons.includes('RSI below minimum') || reasons.includes('RSI above maximum')) failedRSI++;
+        if (reasons.includes('Support distance too low') || reasons.includes('Support distance too high')) failedSupport++;
+        if (pending.includes('Missing technical data') || pending.includes('Technical data missing')) pendingMissingRSI++;
+        if (pending.includes('Support distance not evaluated — support unavailable') || pending.includes('Missing support data')) pendingMissingSupport++;
+      }
+      console.log(`[DIAGNOSTIC] Potential candidates before RSI/support: ${potentialBeforeTech} | Failed RSI: ${failedRSI} | Failed Support Distance: ${failedSupport} | Pending missing RSI: ${pendingMissingRSI} | Pending missing support: ${pendingMissingSupport} | Final Qualified: ${finalQualified}`);
+    }
 
     console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));
 
