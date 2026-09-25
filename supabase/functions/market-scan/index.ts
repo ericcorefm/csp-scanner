@@ -2151,15 +2151,21 @@ serve(async (req) => {
 
     // ── STAGE 2: Technical cache warming ──
     // After the main scan, identify tickers that are Pending only because
-    // technical history was unavailable. Fetch history for the best ones,
-    // save to cache, and re-scan them so they get real technical evaluations.
-    // This progressively warms the cache without hammering the Massive API.
-    const MAX_HISTORY_FETCHES_PER_SCAN = 15;
+    // technical history was unavailable. Fetch history for ALL of them,
+    // save to cache, and re-scan so they get real technical evaluations.
+    // Processes in small batches with delays to respect Massive API limits.
+    const HISTORY_BATCH_SIZE = 5;
+    const HISTORY_BATCH_DELAY_MS = 150;
     let historyFetchedThisScan = 0;
     let historyFetch403 = 0;
     let historyFetch429 = 0;
     let cacheSaveFailures = 0;
     let stillPendingHistory = 0;
+    let cacheHits = 0;
+    let historyFetchesRequired = 0;
+    let historyFetchesSuccessful = 0;
+    let rsiCalculated = 0;
+    let stillUnavailable = 0;
     const warmDiagnostics: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[] = [];
 
     const hasActiveTechnicalRuleForWarming =
@@ -2227,8 +2233,31 @@ serve(async (req) => {
         if (cachedBars.length < requiredBars) {
           needsFetch.push(info);
         } else {
-          // Already has enough cache — shouldn't be pending, but log anyway
+          // Already has enough cache — shouldn't be pending, re-scan to fix
+          cacheHits++;
           warmDiagnostics.push({ ticker: upper, cachedBars: cachedBars.length, requiredBars, fetchAttempted: false, fetchStatus: 'cache_sufficient', finalBars: cachedBars.length });
+          // Re-scan with cached data to clear stale pending state
+          stockCache.delete(upper);
+          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
+          const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
+          if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
+            let oldPending = 0, oldQualified = 0, oldRejected = 0, oldEvaluated = 0;
+            for (let ci = candidates.length - 1; ci >= 0; ci--) {
+              if (candidates[ci].ticker === upper) {
+                if (candidates[ci].technical_pending) oldPending++;
+                else if (candidates[ci].qualified) oldQualified++;
+                else oldRejected++;
+                oldEvaluated++;
+                candidates.splice(ci, 1);
+              }
+            }
+            candidates.push(...rerunResult.candidates);
+            totalQualified += rerunResult.qualified - oldQualified;
+            totalRejected += rerunResult.rejected - oldRejected;
+            totalPending += rerunResult.pending - oldPending;
+            totalEvaluated += rerunResult.evaluated - oldEvaluated;
+            if (rerunResult.technical?.rsi != null) rsiCalculated++;
+          }
         }
       }
 
@@ -2241,68 +2270,87 @@ serve(async (req) => {
         return b.bestVolume - a.bestVolume;
       });
 
-      const toFetch = needsFetch.slice(0, MAX_HISTORY_FETCHES_PER_SCAN);
-      const skippedPending = needsFetch.length - toFetch.length;
-      stillPendingHistory = skippedPending;
+      historyFetchesRequired = needsFetch.length;
+      console.log(`[CacheWarm] ${needsFetch.length} tickers need history fetch (cache hits: ${cacheHits}), processing ALL in batches of ${HISTORY_BATCH_SIZE}`);
 
-      console.log(`[CacheWarm] ${needsFetch.length} tickers need history, fetching top ${toFetch.length}, ${skippedPending} will remain pending`);
+      // ── PER-TICKER AGGREGATE HISTORY FETCH (batched, no arbitrary cap) ──
+      // Fetch history for every pending ticker using the per-ticker aggregates
+      // endpoint. Process in small batches with delays to respect rate limits.
+      for (let batchStart = 0; batchStart < needsFetch.length; batchStart += HISTORY_BATCH_SIZE) {
+        const batch = needsFetch.slice(batchStart, batchStart + HISTORY_BATCH_SIZE);
 
-      // ── PER-TICKER AGGREGATE HISTORY FETCH ──
-      // Fetch history for each pending ticker using the per-ticker aggregates
-      // endpoint. One call per ticker returns 250+ days of OHLCV, enough for
-      // RSI (15 bars), MA20>MA50 (50), support distance (60), or MA200 (200).
-      // This is the SAME endpoint used by Analyze Ticker mode.
-      for (const info of toFetch) {
-        const upper = info.ticker.toUpperCase();
-        const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
+        // Process batch sequentially to avoid concurrent API bursts
+        for (const info of batch) {
+          const upper = info.ticker.toUpperCase();
+          const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
 
-        // Invalidate in-memory cache so getStockSnapshot actually fetches
-        stockCache.delete(upper);
+          // Invalidate in-memory cache so getStockSnapshot actually fetches
+          stockCache.delete(upper);
 
-        // Fetch history with allowLiveHistory = true
-        const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null, true, requiredBars);
-        const fetchStatus = snapshot.historyHttpStatus === 200 ? 'ok' : `HTTP_${snapshot.historyHttpStatus ?? 'none'}`;
-        const finalBars = snapshot.historicalBars.length;
+          // Fetch history with allowLiveHistory = true
+          const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null, true, requiredBars);
+          const fetchStatus = snapshot.historyHttpStatus === 200 ? 'ok' : `HTTP_${snapshot.historyHttpStatus ?? 'none'}`;
+          const finalBars = snapshot.historicalBars.length;
 
-        if (snapshot.historyHttpStatus === 403) historyFetch403++;
-        if (snapshot.historyHttpStatus === 429) historyFetch429++;
+          if (snapshot.historyHttpStatus === 403) historyFetch403++;
+          if (snapshot.historyHttpStatus === 429) historyFetch429++;
 
-        warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
+          warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
 
-        if (finalBars >= minBarsForActiveRules) {
-          historyFetchedThisScan++;
-          console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars (needed ${requiredBars}), re-scanning`);
+          if (finalBars >= minBarsForActiveRules) {
+            historyFetchesSuccessful++;
+            historyFetchedThisScan++;
+            console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars (needed ${requiredBars}), re-scanning`);
 
-          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-          const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
+            const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
+            const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
 
-          if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
-            // Remove old candidates for this ticker, adjusting totals
-            let oldPending = 0, oldQualified = 0, oldRejected = 0, oldEvaluated = 0;
-            for (let ci = candidates.length - 1; ci >= 0; ci--) {
-              if (candidates[ci].ticker === upper) {
-                if (candidates[ci].technical_pending) oldPending++;
-                else if (candidates[ci].qualified) oldQualified++;
-                else oldRejected++;
-                oldEvaluated++;
-                candidates.splice(ci, 1);
+            if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
+              // Remove old candidates for this ticker, adjusting totals
+              let oldPending = 0, oldQualified = 0, oldRejected = 0, oldEvaluated = 0;
+              for (let ci = candidates.length - 1; ci >= 0; ci--) {
+                if (candidates[ci].ticker === upper) {
+                  if (candidates[ci].technical_pending) oldPending++;
+                  else if (candidates[ci].qualified) oldQualified++;
+                  else oldRejected++;
+                  oldEvaluated++;
+                  candidates.splice(ci, 1);
+                }
               }
-            }
-            candidates.push(...rerunResult.candidates);
+              candidates.push(...rerunResult.candidates);
 
-            // Update totals: subtract old, add new
-            totalQualified += rerunResult.qualified - oldQualified;
-            totalRejected += rerunResult.rejected - oldRejected;
-            totalPending += rerunResult.pending - oldPending;
-            totalEvaluated += rerunResult.evaluated - oldEvaluated;
-            if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
-            else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
+              // Update totals: subtract old, add new
+              totalQualified += rerunResult.qualified - oldQualified;
+              totalRejected += rerunResult.rejected - oldRejected;
+              totalPending += rerunResult.pending - oldPending;
+              totalEvaluated += rerunResult.evaluated - oldEvaluated;
+              if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
+              else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
+              if (rerunResult.technical?.rsi != null) rsiCalculated++;
+            }
+          } else {
+            console.log(`[CacheWarm] ${upper} | fetch returned only ${finalBars} bars (needed ${requiredBars}) — still pending`);
+            stillPendingHistory++;
+            stillUnavailable++;
           }
-        } else {
-          console.log(`[CacheWarm] ${upper} | fetch returned only ${finalBars} bars (needed ${requiredBars}) — still pending`);
-          stillPendingHistory++;
+        }
+
+        // Delay between batches to respect rate limits (skip after last batch)
+        if (batchStart + HISTORY_BATCH_SIZE < needsFetch.length) {
+          // If we got 429s, wait longer
+          const delay = historyFetch429 > 0 ? 500 : HISTORY_BATCH_DELAY_MS;
+          await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
+
+      // Final summary log
+      const finalQualifiedTickers = new Set<string>();
+      const finalPendingTickers = new Set<string>();
+      for (const c of candidates) {
+        if (c.qualified) finalQualifiedTickers.add(c.ticker);
+        if (c.technical_pending) finalPendingTickers.add(c.ticker);
+      }
+      console.log(`[CacheWarm Summary] Unique tickers needing RSI history: ${needsFetch.length} | Cache hits: ${cacheHits} | History fetches required: ${historyFetchesRequired} | History fetches successful: ${historyFetchesSuccessful} | RSI calculated: ${rsiCalculated} | Still unavailable: ${stillUnavailable} | Final qualified tickers: ${finalQualifiedTickers.size} | Final pending tickers: ${finalPendingTickers.size}`);
 
       if (warmDiagnostics.length > 0) {
         console.log(`[CacheWarm] Diagnostics: ${JSON.stringify(warmDiagnostics)}`);
