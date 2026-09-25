@@ -1417,8 +1417,8 @@ async function scanSymbol(
               r.techRejections!.rsi_above_max++;
             }
           } else {
-            if (!pendingReasons.includes('Missing technical data')) {
-              pendingReasons.push('Missing technical data');
+            if (!pendingReasons.includes('RSI unavailable')) {
+              pendingReasons.push('RSI unavailable');
               r.techRejections!.technical_data_missing++;
             }
           }
@@ -1516,8 +1516,8 @@ async function scanSymbol(
             finalSupportDistancePass: false, status: 'pending_missing_support',
           });
           if (supportDataAvailable) {
-            if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
-              pendingReasons.push('Support distance not evaluated — support unavailable');
+            if (!pendingReasons.includes('Primary support unavailable')) {
+              pendingReasons.push('Primary support unavailable');
             }
           }
           console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=null | supportDistPct=null | status=Pending — Support unavailable`);
@@ -2385,11 +2385,11 @@ serve(async (req) => {
       support_distance_debug: supportDistanceDebugTotals,
     };
 
-    // ── DIAGNOSTIC: classify why contracts fail RSI/support distance ──
+    // ── DIAGNOSTIC: classify why contracts are pending or fail RSI/support ──
     {
       let potentialBeforeTech = 0;
       let failedRSI = 0, failedSupport = 0;
-      let pendingMissingRSI = 0, pendingMissingSupport = 0;
+      let pendingRSIOnly = 0, pendingSupportOnly = 0, pendingBoth = 0, pendingOther = 0;
       let finalQualified = 0;
       const techReasons = new Set(['RSI below minimum', 'RSI above maximum', 'Support distance too low', 'Support distance too high']);
       for (const c of candidates) {
@@ -2402,10 +2402,26 @@ serve(async (req) => {
         if (c.qualified && !c.technical_pending) { finalQualified++; continue; }
         if (reasons.includes('RSI below minimum') || reasons.includes('RSI above maximum')) failedRSI++;
         if (reasons.includes('Support distance too low') || reasons.includes('Support distance too high')) failedSupport++;
-        if (pending.includes('Missing technical data') || pending.includes('Technical data missing')) pendingMissingRSI++;
-        if (pending.includes('Support distance not evaluated — support unavailable') || pending.includes('Missing support data')) pendingMissingSupport++;
+        // Classify pending contracts by specific missing data
+        if (c.technical_pending || pending.length > 0) {
+          const hasRSIPending = pending.includes('RSI unavailable') || pending.includes('Missing technical data') || pending.includes('Technical data missing');
+          const hasSupportPending = pending.includes('Primary support unavailable') || pending.includes('Support distance not evaluated — support unavailable') || pending.includes('Missing support data');
+          const hasOtherPending = pending.some((p: string) => !hasRSIPending && !hasSupportPending && p !== 'RSI unavailable' && p !== 'Primary support unavailable' && p !== 'Missing technical data' && p !== 'Technical data missing' && p !== 'Support distance not evaluated — support unavailable' && p !== 'Missing support data');
+          if (hasRSIPending && hasSupportPending) pendingBoth++;
+          else if (hasRSIPending) pendingRSIOnly++;
+          else if (hasSupportPending) pendingSupportOnly++;
+          else if (hasOtherPending || pending.length > 0) pendingOther++;
+        }
       }
-      console.log(`[DIAGNOSTIC] Potential candidates before RSI/support: ${potentialBeforeTech} | Failed RSI: ${failedRSI} | Failed Support Distance: ${failedSupport} | Pending missing RSI: ${pendingMissingRSI} | Pending missing support: ${pendingMissingSupport} | Final Qualified: ${finalQualified}`);
+      console.log(`[DIAGNOSTIC] Potential before tech: ${potentialBeforeTech} | Failed RSI: ${failedRSI} | Failed Support: ${failedSupport} | Pending RSI only: ${pendingRSIOnly} | Pending support only: ${pendingSupportOnly} | Pending both: ${pendingBoth} | Pending other: ${pendingOther} | Qualified: ${finalQualified}`);
+
+      // Log each qualified contract's details for verification
+      for (const c of candidates) {
+        if (c.qualified && !c.technical_pending) {
+          const supportDist = c.strike_distance_from_support != null ? Number(c.strike_distance_from_support.toFixed(1)) : null;
+          console.log(`[QUALIFIED] ${c.ticker} | strike=${c.strike} | exp=${c.expiration} | RSI=${c.pass_fail?.find(p => p.rule.startsWith('RSI'))?.pass ? 'pass' : 'n/a'} | primarySupport=${c.primary_support} | supportDist=${supportDist}% | netCROI=${c.net_croi} | PC=${c.premium_capture} | OI=${c.open_interest} | vol=${c.volume} | reasons=${JSON.stringify(c.rejection_reasons)} | pending=${JSON.stringify(c.pending_reasons)}`);
+        }
+      }
     }
 
     console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));
