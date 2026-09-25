@@ -1051,23 +1051,39 @@ async function scanSymbol(
 
   const needsMA200 = hasActiveTechnicalRule && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
 
-  // Base technicals (RSI, MA20, MA50, MACD, BB, support/trend) need 60 bars.
-  // MA200-dependent rules need 200 bars. We track both separately.
-  const baseTechnicalDataAvailable = bars.length >= 60;
+  // Determine which rules are active and their minimum bar requirements.
+  // RSI needs 15 bars, MA20 needs 20, MA50 needs 50, MA200 needs 200,
+  // support/trend need 60. Only require what's actually enabled.
+  const rsiActive = hasActiveTechnicalRule && (profile.rsi_min != null || profile.rsi_max != null);
+  const ma20AboveMa50Active = hasActiveTechnicalRule && profile.require_ma20_above_ma50 === true;
+  const ma50AboveMa200Active = hasActiveTechnicalRule && profile.require_ma50_above_ma200 === true;
+  const priceAboveMa200Active = hasActiveTechnicalRule && profile.require_price_above_ma200 === true;
+  const downtrendRuleActive = hasActiveTechnicalRule && profile.exclude_downtrend_no_support === true;
+  const supportDistanceActiveForData = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') && (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
+
+  // Minimum bars needed to evaluate the ACTIVE rules only.
+  // If no history-dependent rule is active, 0 bars needed.
+  let minBarsRequired = 0;
+  if (rsiActive) minBarsRequired = Math.max(minBarsRequired, 15);
+  if (ma20AboveMa50Active) minBarsRequired = Math.max(minBarsRequired, 50);
+  if (ma50AboveMa200Active || priceAboveMa200Active) minBarsRequired = Math.max(minBarsRequired, 200);
+  if (downtrendRuleActive || supportDistanceActiveForData) minBarsRequired = Math.max(minBarsRequired, 60);
+
   const ma200DataAvailable = bars.length >= 200;
-  const technicalDataAvailable = hasActiveTechnicalRule ? (needsMA200 ? ma200DataAvailable : baseTechnicalDataAvailable) : baseTechnicalDataAvailable;
+  const technicalDataAvailable = bars.length >= minBarsRequired;
   r.technicalDataAvailable = technicalDataAvailable;
   r.historyBarCount = bars.length;
 
-  // If we have 60+ bars but not 200, we can still compute base technicals
-  // (RSI, MA20, MA50, support, trend) but MA200 will be 0 and MA200-dependent
-  // rules must be Pending, not Rejected.
-  const canComputeBaseTechnicals = baseTechnicalDataAvailable;
+  // canComputeBaseTechnicals now means: enough bars for the ACTIVE rules.
+  // E.g. RSI-only needs 15 bars, not 60.
+  const canComputeBaseTechnicals = bars.length >= minBarsRequired;
 
-  let primarySupport: number | null = canComputeBaseTechnicals && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
-  let secondarySupport: number | null = canComputeBaseTechnicals && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
-  let resistance: number | null = canComputeBaseTechnicals && stockPrice !== null && stockPrice > 0 ? findResistance(bars, stockPrice) : null;
-  let trendClass = canComputeBaseTechnicals ? trend(bars) : 'Pending';
+  // Support/trend require 60 bars regardless of RSI-only rules.
+  const supportDataAvailable = bars.length >= 60;
+  let primarySupport: number | null = supportDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
+  let secondarySupport: number | null = supportDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
+  let resistance: number | null = supportDataAvailable && stockPrice !== null && stockPrice > 0 ? findResistance(bars, stockPrice) : null;
+  let trendClass = supportDataAvailable ? trend(bars) : 'Pending';
 
   r.stockPrice = stockPrice;
   r.primarySupport = primarySupport;
@@ -1084,15 +1100,18 @@ async function scanSymbol(
   }
 
 
-  if (canComputeBaseTechnicals) {
+  // Compute technicals whenever we have enough bars for ANY indicator.
+  // RSI needs 15, MA20 needs 20, MA50 needs 50, MA200 needs 200.
+  // Compute what we can; missing indicators stay null/0.
+  if (bars.length >= 15) {
     const closes = bars.map((b) => b.close);
-    const m = macd(closes);
-    const bb = bollingerBands(closes);
+    const m = closes.length >= 26 ? macd(closes) : { macd: 0, signal: 0, histogram: 0 };
+    const bb = closes.length >= 20 ? bollingerBands(closes) : { upper: 0, middle: 0, lower: 0, position: 'Insufficient data' };
     const has200 = closes.length >= 200;
     r.technical = {
       rsi: Number(rsi(closes).toFixed(1)),
-      ma20: Number(sma(closes, 20).toFixed(2)),
-      ma50: Number(sma(closes, 50).toFixed(2)),
+      ma20: closes.length >= 20 ? Number(sma(closes, 20).toFixed(2)) : null,
+      ma50: closes.length >= 50 ? Number(sma(closes, 50).toFixed(2)) : null,
       ma200: has200 ? Number(sma(closes, 200).toFixed(2)) : null,
       macd: m.macd,
       macd_signal: m.signal,
@@ -1230,7 +1249,7 @@ async function scanSymbol(
 
   // If price was discovered only after the option snapshot arrived, recalculate
   // price-dependent technical levels now. Previously these stayed null forever.
-  if (stockPrice !== null && stockPrice > 0 && canComputeBaseTechnicals) {
+  if (stockPrice !== null && stockPrice > 0 && supportDataAvailable) {
     if (primarySupport === null) primarySupport = calcPrimarySupport(bars, stockPrice);
     if (secondarySupport === null && primarySupport !== null) secondarySupport = calcSecondarySupport(bars, primarySupport);
     if (resistance === null) resistance = findResistance(bars, stockPrice);
@@ -1381,16 +1400,16 @@ async function scanSymbol(
       }
 
       // ── TECHNICAL RULES SECTION ──
-      // Only apply if at least one individual rule is active (not just the master toggle).
-      // Base technicals (RSI, MA20, MA50, support, trend) need 60 bars.
-      // MA200-dependent rules (MA50>MA200, Price>MA200) need 200 bars.
-      // When bars >= 60 but < 200 and MA200 rules are enabled, those rules
-      // are Pending, not Rejected.
+      // Each rule is evaluated independently against its own data requirement.
+      // RSI needs 15 bars, MA20>MA50 needs 50, MA200 rules need 200, downtrend needs 60.
+      // Missing data for an OFF rule must NOT cause Pending.
       if (hasActiveTechnicalRule) {
-        if (canComputeBaseTechnicals) {
-          const tech = r.technical;
-          // RSI: use null-safe checks
-          if (tech) {
+        const tech = r.technical;
+        const barsAvailable = bars.length;
+
+        // RSI — needs 15 bars
+        if (rsiActive) {
+          if (barsAvailable >= 15 && tech) {
             if (profile.rsi_min != null && tech.rsi < profile.rsi_min) {
               if (!reasons.includes('RSI below minimum')) reasons.push('RSI below minimum');
               r.techRejections!.rsi_below_min++;
@@ -1399,48 +1418,67 @@ async function scanSymbol(
               if (!reasons.includes('RSI above maximum')) reasons.push('RSI above maximum');
               r.techRejections!.rsi_above_max++;
             }
-            // MA20 > MA50 — only if toggle ON
-            if (profile.require_ma20_above_ma50 && tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 <= tech.ma50) {
+          } else {
+            if (!pendingReasons.includes('Missing technical data')) {
+              pendingReasons.push('Missing technical data');
+              r.techRejections!.technical_data_missing++;
+            }
+          }
+        }
+
+        // MA20 > MA50 — needs 50 bars
+        if (ma20AboveMa50Active) {
+          if (barsAvailable >= 50 && tech && tech.ma20 != null && tech.ma50 != null) {
+            if (tech.ma20 <= tech.ma50) {
               if (!reasons.includes('MA20 not above MA50')) reasons.push('MA20 not above MA50');
               r.techRejections!.ma20_not_above_ma50++;
             }
-            // MA50 > MA200 — only if toggle ON. Needs 200 bars.
-            if (profile.require_ma50_above_ma200) {
-              if (ma200DataAvailable && tech!.ma200 !== null) {
-                if (tech!.ma50 <= tech!.ma200) {
-                  if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
-                  r.techRejections!.ma50_not_above_ma200++;
-                }
-              } else {
-                if (!pendingReasons.includes('MA50 > MA200 not evaluated — insufficient history (need 200 bars)')) {
-                  pendingReasons.push('MA50 > MA200 not evaluated — insufficient history (need 200 bars)');
-                }
-              }
-            }
-            // Price > MA200 — only if toggle ON. Needs 200 bars.
-            if (profile.require_price_above_ma200) {
-              if (ma200DataAvailable && tech!.ma200 !== null) {
-                if (stockPrice !== null && stockPrice > 0 && stockPrice <= tech!.ma200) {
-                  if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
-                  r.techRejections!.price_not_above_ma200++;
-                }
-              } else {
-                if (!pendingReasons.includes('Price > MA200 not evaluated — insufficient history (need 200 bars)')) {
-                  pendingReasons.push('Price > MA200 not evaluated — insufficient history (need 200 bars)');
-                }
-              }
+          } else {
+            if (!pendingReasons.includes('MA20 > MA50 not evaluated — insufficient history (need 50 bars)')) {
+              pendingReasons.push('MA20 > MA50 not evaluated — insufficient history (need 50 bars)');
             }
           }
-          // Downtrend without support — only if toggle ON
-          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport) {
-            reasons.push('Downtrend without support');
-            r.techRejections!.downtrend_no_support++;
+        }
+
+        // MA50 > MA200 — needs 200 bars
+        if (ma50AboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null) {
+            if (tech.ma50! <= tech.ma200) {
+              if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
+              r.techRejections!.ma50_not_above_ma200++;
+            }
+          } else {
+            if (!pendingReasons.includes('MA50 > MA200 not evaluated — insufficient history (need 200 bars)')) {
+              pendingReasons.push('MA50 > MA200 not evaluated — insufficient history (need 200 bars)');
+            }
           }
-        } else {
-          // Technical data (history bars) unavailable — Pending
-          if (!pendingReasons.includes('Missing technical data')) {
-            pendingReasons.push('Missing technical data');
-            r.techRejections!.technical_data_missing++;
+        }
+
+        // Price > MA200 — needs 200 bars
+        if (priceAboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null) {
+            if (stockPrice !== null && stockPrice > 0 && stockPrice <= tech.ma200) {
+              if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
+              r.techRejections!.price_not_above_ma200++;
+            }
+          } else {
+            if (!pendingReasons.includes('Price > MA200 not evaluated — insufficient history (need 200 bars)')) {
+              pendingReasons.push('Price > MA200 not evaluated — insufficient history (need 200 bars)');
+            }
+          }
+        }
+
+        // Downtrend without support — needs 60 bars (for trend + support)
+        if (downtrendRuleActive) {
+          if (supportDataAvailable) {
+            if (trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport) {
+              reasons.push('Downtrend without support');
+              r.techRejections!.downtrend_no_support++;
+            }
+          } else {
+            if (!pendingReasons.includes('Downtrend rule not evaluated — insufficient history (need 60 bars)')) {
+              pendingReasons.push('Downtrend rule not evaluated — insufficient history (need 60 bars)');
+            }
           }
         }
       }
@@ -1479,7 +1517,7 @@ async function scanSymbol(
             supportDistancePct: null, passesMin: false, passesMax: false,
             finalSupportDistancePass: false, status: 'pending_missing_support',
           });
-          if (canComputeBaseTechnicals) {
+          if (supportDataAvailable) {
             if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
               pendingReasons.push('Support distance not evaluated — support unavailable');
             }
@@ -1540,9 +1578,7 @@ async function scanSymbol(
     // (data needed to evaluate a rule is temporarily unavailable).
     const hasRejections = reasons.length > 0;
     const hasPending = pendingReasons.length > 0;
-    const supportDistanceActive = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') && (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
-    const historyDependentRulePending = (hasActiveTechnicalRule || supportDistanceActive) && !canComputeBaseTechnicals;
-    const isPending = !hasRejections && (hasPending || historyDependentRulePending);
+    const isPending = !hasRejections && hasPending;
     const qualified = !hasRejections && !isPending;
     r.evaluated++;
     if (qualified) r.qualified++;
@@ -1578,9 +1614,10 @@ async function scanSymbol(
         passFail.push({ rule: `Sufficient liquidity (volume >= ${profile.preferred_daily_volume})`, pass: volume >= profile.preferred_daily_volume, status: volume >= profile.preferred_daily_volume ? 'pass' : 'fail' });
       }
       if (hasActiveTechnicalRule) {
-        if (canComputeBaseTechnicals) {
-          const tech = r.technical;
-          if (tech) {
+        const tech = r.technical;
+        const barsAvailable = bars.length;
+        if (rsiActive) {
+          if (barsAvailable >= 15 && tech) {
             if (profile.rsi_min != null) {
               const rsiOk = tech.rsi >= profile.rsi_min;
               passFail.push({ rule: `RSI >= ${profile.rsi_min} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
@@ -1589,33 +1626,41 @@ async function scanSymbol(
               const rsiOk = tech.rsi <= profile.rsi_max;
               passFail.push({ rule: `RSI <= ${profile.rsi_max} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
             }
-            if (profile.require_ma20_above_ma50) {
-              const maOk = tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 > tech.ma50;
-              passFail.push({ rule: `MA20 > MA50 (${tech.ma20} vs ${tech.ma50})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
-            }
-            if (profile.require_ma50_above_ma200) {
-              if (ma200DataAvailable && tech.ma200 !== null) {
-                const maOk = tech.ma50 > tech.ma200;
-                passFail.push({ rule: `MA50 > MA200 (${tech.ma50} vs ${tech.ma200})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
-              } else {
-                passFail.push({ rule: 'MA50 > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
-              }
-            }
-            if (profile.require_price_above_ma200) {
-              if (ma200DataAvailable && tech.ma200 !== null) {
-                const priceOk = stockPrice !== null && stockPrice > 0 && stockPrice > tech.ma200;
-                passFail.push({ rule: `Price > MA200 (${stockPrice} vs ${tech.ma200})`, pass: priceOk, status: priceOk ? 'pass' : 'fail' });
-              } else {
-                passFail.push({ rule: 'Price > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
-              }
-            }
+          } else {
+            passFail.push({ rule: 'Technical history unavailable', pass: true, status: 'not_evaluated' });
           }
-          if (profile.exclude_downtrend_no_support) {
+        }
+        if (ma20AboveMa50Active) {
+          if (barsAvailable >= 50 && tech && tech.ma20 != null && tech.ma50 != null) {
+            const maOk = tech.ma20 > tech.ma50;
+            passFail.push({ rule: `MA20 > MA50 (${tech.ma20} vs ${tech.ma50})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'MA20 > MA50 — insufficient history (need 50 bars)', pass: true, status: 'not_evaluated' });
+          }
+        }
+        if (ma50AboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null) {
+            const maOk = tech.ma50! > tech.ma200;
+            passFail.push({ rule: `MA50 > MA200 (${tech.ma50} vs ${tech.ma200})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'MA50 > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
+          }
+        }
+        if (priceAboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null) {
+            const priceOk = stockPrice !== null && stockPrice > 0 && stockPrice > tech.ma200;
+            passFail.push({ rule: `Price > MA200 (${stockPrice} vs ${tech.ma200})`, pass: priceOk, status: priceOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Price > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
+          }
+        }
+        if (downtrendRuleActive) {
+          if (supportDataAvailable) {
             const trendOk = !(trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport);
             passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Downtrend rule — insufficient history (need 60 bars)', pass: true, status: 'not_evaluated' });
           }
-        } else {
-          passFail.push({ rule: 'Technical history unavailable', pass: true, status: 'not_evaluated' });
         }
       }
       if (!isSectionOff(profile, 'support_distance_enabled')) {
@@ -2792,6 +2837,11 @@ serve(async (req) => {
       !isSectionOff(profile, 'support_distance_enabled') &&
       (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
     const historyNeeded = technicalRulesNeedHistory || supportDistanceNeedsHistory;
+    // Compute minimum bars needed for the currently active rules.
+    let minBarsForActiveRules = 15; // RSI default
+    if (profile.require_ma20_above_ma50 === true) minBarsForActiveRules = Math.max(minBarsForActiveRules, 50);
+    if (profile.exclude_downtrend_no_support === true) minBarsForActiveRules = Math.max(minBarsForActiveRules, 60);
+    if (supportDistanceNeedsHistory) minBarsForActiveRules = Math.max(minBarsForActiveRules, 60);
     if (historyNeeded && scanMode !== 'analyze') {
       // Find tickers with pending technical data — candidates that have
       // technical_pending=true and no hard rejections (only pending reasons).
@@ -2822,8 +2872,7 @@ serve(async (req) => {
         const upper = info.ticker.toUpperCase();
         const cachedBars = await loadCachedHistory(upper, 260);
         info.cachedBars = cachedBars.length;
-        const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
-        const requiredBars = needsMA200 ? 200 : 60;
+        const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
         if (cachedBars.length < requiredBars) {
           needsFetch.push(info);
         } else {
@@ -2851,7 +2900,7 @@ serve(async (req) => {
       for (const info of toFetch) {
         const upper = info.ticker.toUpperCase();
         const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
-        const requiredBars = needsMA200 ? 200 : 60;
+        const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
 
         // Invalidate in-memory cache so getStockSnapshot actually fetches
         stockCache.delete(upper);
@@ -2866,7 +2915,7 @@ serve(async (req) => {
 
         warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
 
-        if (finalBars >= 60) {
+        if (finalBars >= minBarsForActiveRules) {
           historyFetchedThisScan++;
           console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars, re-scanning`);
 
