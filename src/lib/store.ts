@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
-import { reapplyHardFilters, selectBestContractPerTicker } from '@/lib/bestContract';
+import { selectBestContractPerTicker } from '@/lib/bestContract';
 import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates, fetchCachedBars, type TechFetchError } from '@/lib/technicalCache';
-import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn } from '@/lib/calculations';
+import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn, formatLocalDate } from '@/lib/calculations';
 import type {
   StrategyProfile,
   CandidateScan,
@@ -432,8 +432,16 @@ export function useAppState() {
           .eq('scan_mode', scanMode);
         if (deleteError) throw deleteError;
 
+        // Persist only the display-worthy best contract(s) per ticker. Persisting every
+        // rejected option in a large discovery scan created thousands of stale rows and
+        // the startup loader's row limit could omit the actual qualified ticker.
+        const persistedResults = selectBestContractPerTicker(
+          results,
+          activeProfile.max_strikes_per_ticker ?? 1,
+        );
+
         // Persist only database-backed columns and normalize undefined -> null.
-        const insertData = results.map((r) => ({
+        const insertData = persistedResults.map((r) => ({
           scan_date: r.scan_date || today,
           ticker: r.ticker,
           company_name: r.company_name ?? null,
@@ -461,7 +469,10 @@ export function useAppState() {
           premium_capture: r.premium_capture ?? null,
           breakeven: r.breakeven ?? null,
           qualified: Boolean(r.qualified),
+          technical_pending: Boolean(r.technical_pending),
           rejection_reasons: Array.isArray(r.rejection_reasons) ? r.rejection_reasons : [],
+          pending_reasons: Array.isArray(r.pending_reasons) ? r.pending_reasons : [],
+          pass_fail: Array.isArray(r.pass_fail) ? r.pass_fail : [],
           strategy_profile_id: activeProfile.id,
           strike_distance_from_stock: r.strike_distance_from_stock ?? null,
           strike_distance_from_support: r.strike_distance_from_support ?? null,
@@ -546,7 +557,7 @@ export function useAppState() {
     } finally {
       setScanning(false);
     }
-  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse.length]);
+  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse, loadScanUniverse]);
 
   const loadData = useCallback(async () => {
     try {
@@ -583,35 +594,44 @@ export function useAppState() {
         .eq('strategy_profile_id', profileId)
         .eq('scan_mode', mode)
         .order('created_at', { ascending: false })
-        .limit(200);
+        .limit(500);
       if (error) throw error;
       const rows = (data || []) as CandidateScan[];
       if (rows.length > 0) {
-        // Deduplicate by ticker-strike-expiration, keeping the newest
+        // Only restore the most recent scan batch. Mixing older scan dates into
+        // the current table caused stale candidates to reappear after reload.
+        const latestScanDate = rows[0].scan_date;
+        const latestRows = latestScanDate
+          ? rows.filter((row) => row.scan_date === latestScanDate)
+          : rows;
+
+        // Deduplicate by ticker-strike-expiration, keeping the newest.
         const seen = new Set<string>();
         const deduped: CandidateScan[] = [];
-        for (const row of rows) {
+        for (const row of latestRows) {
           const key = `${row.ticker}-${row.strike}-${row.expiration}`;
           if (!seen.has(key)) {
             seen.add(key);
             deduped.push(row);
           }
         }
-        const filtered = activeProfile
-          ? reapplyHardFilters(deduped, activeProfile)
-          : deduped;
+        // Preserve the last saved scan exactly as it was evaluated.
+        // Settings changes are applied only on the next manual Rescan; partially
+        // re-evaluating persisted rows here caused stale rejection reasons and
+        // inconsistent status after relaxing a rule.
+        const filtered = deduped;
         if (mode === 'discovery') {
           setDiscoveryCandidates(filtered);
-          setDiscoveryLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+          setDiscoveryLastScanAt(latestRows[0].scan_date || latestRows[0].created_at || null);
         } else {
           setUniverseCandidates(filtered);
-          setUniverseLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+          setUniverseLastScanAt(latestRows[0].scan_date || latestRows[0].created_at || null);
           setHasUniverseScanned(true);
         }
         // Only set the visible candidates if this is the current mode
         if (scanMode === mode) {
           setCandidates(filtered);
-          setLastScanAt(rows[0].scan_date || rows[0].created_at || null);
+          setLastScanAt(latestRows[0].scan_date || latestRows[0].created_at || null);
           setScanSource(null);
         }
         populateStockPricesFromCandidates(deduped);
@@ -621,7 +641,7 @@ export function useAppState() {
       console.error('loadSavedCandidates failed:', err);
       setSavedCandidatesLoaded(true);
     }
-  }, []);
+  }, [scanMode]);
 
   useEffect(() => {
     if (activeProfile && positionsLoaded) {
@@ -741,7 +761,7 @@ export function useAppState() {
       days_in_trade: daysInTrade,
       annualized_return: parseFloat(annRet.toFixed(1)),
       open_date: pos.open_date,
-      close_date: new Date().toISOString().split('T')[0],
+      close_date: formatLocalDate(new Date()),
     };
 
     const { data, error } = await supabase
@@ -773,11 +793,14 @@ export function useAppState() {
   }, [activeProfile]);
 
   const updateCandidateWithQuote = useCallback((rowKey: string, updates: Partial<CandidateScan>) => {
-    setCandidates((prev) => prev.map((c) => {
+    const apply = (list: CandidateScan[]) => list.map((c) => {
       const key = `${c.ticker}-${c.strike}-${c.expiration}`;
       return key === rowKey ? { ...c, ...updates } : c;
-    }));
-  }, []);
+    });
+    setCandidates(apply);
+    if (scanMode === 'discovery') setDiscoveryCandidates(apply);
+    else setUniverseCandidates(apply);
+  }, [scanMode]);
 
   const refreshCandidateTechnical = useCallback(async (ticker: string): Promise<{ ok: boolean; error: TechFetchError | null }> => {
     if (!activeProfile) return { ok: false, error: 'error' };

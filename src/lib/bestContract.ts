@@ -1,67 +1,11 @@
 import type { CandidateScan } from '@/types';
-import type { StrategyProfile } from '@/types';
 
 type StatusPriority = 0 | 1 | 2;
 
 function statusPriority(c: CandidateScan): StatusPriority {
   if (c.qualified && !c.technical_pending) return 0;
-  if (c.qualified && c.technical_pending) return 1;
+  if (c.technical_pending) return 1;
   return 2;
-}
-
-/**
- * Re-applies hard filters from the current active profile to a list of
- * candidate contracts. Contracts that definitively violate a hard filter
- * (stock price, max strike, min DTE) are marked as rejected.
- *
- * This is used when loading saved scan results from the database to ensure
- * stale contracts from a previous scan (with different settings) don't
- * appear as qualified under the current profile.
- */
-export function reapplyHardFilters(contracts: CandidateScan[], profile: StrategyProfile): CandidateScan[] {
-  return contracts.map((c) => {
-    const reasons = [...(c.rejection_reasons || [])];
-    const pendingReasons: string[] = [];
-
-    if (profile.order_strike_enabled) {
-      if (profile.max_strike != null && c.strike > profile.max_strike && !reasons.includes('Strike too high')) {
-        reasons.push('Strike too high');
-      }
-      if (profile.minimum_stock_price != null && c.stock_price != null && c.stock_price > 0) {
-        if (c.stock_price < profile.minimum_stock_price && !reasons.includes('Stock price below minimum')) {
-          reasons.push('Stock price below minimum');
-        }
-      }
-      if (profile.minimum_stock_price != null && (c.stock_price == null || c.stock_price <= 0)) {
-        if (!pendingReasons.includes('Stock price unavailable — minimum stock price rule not evaluated')) {
-          pendingReasons.push('Stock price unavailable — minimum stock price rule not evaluated');
-        }
-      }
-      if (profile.maximum_stock_price != null && c.stock_price != null && c.stock_price > 0) {
-        if (c.stock_price > profile.maximum_stock_price && !reasons.includes('Stock price above maximum')) {
-          reasons.push('Stock price above maximum');
-        }
-      }
-    }
-
-    if (profile.expiration_enabled && c.dte < profile.min_dte) {
-      if (!reasons.includes('DTE below minimum')) {
-        reasons.push('DTE below minimum');
-      }
-    }
-
-    const hasRejections = reasons.length > 0;
-    const hasPending = pendingReasons.length > 0 || c.technical_pending;
-    const isPending = !hasRejections && hasPending;
-    const qualified = !hasRejections && !isPending;
-
-    return {
-      ...c,
-      rejection_reasons: reasons,
-      qualified,
-      technical_pending: isPending,
-    };
-  });
 }
 
 /**
