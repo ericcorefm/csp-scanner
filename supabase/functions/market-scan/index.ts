@@ -1578,8 +1578,10 @@ async function scanSymbol(
         }
       }
     } else if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-      // No premium available and CROI filter is ON — cannot qualify
-      reasons.push('CROI too low');
+      // No premium available and CROI filter is ON — required data missing, not a failure
+      if (!pendingReasons.includes('Premium/quote unavailable for CROI calculation')) {
+        pendingReasons.push('Premium/quote unavailable for CROI calculation');
+      }
     }
 
     // A contract is Pending if it has no hard rejections but has pending reasons

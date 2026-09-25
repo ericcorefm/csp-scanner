@@ -155,9 +155,9 @@ export function CandidatesPage({
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
             <ScanCountItem label="Contracts Evaluated" value={state.scanCounts.contracts_evaluated} color="text-sky-400" />
-            <ScanCountItem label="Qualified" value={state.scanCounts.qualified} color="text-emerald-400" />
-            <ScanCountItem label="Rejected" value={state.scanCounts.rejected} color="text-red-400" />
-            <ScanCountItem label="Pending" value={state.scanCounts.pending ?? Math.max(0, state.scanCounts.contracts_evaluated - state.scanCounts.qualified - state.scanCounts.rejected)} color="text-amber-400" />
+            <ScanCountItem label="Qualified Contracts" value={state.scanCounts.qualified} color="text-emerald-400" />
+            <ScanCountItem label="Rejected Contracts" value={state.scanCounts.rejected} color="text-red-400" />
+            <ScanCountItem label="Pending Contracts" value={state.scanCounts.pending ?? Math.max(0, state.scanCounts.contracts_evaluated - state.scanCounts.qualified - state.scanCounts.rejected)} color="text-amber-400" />
             <ScanCountItem label="Qualified Tickers" value={state.scanCounts.unique_qualified_tickers ?? new Set(displayCandidates.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} color="text-emerald-400" />
             <ScanCountItem
               label="Last Scan"
