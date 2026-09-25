@@ -12,8 +12,8 @@ export interface StrategyProfile {
   preferred_daily_volume: number;
   preferred_spread_pct: number;
   max_spread_pct: number;
-  rsi_min: number;
-  rsi_max: number;
+  rsi_min: number | null;
+  rsi_max: number | null;
   require_ma20_above_ma50: boolean;
   require_ma50_above_ma200: boolean;
   require_price_above_ma200: boolean;
@@ -125,6 +125,7 @@ export type RejectionReason =
 
 export interface CandidateScan {
   id?: string;
+  created_at?: string;
   scan_date: string;
   ticker: string;
   company_name: string;
