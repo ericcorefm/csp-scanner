@@ -4,6 +4,12 @@ import type { AppState } from '@/lib/types';
 import type { Page } from '@/components/Layout';
 import { Card, Badge } from '@/components/ui';
 
+function formatAddedDate(value?: string | null): string {
+  if (!value) return '—';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString();
+}
+
 export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNavigate: (page: Page, ticker?: string) => void }) {
   const [newTicker, setNewTicker] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -301,7 +307,7 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
                     </td>
                     <td className="px-4 py-2.5 text-slate-400">{entry.company_name || '—'}</td>
                     <td className="px-4 py-2.5 text-slate-400 text-xs whitespace-nowrap">
-                      {new Date(entry.created_at).toLocaleDateString()}
+                      {formatAddedDate(entry.created_at)}
                     </td>
                     <td className="px-4 py-2.5">
                       <Badge variant={entry.source === 'default' ? 'info' : 'neutral'}>

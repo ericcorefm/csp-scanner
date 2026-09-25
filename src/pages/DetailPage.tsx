@@ -5,7 +5,7 @@ import {
   Activity, Crosshair, Loader2, Search,
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
-import { calcRecycleDate } from '@/lib/calculations';
+import { calcRecycleDate, formatLocalDate } from '@/lib/calculations';
 import { Badge, Card, StatRow, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { BackButton } from '@/components/Layout';
 import { TradingViewChart } from '@/components/TradingViewChart';
@@ -225,7 +225,7 @@ export function DetailPage({
 
   const TrendIcon = trendIcons[effectiveTrend] || Minus;
   const trendColor = trendColors[effectiveTrend] || 'neutral';
-  const recycleDate = calcRecycleDate(new Date().toISOString().split('T')[0], state.activeProfile?.max_recycle_days || 120);
+  const recycleDate = calcRecycleDate(formatLocalDate(new Date()), state.activeProfile?.max_recycle_days || 120);
   const stockPrice = candidate.stock_price;
 
   const handleAddPosition = async () => {
@@ -236,7 +236,7 @@ export function DetailPage({
       strike: candidate.strike,
       expiration: candidate.expiration,
       contracts: 1,
-      open_date: new Date().toISOString().split('T')[0],
+      open_date: formatLocalDate(new Date()),
       actual_sto: candidate.suggested_sto,
       current_bid: candidate.bid,
       current_ask: candidate.ask,

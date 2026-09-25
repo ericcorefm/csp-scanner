@@ -1,12 +1,11 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check, FlaskConical } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
-import type { ScanMode, ABTestResult } from '@/lib/liveMarketData';
+import type { ScanMode } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
 import { selectBestContractPerTicker } from '@/lib/bestContract';
-import { runABTest } from '@/lib/liveMarketData';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -35,9 +34,6 @@ export function CandidatesPage({
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [quoteModalRow, setQuoteModalRow] = useState<string | null>(null);
-  const [abTestRunning, setAbTestRunning] = useState(false);
-  const [abTestResult, setAbTestResult] = useState<ABTestResult | null>(null);
-  const [abTestError, setAbTestError] = useState<string | null>(null);
 
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
@@ -78,7 +74,7 @@ export function CandidatesPage({
       return 0;
     });
     return list;
-  }, [displayCandidates, showRejected, showPending, sortKey, sortDir]);
+  }, [displayCandidates, showRejected, showPending, sortKey, sortDir, isDiscovery]);
 
   const quoteModalCandidate = useMemo(() => {
     if (!quoteModalRow) return null;
@@ -169,123 +165,6 @@ export function CandidatesPage({
               isText
             />
           </div>
-        </div>
-      )}
-
-      {/* A/B Regression Test */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <button
-          onClick={async () => {
-            if (!state.activeProfile) return;
-            setAbTestRunning(true);
-            setAbTestError(null);
-            setAbTestResult(null);
-            try {
-              const result = await runABTest(
-                state.activeProfile,
-                state.openPositions.map((p) => p.ticker),
-                scanMode,
-                scanMode === 'universe' ? state.scanUniverse : undefined,
-              );
-              setAbTestResult(result);
-            } catch (err) {
-              setAbTestError(err instanceof Error ? err.message : String(err));
-            } finally {
-              setAbTestRunning(false);
-            }
-          }}
-          disabled={abTestRunning || !state.activeProfile}
-          className="inline-flex items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-sm font-medium text-violet-300 hover:bg-violet-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <FlaskConical className="h-4 w-4" />
-          {abTestRunning ? 'Running A/B Test...' : 'Run A/B Regression Test'}
-        </button>
-        <span className="text-xs text-slate-500">
-          Compares Technical Rules OFF vs ON (all rules null/false) on the same market data.
-        </span>
-      </div>
-
-      {abTestError && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm text-red-400">
-          A/B test failed: {abTestError}
-        </div>
-      )}
-
-      {abTestResult && (
-        <div className={`rounded-lg border px-4 py-3 ${abTestResult.test_passed ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-red-500/40 bg-red-500/5'}`}>
-          <div className="flex items-center gap-2 mb-3">
-            {abTestResult.test_passed ? (
-              <CheckCircle2 className="h-5 w-5 text-emerald-400" />
-            ) : (
-              <XCircle className="h-5 w-5 text-red-400" />
-            )}
-            <h3 className="text-sm font-semibold text-slate-100">
-              A/B Test {abTestResult.test_passed ? 'PASSED' : 'FAILED'}
-            </h3>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            <div className="text-center">
-              <div className="text-xs text-slate-500">Profile A (OFF): Qualified Tickers</div>
-              <div className="text-lg font-semibold tabular-nums text-emerald-400">{abTestResult.profile_a.qualified_tickers.length}</div>
-              <div className="text-xs text-slate-500 mt-0.5">{abTestResult.profile_a.qualified_tickers.join(', ') || '--'}</div>
-            </div>
-            <div className="text-center">
-              <div className="text-xs text-slate-500">Profile B (ON, no rules): Qualified Tickers</div>
-              <div className="text-lg font-semibold tabular-nums text-emerald-400">{abTestResult.profile_b.qualified_tickers.length}</div>
-              <div className="text-xs text-slate-500 mt-0.5">{abTestResult.profile_b.qualified_tickers.join(', ') || '--'}</div>
-            </div>
-            <div className="text-center">
-              <div className="text-xs text-slate-500">Identical Contracts</div>
-              <div className="text-lg font-semibold tabular-nums text-slate-200">{abTestResult.identical_contracts}</div>
-            </div>
-            <div className="text-center">
-              <div className="text-xs text-slate-500">Different Contracts</div>
-              <div className={`text-lg font-semibold tabular-nums ${abTestResult.different_contracts > 0 ? 'text-red-400' : 'text-slate-200'}`}>{abTestResult.different_contracts}</div>
-            </div>
-          </div>
-
-          <div className="mb-3 text-xs">
-            <span className="text-slate-500">hasActiveTechnicalRule(Profile B): </span>
-            <span className={abTestResult.assertion_passed ? 'text-emerald-400' : 'text-red-400'}>
-              {abTestResult.has_active_technical_rule_profile_b ? 'true (BUG)' : 'false (correct)'}
-            </span>
-          </div>
-
-          {abTestResult.diffs.length > 0 && (
-            <div className="mt-3 max-h-80 overflow-y-auto rounded border border-slate-800 bg-slate-900/80">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-slate-900 border-b border-slate-800">
-                  <tr>
-                    <th className="px-2 py-1.5 text-left text-slate-500">Ticker</th>
-                    <th className="px-2 py-1.5 text-right text-slate-500">Strike</th>
-                    <th className="px-2 py-1.5 text-left text-slate-500">Expiration</th>
-                    <th className="px-2 py-1.5 text-center text-slate-500">A Qualified</th>
-                    <th className="px-2 py-1.5 text-center text-slate-500">B Qualified</th>
-                    <th className="px-2 py-1.5 text-left text-slate-500">A Rejection Reasons</th>
-                    <th className="px-2 py-1.5 text-left text-slate-500">B Rejection Reasons</th>
-                    <th className="px-2 py-1.5 text-left text-slate-500">A Pending Reasons</th>
-                    <th className="px-2 py-1.5 text-left text-slate-500">B Pending Reasons</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {abTestResult.diffs.map((d) => (
-                    <tr key={d.key}>
-                      <td className="px-2 py-1.5 text-slate-300 font-medium">{d.ticker}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">${d.strike}</td>
-                      <td className="px-2 py-1.5 text-slate-400">{d.expiration}</td>
-                      <td className={`px-2 py-1.5 text-center ${d.profile_a.qualified ? 'text-emerald-400' : 'text-red-400'}`}>{d.profile_a.qualified ? 'Yes' : 'No'}</td>
-                      <td className={`px-2 py-1.5 text-center ${d.profile_b.qualified ? 'text-emerald-400' : 'text-red-400'}`}>{d.profile_b.qualified ? 'Yes' : 'No'}</td>
-                      <td className="px-2 py-1.5 text-slate-400">{d.profile_a.rejection_reasons.join(', ') || '--'}</td>
-                      <td className="px-2 py-1.5 text-slate-400">{d.profile_b.rejection_reasons.join(', ') || '--'}</td>
-                      <td className="px-2 py-1.5 text-amber-400">{d.profile_a.pending_reasons.join(', ') || '--'}</td>
-                      <td className="px-2 py-1.5 text-amber-400">{d.profile_b.pending_reasons.join(', ') || '--'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
       )}
 
