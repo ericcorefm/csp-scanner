@@ -1,5 +1,0 @@
-If applying this patch to the old project instead of using the cleaned ZIP, delete the unused stale source file:
-
-src/lib/marketData.ts
-
-Also delete root-level duplicate source files, old dist/, nested ZIPs, and download artifacts. The cleaned ZIP already excludes them.
