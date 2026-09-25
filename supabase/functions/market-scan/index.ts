@@ -2272,6 +2272,357 @@ serve(async (req) => {
       });
     }
 
+    // ── RULE-ISOLATION MODE: deterministic rule testing on one finalized dataset ──
+    // Runs one baseline scan (all technical + support distance OFF), captures the
+    // enriched contracts + per-ticker technicals, then re-evaluates the SAME
+    // contracts with 5 different rule profiles — no additional API calls.
+    if (mode === 'rule-isolation') {
+      const riScanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
+      const riSymbols: string[] = Array.isArray(body.symbols)
+        ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean)
+        : [];
+
+      let riSymbolList: { ticker: string; company_name: string | null }[];
+      if (riScanMode === 'universe' && riSymbols.length > 0) {
+        riSymbolList = riSymbols.map((t) => ({ ticker: t, company_name: null }));
+      } else if (riScanMode === 'universe') {
+        riSymbolList = await fetchScanUniverse();
+      } else {
+        riSymbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
+      }
+
+      if (riSymbolList.length === 0) {
+        return json({ success: false, error: 'No symbols to scan for rule isolation test' });
+      }
+
+      // Baseline profile: clone active profile, turn OFF technical rules + support distance
+      const baselineProfile: Profile = structuredClone(profile);
+      baselineProfile.technical_rules_enabled = false;
+      baselineProfile.rsi_min = null;
+      baselineProfile.rsi_max = null;
+      baselineProfile.require_ma20_above_ma50 = false;
+      baselineProfile.require_ma50_above_ma200 = false;
+      baselineProfile.require_price_above_ma200 = false;
+      baselineProfile.exclude_downtrend_no_support = false;
+      baselineProfile.support_distance_enabled = false;
+
+      // noFilterMode for the baseline: recompute with technical + support distance OFF
+      const riNoFilter =
+        isSectionOff(baselineProfile, 'order_strike_enabled') &&
+        isSectionOff(baselineProfile, 'expiration_enabled') &&
+        isSectionOff(baselineProfile, 'croi_pc_enabled') &&
+        isSectionOff(baselineProfile, 'cycle_liquidity_enabled') &&
+        isSectionOff(baselineProfile, 'spread_enabled') &&
+        isSectionOff(baselineProfile, 'short_interest_enabled') &&
+        isSectionOff(baselineProfile, 'technical_rules_enabled') &&
+        isSectionOff(baselineProfile, 'support_distance_enabled') &&
+        baselineProfile.exclude_existing_positions === false;
+
+      console.log(`[RULE-ISOLATION] Baseline scan with ${riSymbolList.length} symbols, noFilter=${riNoFilter}`);
+
+      // Bulk stock prices
+      const riAllTickers = riSymbolList.map((s) => s.ticker.toUpperCase());
+      const { priceMap: riBulkPriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+      let riBulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
+      if (riBulkPriceMap.size === 0) {
+        riBulkCachedPrices = await bulkLoadCachedStockPrices(riAllTickers);
+      }
+
+      // Run baseline scan
+      const baselineCandidates: any[] = [];
+      const tickerTechnicals = new Map<string, {
+        rsi: number | null; ma20: number | null; ma50: number | null; ma200: number | null;
+        trend: string; primarySupport: number | null; barCount: number;
+      }>();
+
+      const RI_BATCH = 5;
+      for (let i = 0; i < riSymbolList.length; i += RI_BATCH) {
+        const batch = riSymbolList.slice(i, i + RI_BATCH);
+        const results = await Promise.all(
+          batch.map((sym) => {
+            const upper = sym.ticker.toUpperCase();
+            const price = riBulkPriceMap.get(upper) ?? riBulkCachedPrices.get(upper)?.price ?? null;
+            return scanSymbol(sym.ticker, sym.company_name || '', baselineProfile, apiKey, openTickers, riNoFilter, today, fmt, false, false, price, riScanMode === 'universe')
+              .catch((err) => { console.error(`[RULE-ISOLATION] ${sym.ticker} failed: ${err}`); return null; });
+          })
+        );
+        for (const r of results) {
+          if (!r) continue;
+          baselineCandidates.push(...r.candidates);
+          // Capture per-ticker technical data
+          if (r.candidates.length > 0 || r.chainStatus === 'success') {
+            const ticker = r.candidates[0]?.ticker || batch.find((s) => s.ticker.toUpperCase() === (r.stockPrice != null ? r.candidates[0]?.ticker : ''))?.ticker;
+            // Get ticker from the first candidate or from the batch
+            const techTicker = r.candidates[0]?.ticker;
+            if (techTicker) {
+              tickerTechnicals.set(techTicker.toUpperCase(), {
+                rsi: r.technical?.rsi ?? null,
+                ma20: r.technical?.ma20 ?? null,
+                ma50: r.technical?.ma50 ?? null,
+                ma200: r.technical?.ma200 ?? null,
+                trend: r.trendClass || 'Unknown',
+                primarySupport: r.primarySupport ?? null,
+                barCount: r.historyBarCount ?? 0,
+              });
+            }
+          }
+        }
+      }
+
+      // Cache warming: fetch history for pending tickers so we have technicals
+      const RI_MAX_FETCHES = 4;
+      const pendingTickersRI = new Map<string, { ticker: string; bestCroi: number }>();
+      for (const c of baselineCandidates) {
+        if (c.technical_pending && (!c.rejection_reasons || c.rejection_reasons.length === 0)) {
+          const existing = pendingTickersRI.get(c.ticker);
+          if (!existing || (c.net_croi || 0) > existing.bestCroi) {
+            pendingTickersRI.set(c.ticker, { ticker: c.ticker, bestCroi: c.net_croi || 0 });
+          }
+        }
+      }
+      const riNeedsFetch = Array.from(pendingTickersRI.values()).sort((a, b) => b.bestCroi - a.bestCroi).slice(0, RI_MAX_FETCHES);
+      for (const info of riNeedsFetch) {
+        const upper = info.ticker.toUpperCase();
+        stockCache.delete(upper);
+        const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, riBulkPriceMap.get(upper) ?? riBulkCachedPrices.get(upper)?.price ?? null, true);
+        if (snapshot.historicalBars.length >= 60) {
+          const price = riBulkPriceMap.get(upper) ?? riBulkCachedPrices.get(upper)?.price ?? null;
+          const rerun = await scanSymbol(upper, '', baselineProfile, apiKey, openTickers, riNoFilter, today, fmt, false, false, price, false);
+          if (rerun.candidates.length > 0) {
+            for (let ci = baselineCandidates.length - 1; ci >= 0; ci--) {
+              if (baselineCandidates[ci].ticker === upper) baselineCandidates.splice(ci, 1);
+            }
+            baselineCandidates.push(...rerun.candidates);
+            tickerTechnicals.set(upper, {
+              rsi: rerun.technical?.rsi ?? null,
+              ma20: rerun.technical?.ma20 ?? null,
+              ma50: rerun.technical?.ma50 ?? null,
+              ma200: rerun.technical?.ma200 ?? null,
+              trend: rerun.trendClass || 'Unknown',
+              primarySupport: rerun.primarySupport ?? null,
+              barCount: rerun.historyBarCount ?? 0,
+            });
+          }
+        }
+      }
+
+      console.log(`[RULE-ISOLATION] Baseline: ${baselineCandidates.length} candidates, ${tickerTechnicals.size} tickers with technicals`);
+
+      // Build finalized contract dataset for re-evaluation
+      interface RuleTestContract {
+        ticker: string;
+        strike: number;
+        expiration: string;
+        stock_price: number | null;
+        dte: number;
+        net_croi: number | null;
+        premium_capture: number | null;
+        open_interest: number;
+        volume: number;
+        iv: number | null;
+        rsi: number | null;
+        ma20: number | null;
+        ma50: number | null;
+        ma200: number | null;
+        trend: string;
+        primary_support: number | null;
+        support_distance: number | null;
+        base_qualified: boolean;
+        base_rejection_reasons: string[];
+        base_pending_reasons: string[];
+      }
+
+      const ruleTestContracts: RuleTestContract[] = baselineCandidates.map((c) => {
+        const tech = tickerTechnicals.get(c.ticker?.toUpperCase());
+        return {
+          ticker: c.ticker,
+          strike: c.strike,
+          expiration: c.expiration,
+          stock_price: c.stock_price ?? null,
+          dte: c.dte ?? 0,
+          net_croi: c.net_croi ?? null,
+          premium_capture: c.premium_capture ?? null,
+          open_interest: c.open_interest ?? 0,
+          volume: c.volume ?? 0,
+          iv: c.iv ?? null,
+          rsi: tech?.rsi ?? null,
+          ma20: tech?.ma20 ?? null,
+          ma50: tech?.ma50 ?? null,
+          ma200: tech?.ma200 ?? null,
+          trend: tech?.trend ?? 'Unknown',
+          primary_support: c.primary_support ?? tech?.primarySupport ?? null,
+          support_distance: c.strike_distance_from_support ?? null,
+          base_qualified: c.qualified,
+          base_rejection_reasons: c.rejection_reasons ?? [],
+          base_pending_reasons: c.pending_reasons ?? [],
+        };
+      });
+
+      // Pure re-evaluation function — no API calls
+      function evaluateRulesPure(
+        contract: RuleTestContract,
+        prof: Profile,
+      ): { qualified: boolean; pending: boolean; rejection_reasons: string[]; pending_reasons: string[] } {
+        const rejection_reasons: string[] = [];
+        const pending_reasons: string[] = [];
+
+        // Start from base state: if already rejected by non-technical rules, keep those
+        for (const r of contract.base_rejection_reasons) {
+          // Filter out technical/support reasons — we'll re-evaluate those
+          if (r === 'Downtrend without support' || r === 'Support distance too high' || r === 'Support distance too low' || r === 'Technical data missing') continue;
+          rejection_reasons.push(r);
+        }
+
+        const techEnabled = !isSectionOff(prof, 'technical_rules_enabled');
+        const hasActiveTech = techEnabled && (
+          prof.rsi_min != null || prof.rsi_max != null ||
+          prof.require_ma20_above_ma50 === true || prof.require_ma50_above_ma200 === true ||
+          prof.require_price_above_ma200 === true || prof.exclude_downtrend_no_support === true
+        );
+
+        if (hasActiveTech) {
+          const hasData = contract.rsi != null && contract.ma20 != null && contract.ma50 != null;
+          const needsMA200 = prof.require_ma50_above_ma200 || prof.require_price_above_ma200;
+          const hasMA200 = contract.ma200 != null;
+          const dataComplete = needsMA200 ? (hasData && hasMA200) : hasData;
+
+          if (!dataComplete) {
+            pending_reasons.push('Technical data missing');
+          } else {
+            if (prof.rsi_min != null && contract.rsi! < prof.rsi_min) {
+              rejection_reasons.push('RSI below minimum');
+            }
+            if (prof.rsi_max != null && contract.rsi! > prof.rsi_max) {
+              rejection_reasons.push('RSI above maximum');
+            }
+            if (prof.require_ma20_above_ma50 && contract.ma20! <= contract.ma50!) {
+              rejection_reasons.push('MA20 not above MA50');
+            }
+            if (prof.require_ma50_above_ma200 && contract.ma200 != null && contract.ma50! <= contract.ma200) {
+              rejection_reasons.push('MA50 not above MA200');
+            }
+            if (prof.require_price_above_ma200 && contract.ma200 != null && contract.stock_price! <= contract.ma200) {
+              rejection_reasons.push('Price not above MA200');
+            }
+            if (prof.exclude_downtrend_no_support) {
+              const isDowntrend = contract.trend === 'Downtrend' || contract.trend === 'Strong Downtrend';
+              const hasSupport = contract.primary_support != null && contract.primary_support > 0;
+              if (isDowntrend && !hasSupport) {
+                rejection_reasons.push('Downtrend without support');
+              }
+            }
+          }
+        }
+
+        // Support distance
+        const sdEnabled = !isSectionOff(prof, 'support_distance_enabled');
+        const hasSD = sdEnabled && (prof.minimum_support_distance_pct != null || prof.maximum_support_distance_pct != null);
+        if (hasSD) {
+          if (contract.primary_support == null || contract.support_distance == null) {
+            pending_reasons.push('Missing support data');
+          } else {
+            if (prof.minimum_support_distance_pct != null && contract.support_distance < prof.minimum_support_distance_pct) {
+              rejection_reasons.push('Support distance too low');
+            }
+            if (prof.maximum_support_distance_pct != null && contract.support_distance > prof.maximum_support_distance_pct) {
+              rejection_reasons.push('Support distance too high');
+            }
+          }
+        }
+
+        const isPending = pending_reasons.length > 0 && rejection_reasons.length === 0;
+        const isQualified = rejection_reasons.length === 0 && pending_reasons.length === 0;
+
+        return { qualified: isQualified, pending: isPending, rejection_reasons, pending_reasons };
+      }
+
+      // Define 5 test profiles
+      function makeTestProfile(overrides: Partial<Profile>): Profile {
+        const p: Profile = structuredClone(baselineProfile);
+        return Object.assign(p, overrides);
+      }
+
+      const testProfiles: { name: string; profile: Profile }[] = [
+        { name: 'Baseline', profile: makeTestProfile({}) },
+        { name: 'RSI 35-65', profile: makeTestProfile({
+          technical_rules_enabled: true, rsi_min: 35, rsi_max: 65,
+        })},
+        { name: 'Downtrend only', profile: makeTestProfile({
+          technical_rules_enabled: true, exclude_downtrend_no_support: true,
+        })},
+        { name: 'RSI + Downtrend', profile: makeTestProfile({
+          technical_rules_enabled: true, rsi_min: 35, rsi_max: 65, exclude_downtrend_no_support: true,
+        })},
+        { name: 'Support 15-50%', profile: makeTestProfile({
+          support_distance_enabled: true, minimum_support_distance_pct: 15, maximum_support_distance_pct: 50,
+        })},
+      ];
+
+      // Run all tests
+      const testResults = testProfiles.map(({ name, profile: tp }) => {
+        let qualified = 0, pending = 0, rejected = 0;
+        const qualifiedTickers = new Set<string>();
+        const changes: { ticker: string; strike: number; expiration: string; baseline_status: string; test_status: string; reason: string }[] = [];
+
+        for (const contract of ruleTestContracts) {
+          const result = evaluateRulesPure(contract, tp);
+          const key = `${contract.ticker}|${contract.strike}|${contract.expiration}`;
+          const baseStatus = contract.base_qualified ? 'Qualified' : (contract.base_pending_reasons.length > 0 ? 'Pending' : 'Rejected');
+          const testStatus = result.qualified ? 'Qualified' : (result.pending ? 'Pending' : 'Rejected');
+
+          if (result.qualified) { qualified++; qualifiedTickers.add(contract.ticker); }
+          else if (result.pending) pending++;
+          else rejected++;
+
+          if (baseStatus !== testStatus || JSON.stringify(contract.base_rejection_reasons) !== JSON.stringify(result.rejection_reasons)) {
+            const baseReasons = contract.base_rejection_reasons.filter(r => r !== 'Technical data missing').join(', ');
+            const testReasons = result.rejection_reasons.join(', ');
+            const reason = testReasons !== baseReasons ? testReasons : (result.pending_reasons.join(', ') || '');
+            changes.push({
+              ticker: contract.ticker,
+              strike: contract.strike,
+              expiration: contract.expiration,
+              baseline_status: baseStatus,
+              test_status: testStatus,
+              reason: reason || (baseStatus !== testStatus ? `Status changed: ${baseStatus} -> ${testStatus}` : ''),
+            });
+          }
+        }
+
+        // Bug check: a filter must never create MORE qualified than baseline
+        const baselineQualified = testResults[0]?.qualified ?? 0;
+        if (name !== 'Baseline' && qualified > baselineQualified) {
+          changes.unshift({
+            ticker: 'BUG', strike: 0, expiration: '',
+            baseline_status: `${baselineQualified} qualified`,
+            test_status: `${qualified} qualified`,
+            reason: 'BUG: filter changed unrelated qualification state — filter produced MORE qualified candidates than baseline',
+          });
+        }
+
+        return { name, qualified, pending, rejected, qualified_tickers: Array.from(qualifiedTickers).sort(), changes };
+      });
+
+      // Bug check after all results computed
+      const baselineQualified = testResults[0].qualified;
+      for (let i = 1; i < testResults.length; i++) {
+        if (testResults[i].qualified > baselineQualified) {
+          console.error(`[RULE-ISOLATION] BUG: ${testResults[i].name} produced ${testResults[i].qualified} qualified vs baseline ${baselineQualified}`);
+        }
+      }
+
+      console.log(`[RULE-ISOLATION] Results: ${JSON.stringify(testResults.map(t => ({ name: t.name, qualified: t.qualified, pending: t.pending, rejected: t.rejected })))}`);
+
+      return json({
+        success: true,
+        mode: 'rule-isolation',
+        contracts_captured: ruleTestContracts.length,
+        tickers_with_technicals: tickerTechnicals.size,
+        tests: testResults,
+        scanned_at: new Date().toISOString(),
+      });
+    }
+
     // ── DISCOVERY / UNIVERSE MODE ──
     let symbolList: { ticker: string; company_name: string | null }[];
     if (scanMode === 'universe') {

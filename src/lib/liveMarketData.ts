@@ -531,3 +531,52 @@ export async function runABTest(
 
   return data as ABTestResult;
 }
+
+export interface RuleIsolationChange {
+  ticker: string;
+  strike: number;
+  expiration: string;
+  baseline_status: string;
+  test_status: string;
+  reason: string;
+}
+
+export interface RuleIsolationTestResult {
+  name: string;
+  qualified: number;
+  pending: number;
+  rejected: number;
+  qualified_tickers: string[];
+  changes: RuleIsolationChange[];
+}
+
+export interface RuleIsolationResult {
+  success: boolean;
+  mode: string;
+  contracts_captured: number;
+  tickers_with_technicals: number;
+  tests: RuleIsolationTestResult[];
+  scanned_at: string;
+}
+
+export async function runRuleIsolationTest(
+  profile: StrategyProfile,
+  openTickers: string[],
+  scanMode: ScanMode,
+  symbols?: string[],
+): Promise<RuleIsolationResult> {
+  const { data, error } = await supabase.functions.invoke('market-scan', {
+    body: {
+      mode: 'rule-isolation',
+      profile,
+      openTickers,
+      scanMode,
+      ...(scanMode === 'universe' && symbols && symbols.length > 0 ? { symbols } : {}),
+    },
+  });
+
+  if (error) throw new Error(error.message || 'Rule isolation test failed');
+  if (!data || data.success === false) throw new Error(data?.error || 'Rule isolation test returned failure');
+
+  return data as RuleIsolationResult;
+}

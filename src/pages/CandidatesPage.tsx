@@ -1,7 +1,9 @@
 import { useState, useMemo, Fragment } from 'react';
-import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check } from 'lucide-react';
+import { ChevronDown, Info, CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Pencil, Plus, Check, FlaskConical, Loader2 } from 'lucide-react';
 import type { CandidateScan, AppState } from '@/lib/types';
 import type { ScanMode } from '@/lib/liveMarketData';
+import type { RuleIsolationResult, RuleIsolationTestResult } from '@/lib/liveMarketData';
+import { runRuleIsolationTest } from '@/lib/liveMarketData';
 import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
@@ -34,6 +36,10 @@ export function CandidatesPage({
   const [sortKey, setSortKey] = useState<keyof CandidateScan>('net_croi');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [quoteModalRow, setQuoteModalRow] = useState<string | null>(null);
+  const [ruleIsolationLoading, setRuleIsolationLoading] = useState(false);
+  const [ruleIsolationResult, setRuleIsolationResult] = useState<RuleIsolationResult | null>(null);
+  const [ruleIsolationError, setRuleIsolationError] = useState<string | null>(null);
+  const [showRuleIsolation, setShowRuleIsolation] = useState(false);
 
   const scanMode: ScanMode = state.scanMode;
   const isDiscovery = scanMode === 'discovery';
@@ -108,6 +114,24 @@ export function CandidatesPage({
     state.updateCandidateWithQuote(rowKey, updates);
   };
 
+  const handleRunRuleIsolation = async () => {
+    if (!state.activeProfile) return;
+    setRuleIsolationLoading(true);
+    setRuleIsolationError(null);
+    setRuleIsolationResult(null);
+    setShowRuleIsolation(true);
+    try {
+      const openTickers = state.openPositions.map((p) => p.ticker.toUpperCase());
+      const symbols = state.scanMode === 'universe' ? state.scanUniverse : undefined;
+      const result = await runRuleIsolationTest(state.activeProfile, openTickers, state.scanMode, symbols);
+      setRuleIsolationResult(result);
+    } catch (err) {
+      setRuleIsolationError(err instanceof Error ? err.message : 'Rule isolation test failed');
+    } finally {
+      setRuleIsolationLoading(false);
+    }
+  };
+
   const colCount = 16;
 
   return (
@@ -168,6 +192,44 @@ export function CandidatesPage({
         </div>
       )}
 
+      {showRuleIsolation && (
+        <div className="rounded-xl border border-cyan-500/30 bg-slate-900/70 p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-cyan-300 flex items-center gap-2">
+              <FlaskConical className="h-4 w-4" />
+              Rule Isolation Test
+            </h2>
+            <button
+              onClick={() => setShowRuleIsolation(false)}
+              className="text-slate-500 hover:text-slate-300 text-xs"
+            >
+              Close
+            </button>
+          </div>
+
+          {ruleIsolationLoading && (
+            <div className="flex items-center gap-2 text-sm text-slate-400">
+              <Loader2 className="h-4 w-4 animate-spin text-cyan-400" />
+              Running deterministic rule tests on finalized scan dataset...
+            </div>
+          )}
+
+          {ruleIsolationError && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm text-red-400">
+              {ruleIsolationError}
+            </div>
+          )}
+
+          {ruleIsolationResult && !ruleIsolationLoading && (
+            <RuleIsolationPanel result={ruleIsolationResult} />
+          )}
+
+          {!ruleIsolationLoading && !ruleIsolationResult && !ruleIsolationError && (
+            <p className="text-sm text-slate-500">Click "Rule Isolation Test" to run.</p>
+          )}
+        </div>
+      )}
+
       {/* Scan Mode Selector */}
       <div className="flex flex-wrap items-center gap-4">
         <div>
@@ -179,6 +241,15 @@ export function CandidatesPage({
           </p>
         </div>
         <div className="flex items-center gap-2 ml-auto">
+          <button
+            onClick={handleRunRuleIsolation}
+            disabled={ruleIsolationLoading || !state.activeProfile}
+            className="flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/20 transition-colors disabled:opacity-50"
+            title="Run deterministic rule isolation test on the current scan dataset"
+          >
+            {ruleIsolationLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+            Rule Isolation Test
+          </button>
           <span className="text-xs text-slate-500 mr-1">Scan Mode</span>
           <div className="inline-flex rounded-lg border border-slate-700 bg-slate-800/50 p-0.5">
             <button
@@ -427,6 +498,122 @@ function ScanCountItem({ label, value, color = 'text-slate-200', isText = false 
     <div className="text-center">
       <div className="text-xs text-slate-500">{label}</div>
       <div className={`text-sm font-semibold ${isText ? '' : 'tabular-nums'} ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+function RuleIsolationPanel({ result }: { result: RuleIsolationResult }) {
+  const [expandedTest, setExpandedTest] = useState<string | null>(null);
+
+  const hasBug = result.tests.some((t, i) => i > 0 && t.changes.some((c) => c.ticker === 'BUG'));
+
+  return (
+    <div className="space-y-4">
+      {hasBug && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-400">
+          BUG detected: a filter produced MORE qualified candidates than baseline. See changed tickers below.
+        </div>
+      )}
+
+      <div className="text-xs text-slate-500">
+        {result.contracts_captured} contracts captured · {result.tickers_with_technicals} tickers with technical data
+      </div>
+
+      {/* Summary table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="border-b border-slate-800">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-slate-400">Test</th>
+              <th className="px-3 py-2 text-right text-xs font-medium text-slate-400">Qualified</th>
+              <th className="px-3 py-2 text-right text-xs font-medium text-slate-400">Tickers</th>
+              <th className="px-3 py-2 text-right text-xs font-medium text-slate-400">Pending</th>
+              <th className="px-3 py-2 text-right text-xs font-medium text-slate-400">Rejected</th>
+              <th className="px-3 py-2 text-right text-xs font-medium text-slate-400">Changed</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-800/60">
+            {result.tests.map((t: RuleIsolationTestResult) => (
+              <tr
+                key={t.name}
+                onClick={() => setExpandedTest(expandedTest === t.name ? null : t.name)}
+                className={`cursor-pointer hover:bg-slate-800/40 transition-colors ${t.name === 'Baseline' ? 'bg-slate-800/20' : ''}`}
+              >
+                <td className="px-3 py-2 font-medium text-slate-200">{t.name}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-emerald-400">{t.qualified}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-300">{t.qualified_tickers.length}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-amber-400">{t.pending}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-red-400">{t.rejected}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-400">{t.changes.length}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Changed tickers for expanded test */}
+      {expandedTest && (() => {
+        const test = result.tests.find((t) => t.name === expandedTest);
+        if (!test) return null;
+        const realChanges = test.changes.filter((c) => c.ticker !== 'BUG');
+        const bugChanges = test.changes.filter((c) => c.ticker === 'BUG');
+        return (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-3 space-y-2">
+            <h3 className="text-xs font-semibold text-slate-300">{expandedTest} — Changed Tickers</h3>
+            {bugChanges.map((c, i) => (
+              <div key={`bug-${i}`} className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400 font-medium">
+                {c.reason}
+              </div>
+            ))}
+            {realChanges.length === 0 ? (
+              <p className="text-xs text-slate-500">No changes from baseline.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="border-b border-slate-800">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left text-slate-400">Ticker</th>
+                      <th className="px-2 py-1.5 text-left text-slate-400">Strike</th>
+                      <th className="px-2 py-1.5 text-left text-slate-400">Exp</th>
+                      <th className="px-2 py-1.5 text-left text-slate-400">Baseline</th>
+                      <th className="px-2 py-1.5 text-left text-slate-400">Test</th>
+                      <th className="px-2 py-1.5 text-left text-slate-400">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/40">
+                    {realChanges.map((c, i) => (
+                      <tr key={i} className="hover:bg-slate-800/30">
+                        <td className="px-2 py-1.5 font-semibold text-slate-200">{c.ticker}</td>
+                        <td className="px-2 py-1.5 text-slate-300">${formatNum(c.strike)}</td>
+                        <td className="px-2 py-1.5 text-slate-400">{c.expiration}</td>
+                        <td className="px-2 py-1.5">
+                          <span className={c.baseline_status === 'Qualified' ? 'text-emerald-400' : c.baseline_status === 'Pending' ? 'text-amber-400' : 'text-red-400'}>
+                            {c.baseline_status}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <span className={c.test_status === 'Qualified' ? 'text-emerald-400' : c.test_status === 'Pending' ? 'text-amber-400' : 'text-red-400'}>
+                            {c.test_status}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-400">{c.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {test.qualified_tickers.length > 0 && (
+              <div className="flex flex-wrap gap-1 pt-1">
+                <span className="text-xs text-slate-500">Qualified tickers:</span>
+                {test.qualified_tickers.map((t) => (
+                  <span key={t} className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-400">{t}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
