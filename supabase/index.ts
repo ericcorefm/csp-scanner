@@ -4,6 +4,13 @@
 //   "discovery" — scan broad universe from market_universe table
 //   "universe"  — scan user's enabled scan_universe tickers
 //   "analyze"   — deep-analyze a single ticker (replaces analyze-ticker)
+//   "chart-bars"— OHLCV bars for the chart
+//
+// Qualification model (identical for scans and Analyze Ticker):
+//   any enabled hard rule definitely fails            → Rejected
+//   no failures, but data for an enabled rule missing → Pending
+//   every enabled rule has data and passes            → Qualified
+// Disabled rules have zero effect.
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
@@ -16,7 +23,6 @@ const corsHeaders = {
 const MASSIVE_API = 'https://api.massive.com';
 const MAX_CHAIN_PAGES = 10;
 const MAX_DISCOVERY_SYMBOLS = 250;
-const MAX_CANDIDATES = 50;
 
 type Profile = {
   id: string;
@@ -71,8 +77,9 @@ async function fetchGroupedDailyPrices(
   apiKey: string,
   today: Date,
   fmt: (d: Date) => string,
-): Promise<{ priceMap: Map<string, number>; tradingDate: string | null; httpStatus: number | null }> {
+): Promise<{ priceMap: Map<string, number>; barMap: Map<string, HistoryBar>; tradingDate: string | null; httpStatus: number | null }> {
   const priceMap = new Map<string, number>();
+  const barMap = new Map<string, HistoryBar>();
   let lastHttpStatus: number | null = null;
 
   // Stocks Basic is end-of-day and limited to 5 stock API calls/minute.
@@ -112,19 +119,24 @@ async function fetchGroupedDailyPrices(
       const close = Number(r.c || r.close || 0);
       if (ticker && Number.isFinite(close) && close > 0) {
         priceMap.set(ticker, close);
+        barMap.set(ticker, {
+          date: dateStr,
+          open: Number(r.o || close), high: Number(r.h || close), low: Number(r.l || close),
+          close, volume: Number(r.v || 0),
+        });
       }
     }
 
     if (priceMap.size > 0) {
       console.log(`[GroupedDaily] Found ${priceMap.size} stock prices for completed trading date ${dateStr}`);
       console.log(`[PRICE BULK] HTTP ${lastHttpStatus} | trading_date=${dateStr} | prices_returned=${priceMap.size}`);
-      return { priceMap, tradingDate: dateStr, httpStatus: lastHttpStatus };
+      return { priceMap, barMap, tradingDate: dateStr, httpStatus: lastHttpStatus };
     }
   }
 
   console.log(`[PRICE BULK] HTTP ${lastHttpStatus} | trading_date=null | prices_returned=0 — GROUPED FAILED, using fallbacks`);
   console.log('[GroupedDaily] No completed grouped daily response available');
-  return { priceMap, tradingDate: null, httpStatus: lastHttpStatus };
+  return { priceMap, barMap, tradingDate: null, httpStatus: lastHttpStatus };
 }
 
 type ChainStatus = 'success' | 'no_options' | 'api_error' | 'unauthorized' | 'rate_limited' | 'network_error';
@@ -197,8 +209,10 @@ async function fetchScanUniverse(): Promise<{ ticker: string; company_name: stri
 async function fetchMarketUniverse(limit: number): Promise<{ ticker: string; company_name: string | null }[]> {
   const rows = await supabaseSelect('market_universe', 'ticker,company_name', 'active=eq.true&optionable=eq.true&order=ticker');
   const mapped = (rows || []).map((r: any) => ({ ticker: String(r.ticker).toUpperCase(), company_name: r.company_name || null }));
-  const shuffled = mapped.sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, limit);
+  // Deterministic order. This used to be a random shuffle, so every Rescan
+  // processed symbols in a different order (and, with the old early-stop,
+  // scanned a different subset) — a direct cause of inconsistent results.
+  return mapped.sort((a, b) => a.ticker.localeCompare(b.ticker)).slice(0, limit);
 }
 
 async function fetchLatestCandidateStockPrice(ticker: string): Promise<number | null> {
@@ -306,7 +320,7 @@ async function loadCachedHistory(ticker: string, maxBars = 250): Promise<History
       low: Number(r.low || 0),
       close: Number(r.close || 0),
       volume: Number(r.volume || 0),
-    })).filter((b) => Number.isFinite(b.close) && b.close > 0).reverse();
+    })).filter((b) => Number.isFinite(b.close) && b.close > 0 && !isWeekendDate(b.date)).reverse();
   } catch {
     return [];
   }
@@ -346,6 +360,36 @@ async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<vo
   } catch (e) {
     console.log(`[Cache SAVE ERROR] ${ticker} | ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+// Append the grouped-daily bar (one API call covers every ticker) to the
+// history cache for all scanned symbols. This keeps technical history current
+// every trading day without spending one rate-limited request per ticker.
+async function saveGroupedBarsToCache(barMap: Map<string, HistoryBar>, tickers: string[]): Promise<number> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey || barMap.size === 0) return 0;
+  const now = new Date().toISOString();
+  const rows = tickers
+    .map((t) => ({ t, b: barMap.get(t) }))
+    .filter((x) => x.b)
+    .map(({ t, b }) => ({ ticker: t, trade_date: b!.date, open: b!.open, high: b!.high, low: b!.low, close: b!.close, volume: b!.volume, updated_at: now }));
+  let saved = 0;
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    try {
+      const resp = await fetch(`${supabaseUrl}/rest/v1/stock_history_cache`, {
+        method: 'POST',
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+        body: JSON.stringify(chunk),
+      });
+      if (resp.ok) saved += chunk.length;
+      else console.log(`[GroupedBars SAVE FAIL] HTTP ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+    } catch (e) {
+      console.log(`[GroupedBars SAVE ERROR] ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return saved;
 }
 
 // ── Weekly / Monthly aggregation from daily bars ──
@@ -396,15 +440,25 @@ function sma(values: number[], n: number) {
   return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
 
-function rsi(values: number[], period = 14) {
-  if (values.length <= period) return 50;
-  let gains = 0, losses = 0;
-  for (let i = values.length - period; i < values.length; i++) {
+// Wilder's RSI (same method TradingView uses), seeded with a simple average of
+// the first `period` changes and smoothed across all available history.
+// Returns null when there is not enough data — never a fake neutral value.
+function rsi(values: number[], period = 14): number | null {
+  if (values.length <= period) return null;
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
     const d = values[i] - values[i - 1];
-    if (d >= 0) gains += d; else losses -= d;
+    if (d >= 0) avgGain += d; else avgLoss -= d;
   }
-  if (losses === 0) return 70;
-  const rs = (gains / period) / (losses / period);
+  avgGain /= period;
+  avgLoss /= period;
+  for (let i = period + 1; i < values.length; i++) {
+    const d = values[i] - values[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(d, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-d, 0)) / period;
+  }
+  if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
+  const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
 }
 
@@ -533,7 +587,7 @@ function trend(bars: HistoryBar[]) {
   const price = closes.at(-1) || 0;
   const ma20 = sma(closes, 20);
   const ma50 = sma(closes, 50);
-  const rr = rsi(closes);
+  const rr = rsi(closes) ?? 50;
   // If we have 200+ bars, use full MA200-based trend
   if (closes.length >= 200) {
     const ma200 = sma(closes, 200);
@@ -607,9 +661,7 @@ function volClass(v: number) {
 }
 
 function isSectionOff(profile: Profile, key: keyof Profile): boolean {
-  // Only an explicit true enables a section. Treat missing/undefined fields as OFF
-  // so older/stale profiles cannot silently activate newly-added rules.
-  return profile[key] !== true;
+  return profile[key] === false;
 }
 
 // ── Robust date parsing for expiration_date from Massive ──
@@ -720,9 +772,58 @@ type StockSnapshot = {
   historyHttpStatus?: number;
 };
 
-// Per-request cache: ticker -> StockSnapshot. Avoids re-fetching history
-// for symbols that appear multiple times (e.g. HUT with 20 contracts).
-const stockCache = new Map<string, StockSnapshot>();
+// Request-scoped state. Previously these were module-level globals, which a
+// concurrent request (e.g. Analyze during a Rescan) could clear mid-scan.
+type ScanContext = {
+  stockCache: Map<string, StockSnapshot>;
+  // Raw option-chain results per symbol, so the cache-warming re-evaluation
+  // uses the SAME quotes as the first pass (no second chain fetch, no drift).
+  chainCache: Map<string, { contracts: any[]; pages: number }>;
+  // Latest completed trading date (YYYY-MM-DD). Cache is "fresh" if it has this bar.
+  expectedLatestDate: string;
+  // Once Massive returns 429 for stock history, stop asking in this request.
+  historyRateLimited: boolean;
+  historyFetchAttempts: number;
+};
+
+function newScanContext(expectedLatestDate: string): ScanContext {
+  return { stockCache: new Map(), chainCache: new Map(), expectedLatestDate, historyRateLimited: false, historyFetchAttempts: 0 };
+}
+
+// Most recent weekday strictly before `today` (holidays are handled by the
+// grouped-daily walk-back; here a holiday just costs one extra fetch in Analyze).
+function lastCompletedBusinessDay(today: Date, fmt: (d: Date) => string): string {
+  const d = new Date(today);
+  d.setDate(d.getDate() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+  return fmt(d);
+}
+
+// Keep only the trailing run of bars without a data gap. A gap (2+ consecutive
+// missing business days) means the cache skipped days — indicators computed
+// across it would be wrong, so they must be treated as insufficient history.
+function trailingContiguousBars(bars: HistoryBar[]): HistoryBar[] {
+  if (bars.length < 2) return bars;
+  for (let i = bars.length - 1; i > 0; i--) {
+    const cur = new Date(bars[i].date + 'T00:00:00Z');
+    const prev = new Date(bars[i - 1].date + 'T00:00:00Z');
+    let missingBusinessDays = 0;
+    const d = new Date(prev);
+    d.setUTCDate(d.getUTCDate() + 1);
+    while (d < cur) {
+      const dow = d.getUTCDay();
+      if (dow !== 0 && dow !== 6) missingBusinessDays++;
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    if (missingBusinessDays > 1) return bars.slice(i);
+  }
+  return bars;
+}
+
+function isWeekendDate(date: string): boolean {
+  const dow = new Date(date + 'T00:00:00Z').getUTCDay();
+  return dow === 0 || dow === 6;
+}
 
 type TechnicalRejections = {
   rsi_below_min: number;
@@ -793,22 +894,24 @@ type ScanSymbolResult = {
   resistance?: number | null;
   trendClass?: string;
   technicalDataAvailable?: boolean;
-  historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
+  historyStatus?: 'success' | 'partial' | 'fallback' | 'empty' | 'error';
   historyError?: string;
-  technical?: { rsi: number; ma20: number; ma50: number; ma200: number | null; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
+  technical?: { rsi: number | null; ma20: number | null; ma50: number | null; ma200: number | null; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
   techRejections?: TechnicalRejections;
   orderStrikeRejections?: OrderStrikeRejections;
   historyBarCount?: number;
   supportDistanceDebug?: SupportDistanceDebug;
+  needsHistoryBars?: number; // bars required by the active rules
 };
 
 // ── Cache-first stock history fetcher ──
 // 1. Load cached bars from Supabase stock_history_cache
-// 2. If cache has enough recent bars, use them directly
-// 3. If cache is stale or incomplete, fetch from Massive daily aggregates
-// 4. Save new bars back to cache
-// Stock price comes from the bulk grouped daily (passed in) or from the
-// latest historical close. History is only for technicals.
+// 2. Cache is fresh if it contains the latest completed trading day
+//    (the grouped-daily bar saved at scan start keeps it fresh for free)
+// 3. Only if live history is allowed AND the cache is stale/short/gapped,
+//    fetch ~18 months of daily aggregates from Massive and save them back
+// 4. Only the trailing gap-free run of bars is used for indicators
+// Stock price comes from grouped daily (passed in) or the latest close.
 // No retries on 401/403/429 — only one retry on network error or 5xx.
 async function getStockSnapshot(
   ticker: string,
@@ -816,28 +919,23 @@ async function getStockSnapshot(
   today: Date,
   fmt: (d: Date) => string,
   bulkStockPrice: number | null,
-  allowLiveHistory = true,
+  allowLiveHistory: boolean,
+  minHistoryBarsForFetch: number,
+  ctx: ScanContext,
 ): Promise<StockSnapshot> {
   const upper = ticker.toUpperCase();
-  const cached = stockCache.get(upper);
+  const cached = ctx.stockCache.get(upper);
   if (cached) {
-    // Edge Function isolates can stay warm across multiple HTTP requests.
-    // Never let an old/empty snapshot poison a later Analyze request.
-    if (bulkStockPrice !== null && Number.isFinite(bulkStockPrice) && bulkStockPrice > 0) {
-      const refreshed: StockSnapshot = {
-        ...cached,
-        currentPrice: bulkStockPrice,
-        source: 'grouped_daily',
-        error: null,
-      };
-      stockCache.set(upper, refreshed);
-      return refreshed;
-    }
-    if (cached.currentPrice !== null || cached.historicalBars.length > 0) {
+    const cacheCoversRequest = cached.historicalBars.length >= minHistoryBarsForFetch || !allowLiveHistory;
+    if (cacheCoversRequest && (cached.currentPrice !== null || cached.historicalBars.length > 0)) {
+      if (bulkStockPrice !== null && Number.isFinite(bulkStockPrice) && bulkStockPrice > 0 && cached.currentPrice !== bulkStockPrice) {
+        const refreshed: StockSnapshot = { ...cached, currentPrice: bulkStockPrice, source: 'grouped_daily', error: null };
+        ctx.stockCache.set(upper, refreshed);
+        return refreshed;
+      }
       return cached;
     }
-    // Empty cached snapshot: discard it and try live/persistent fallbacks again.
-    stockCache.delete(upper);
+    ctx.stockCache.delete(upper);
   }
 
   let currentPrice: number | null = null;
@@ -851,117 +949,101 @@ async function getStockSnapshot(
     source = 'grouped_daily';
   }
 
-  // 2. Load cached bars from Supabase
-  let bars = await loadCachedHistory(upper, 260);
-
-  // Determine the latest cached date to decide if we need fresh data
-  const latestCachedDate = bars.length > 0 ? bars.at(-1)!.date : null;
+  // 2. Load cached bars from Supabase; use only the trailing gap-free run
   const todayStr = fmt(today);
-  const needsFresh = latestCachedDate === null || latestCachedDate < todayStr;
+  let bars = trailingContiguousBars((await loadCachedHistory(upper, 300)).filter((b) => b.date < todayStr));
 
-  // 3. If cache is insufficient or stale, fetch from Massive daily aggregates
-  // Use ~18 calendar months of history (enough for 200 DMA with holidays)
-  const start = new Date(today);
-  start.setDate(start.getDate() - 548); // ~18 months
+  const latestCachedDate = bars.length > 0 ? bars.at(-1)!.date : null;
+  const isStale = latestCachedDate === null || latestCachedDate < ctx.expectedLatestDate;
+  const isShort = bars.length < minHistoryBarsForFetch;
+  const wantsFetch = minHistoryBarsForFetch > 0 && (isShort || isStale);
 
-  if (allowLiveHistory && (needsFresh || bars.length < 60)) {
+  if (allowLiveHistory && wantsFetch && !ctx.historyRateLimited) {
+    const start = new Date(today);
+    start.setDate(start.getDate() - 548); // ~18 months: enough for MA200 with holidays
     const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
+    ctx.historyFetchAttempts++;
     let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
-
-    // Only retry on network error (status 0) or 5xx — NOT on 401/403/429
     if (!histResult.ok && isRetryableStatus(histResult.status)) {
       histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
     }
     historyHttpStatus = histResult.ok ? 200 : histResult.status;
 
-    // Explicitly log 403/429 for debug tickers without retrying
-    if (!histResult.ok && (histResult.status === 403 || histResult.status === 429)) {
-      console.log(`[History] ${upper} | HTTP ${histResult.status} — NOT retrying (non-retryable)`);
+    if (!histResult.ok && histResult.status === 429) {
+      // Stocks Basic allows only a few calls per minute. Stop hammering it for
+      // the rest of this request; remaining tickers stay Pending (honestly).
+      ctx.historyRateLimited = true;
     }
 
     if (histResult.ok) {
-      const freshBars = (histResult.data?.results || []).map((b: any) => ({
+      // Completed sessions only — a partial "today" bar would make RSI/support
+      // change during the day and differ between Rescan and Analyze.
+      const freshBars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
         date: new Date(b.t).toISOString().slice(0, 10),
         open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
-      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0 && b.date < todayStr && !isWeekendDate(b.date));
 
       if (freshBars.length > 0) {
-        // Merge fresh bars with cached bars (dedup by date)
         const barMap = new Map<string, HistoryBar>();
         for (const b of bars) barMap.set(b.date, b);
         for (const b of freshBars) barMap.set(b.date, b); // fresh overrides cached
-        bars = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
-
-        // Save fresh bars to cache (only the new ones to minimize writes)
-        const cachedDates = new Set(bars.filter(b => b.date <= (latestCachedDate || '')).map(b => b.date));
-        const newBars = freshBars.filter(b => !cachedDates.has(b.date));
-        if (newBars.length > 0) {
-          await saveCachedHistory(upper, freshBars); // upsert all fresh bars
-          if (DEBUG_TICKERS.has(upper)) {
-            console.log(`[Cache] ${upper} | saved ${freshBars.length} bars to cache`);
-          }
-        }
-
-        // Use latest close as price fallback if no bulk price
-        if (currentPrice === null) {
-          currentPrice = Number(bars.at(-1)!.close);
-          source = 'daily_aggregates';
-        }
-      }
-    } else {
-      if (!error) {
-        error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
-      }
-      // If we have cached bars but fresh fetch failed, still use cached bars
-      if (bars.length > 0 && currentPrice === null) {
-        currentPrice = Number(bars.at(-1)!.close);
-        source = 'daily_aggregates';
-      }
-    }
-  } else if (!allowLiveHistory && (needsFresh || bars.length < 60)) {
-    // Broad Market Discovery / Scan Universe runs on Stocks Basic.
-    // Never make one stock-history request per symbol; use the grouped close for
-    // Price and any already-cached bars for technicals. Analyze Ticker can fetch
-    // fresh history for a single symbol.
-    historyHttpStatus = bars.length > 0 ? 200 : undefined;
-    if (currentPrice === null && bars.length > 0) {
-      currentPrice = Number(bars.at(-1)!.close);
-      source = 'daily_aggregates';
-    }
-  } else {
-    // Cache is sufficient — use cached bars, no Massive call needed
-    historyHttpStatus = 200;
-    if (currentPrice === null && bars.length > 0) {
-      currentPrice = Number(bars.at(-1)!.close);
-      source = 'daily_aggregates';
-    }
-    if (DEBUG_TICKERS.has(upper)) {
-      console.log(`[Cache] ${upper} | using ${bars.length} cached bars (no Massive call needed)`);
-    }
-  }
-
-  // 4. Fallback: previous close — only if we still have NO price at all
-  if (currentPrice === null) {
-    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
-    const prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
-    // No retry on 401/403/429
-    if (prevResult.ok) {
-      const prevBars = (prevResult.data?.results || []).map((b: any) => ({
-        date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
-        open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
-      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-      if (prevBars.length) {
-        currentPrice = Number(prevBars.at(-1)!.close);
-        source = 'previous_close';
+        bars = trailingContiguousBars(Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date)));
+        await saveCachedHistory(upper, freshBars);
       }
     } else if (!error) {
-      error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
+      error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+    }
+  } else if (allowLiveHistory && wantsFetch && ctx.historyRateLimited) {
+    error = 'History fetch skipped — Massive rate limit reached earlier in this request';
+  }
+
+  if (currentPrice === null && bars.length > 0) {
+    currentPrice = Number(bars.at(-1)!.close);
+    source = 'daily_aggregates';
+  }
+  if (historyHttpStatus === undefined && bars.length > 0) historyHttpStatus = 200;
+
+  // 4. Fallback: previous close — only if we still have NO price at all
+  if (currentPrice === null && allowLiveHistory && !ctx.historyRateLimited) {
+    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
+    const prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
+    if (prevResult.ok) {
+      const prevBars = (prevResult.data?.results || []).map((b: any) => Number(b.c || 0)).filter((c: number) => Number.isFinite(c) && c > 0);
+      if (prevBars.length) {
+        currentPrice = Number(prevBars.at(-1));
+        source = 'previous_close';
+      }
+    } else {
+      if (prevResult.status === 429) ctx.historyRateLimited = true;
+      if (!error) error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
     }
   }
 
   const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error, historyHttpStatus };
-  stockCache.set(upper, snapshot);
+  ctx.stockCache.set(upper, snapshot);
   return snapshot;
+}
+
+// ── One ranking used everywhere (Today's Candidates, Analyze best contract,
+// per-ticker response cap). Must match src/lib/status.ts on the client. ──
+// Qualified > Pending > Rejected, then higher option volume, lower Premium
+// Capture (contracts without a premium rank last), higher Net CROI, higher OI.
+function contractStatusRank(c: any): number {
+  if (c.qualified && !c.technical_pending) return 0;
+  if (c.technical_pending) return 1;
+  return 2;
+}
+function compareContracts(a: any, b: any): number {
+  const sa = contractStatusRank(a), sb = contractStatusRank(b);
+  if (sa !== sb) return sa - sb;
+  const va = Number(a.volume || 0), vb = Number(b.volume || 0);
+  if (va !== vb) return vb - va;
+  const pa = a.has_quotes ? Number(a.premium_capture ?? Infinity) : Infinity;
+  const pb = b.has_quotes ? Number(b.premium_capture ?? Infinity) : Infinity;
+  if (pa !== pb) return pa - pb;
+  const ca = Number(a.net_croi || 0), cb = Number(b.net_croi || 0);
+  if (ca !== cb) return cb - ca;
+  return Number(b.open_interest || 0) - Number(a.open_interest || 0);
 }
 
 async function scanSymbol(
@@ -975,8 +1057,9 @@ async function scanSymbol(
   fmt: (d: Date) => string,
   verbose: boolean,
   analyzeMode: boolean,
-  bulkStockPrice: number | null = null,
-  allowLiveHistory: boolean = false,
+  bulkStockPrice: number | null,
+  allowLiveHistory: boolean,
+  ctx: ScanContext,
 ): Promise<ScanSymbolResult> {
   const r: ScanSymbolResult = {
     candidates: [],
@@ -991,11 +1074,33 @@ async function scanSymbol(
     supportDistanceDebug: { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] },
   };
 
-  // Step 1: Stock snapshot via shared function (cached per ticker)
-  // For discovery/universe mode, bulkStockPrice from grouped daily is passed in.
-  // For analyze mode, bulkStockPrice is null so getStockSnapshot falls back to history.
-  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice, analyzeMode || allowLiveHistory);
-  let bars = snapshot.historicalBars;
+  // ── Which rules are active (single source of truth for this contract set) ──
+  // The master Technical Rules toggle alone never requires data or changes
+  // results; only individual rules that are actually set do.
+  const technicalSectionOn = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled');
+  const rsiActive = technicalSectionOn && (profile.rsi_min != null || profile.rsi_max != null);
+  const ma20AboveMa50Active = technicalSectionOn && profile.require_ma20_above_ma50 === true;
+  const ma50AboveMa200Active = technicalSectionOn && profile.require_ma50_above_ma200 === true;
+  const priceAboveMa200Active = technicalSectionOn && profile.require_price_above_ma200 === true;
+  const downtrendRuleActive = technicalSectionOn && profile.exclude_downtrend_no_support === true;
+  const hasActiveTechnicalRule = rsiActive || ma20AboveMa50Active || ma50AboveMa200Active || priceAboveMa200Active || downtrendRuleActive;
+  // Support Distance is its own section and only counts when a bound is set.
+  const supportDistanceActive = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') &&
+    (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
+
+  // Minimum bars needed to evaluate the ACTIVE rules only (0 if none).
+  let minBarsRequired = 0;
+  if (rsiActive) minBarsRequired = Math.max(minBarsRequired, 20);
+  if (ma20AboveMa50Active) minBarsRequired = Math.max(minBarsRequired, 50);
+  if (downtrendRuleActive || supportDistanceActive) minBarsRequired = Math.max(minBarsRequired, 60);
+  if (ma50AboveMa200Active || priceAboveMa200Active) minBarsRequired = Math.max(minBarsRequired, 200);
+  r.needsHistoryBars = minBarsRequired;
+
+  // Analyze Ticker always tries to have 60 bars so it can DISPLAY technicals;
+  // that never changes evaluation, which depends only on the active rules.
+  const fetchBars = analyzeMode ? Math.max(minBarsRequired, 60) : minBarsRequired;
+  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice, analyzeMode || allowLiveHistory, fetchBars, ctx);
+  const bars = snapshot.historicalBars;
   let stockPrice: number | null = snapshot.currentPrice;
   r.stockSource = snapshot.source;
 
@@ -1018,58 +1123,17 @@ async function scanSymbol(
     r.historyStatus = 'empty';
   }
 
-  // Determine if any individual technical rule is actually active.
-  // The master toggle alone must NOT require history or affect qualification.
-  const hasActiveTechnicalRule =
-    !noFilterMode &&
-    !isSectionOff(profile, 'technical_rules_enabled') &&
-    (
-      profile.rsi_min != null ||
-      profile.rsi_max != null ||
-      profile.require_ma20_above_ma50 === true ||
-      profile.require_ma50_above_ma200 === true ||
-      profile.require_price_above_ma200 === true ||
-      profile.exclude_downtrend_no_support === true
-    );
-
-  // Required bars depends only on the actual enabled rules, not the master toggle.
-  let requiredHistoryBars = 0;
-  if (hasActiveTechnicalRule) {
-    if (
-      profile.rsi_min != null ||
-      profile.rsi_max != null ||
-      profile.require_ma20_above_ma50 ||
-      profile.exclude_downtrend_no_support
-    ) {
-      requiredHistoryBars = Math.max(requiredHistoryBars, 60);
-    }
-    if (
-      profile.require_ma50_above_ma200 ||
-      profile.require_price_above_ma200
-    ) {
-      requiredHistoryBars = Math.max(requiredHistoryBars, 200);
-    }
-  }
-
-  const needsMA200 = hasActiveTechnicalRule && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
-
-  // Base technicals (RSI, MA20, MA50, MACD, BB, support/trend) need 60 bars.
-  // MA200-dependent rules need 200 bars. We track both separately.
-  const baseTechnicalDataAvailable = bars.length >= 60;
   const ma200DataAvailable = bars.length >= 200;
-  const technicalDataAvailable = hasActiveTechnicalRule ? (needsMA200 ? ma200DataAvailable : baseTechnicalDataAvailable) : baseTechnicalDataAvailable;
+  const technicalDataAvailable = bars.length >= minBarsRequired;
   r.technicalDataAvailable = technicalDataAvailable;
   r.historyBarCount = bars.length;
 
-  // If we have 60+ bars but not 200, we can still compute base technicals
-  // (RSI, MA20, MA50, support, trend) but MA200 will be 0 and MA200-dependent
-  // rules must be Pending, not Rejected.
-  const canComputeBaseTechnicals = baseTechnicalDataAvailable;
-
-  let primarySupport: number | null = canComputeBaseTechnicals && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
-  let secondarySupport: number | null = canComputeBaseTechnicals && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
-  let resistance: number | null = canComputeBaseTechnicals && stockPrice !== null && stockPrice > 0 ? findResistance(bars, stockPrice) : null;
-  let trendClass = canComputeBaseTechnicals ? trend(bars) : 'Pending';
+  // Support/trend require 60 bars regardless of RSI-only rules.
+  const supportDataAvailable = bars.length >= 60;
+  let primarySupport: number | null = supportDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
+  let secondarySupport: number | null = supportDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
+  let resistance: number | null = supportDataAvailable && stockPrice !== null && stockPrice > 0 ? findResistance(bars, stockPrice) : null;
+  const trendClass = supportDataAvailable ? trend(bars) : 'Pending';
 
   r.stockPrice = stockPrice;
   r.primarySupport = primarySupport;
@@ -1086,15 +1150,21 @@ async function scanSymbol(
   }
 
 
-  if (canComputeBaseTechnicals) {
+  // Compute technicals whenever we have enough bars for ANY indicator.
+  // RSI needs 15, MA20 needs 20, MA50 needs 50, MA200 needs 200.
+  // Compute what we can; missing indicators stay null/0.
+  if (bars.length >= 20) {
     const closes = bars.map((b) => b.close);
-    const m = macd(closes);
-    const bb = bollingerBands(closes);
+    // Fixed 250-bar window so Rescan and Analyze get the identical RSI even if
+    // one of them holds a longer history slice.
+    const rsiValue = rsi(closes.slice(-250));
+    const m = closes.length >= 26 ? macd(closes) : { macd: 0, signal: 0, histogram: 0 };
+    const bb = closes.length >= 20 ? bollingerBands(closes) : { upper: 0, middle: 0, lower: 0, position: 'Insufficient data' };
     const has200 = closes.length >= 200;
     r.technical = {
-      rsi: Number(rsi(closes).toFixed(1)),
-      ma20: Number(sma(closes, 20).toFixed(2)),
-      ma50: Number(sma(closes, 50).toFixed(2)),
+      rsi: rsiValue !== null ? Number(rsiValue.toFixed(1)) : null,
+      ma20: closes.length >= 20 ? Number(sma(closes, 20).toFixed(2)) : null,
+      ma50: closes.length >= 50 ? Number(sma(closes, 50).toFixed(2)) : null,
       ma200: has200 ? Number(sma(closes, 200).toFixed(2)) : null,
       macd: m.macd,
       macd_signal: m.signal,
@@ -1134,6 +1204,14 @@ async function scanSymbol(
   let sampleWithQuote: any = null;
   let sampleWithoutQuote: any = null;
   let sampleOtherInvalid: any = null;
+
+  const cachedChain = ctx.chainCache.get(symbol.toUpperCase());
+  if (cachedChain) {
+    // Re-evaluation pass: reuse the exact chain from the first pass.
+    allRawContracts.push(...cachedChain.contracts);
+    pageCount = cachedChain.pages;
+    currentPath = '';
+  }
 
   while (currentPath && pageCount < MAX_CHAIN_PAGES) {
     pageCount++;
@@ -1178,21 +1256,23 @@ async function scanSymbol(
     } else { currentPath = ''; }
   }
 
+  if (!chainError && !cachedChain) {
+    ctx.chainCache.set(symbol.toUpperCase(), { contracts: allRawContracts, pages: pageCount });
+  }
+
   // Determine chain status
   const contracts = allRawContracts.filter((c: any) => c?.details?.contract_type === 'put');
   r.putsReturned = contracts.length;
 
   // ── Tier 2: Option snapshot underlying_asset price ──
   // Always extract it (even if we already have a price) so we can save it to cache.
-  let optionUnderlyingPrice: number | null = null;
   if (allRawContracts.length) {
     const underlyingPrice = allRawContracts
       .map((c: any) => Number(c?.underlying_asset?.price || c?.underlying_asset?.value || 0))
       .find((v: number) => Number.isFinite(v) && v > 0) || 0;
     if (underlyingPrice > 0) {
-      optionUnderlyingPrice = underlyingPrice;
       // Save to persistent price cache
-      void saveCachedStockPrice(symbol, underlyingPrice, 'option_snapshot', fmt(today));
+      if (!cachedChain) void saveCachedStockPrice(symbol, underlyingPrice, 'option_snapshot', fmt(today));
       // Use as stock price if we don't already have one from grouped daily
       if (stockPrice === null || stockPrice <= 0) {
         stockPrice = underlyingPrice;
@@ -1232,7 +1312,7 @@ async function scanSymbol(
 
   // If price was discovered only after the option snapshot arrived, recalculate
   // price-dependent technical levels now. Previously these stayed null forever.
-  if (stockPrice !== null && stockPrice > 0 && canComputeBaseTechnicals) {
+  if (stockPrice !== null && stockPrice > 0 && supportDataAvailable) {
     if (primarySupport === null) primarySupport = calcPrimarySupport(bars, stockPrice);
     if (secondarySupport === null && primarySupport !== null) secondarySupport = calcSecondarySupport(bars, primarySupport);
     if (resistance === null) resistance = findResistance(bars, stockPrice);
@@ -1243,14 +1323,6 @@ async function scanSymbol(
     r.trendClass = trendClass;
   } else {
     r.stockPrice = stockPrice;
-  }
-
-  // Per-ticker price resolution logging for debug tickers
-  const PRICE_LOG_TICKERS = new Set(['PLUG', 'LCID', 'NIO', 'MARA', 'NVAX', 'SOFI', 'RIOT', 'RGTI', 'CIFR']);
-  if (DEBUG_TICKERS.has(symbol.toUpperCase()) || PRICE_LOG_TICKERS.has(symbol.toUpperCase())) {
-    const cachedPrice = await loadCachedStockPrice(symbol);
-    const candidateScanPrice = await fetchLatestCandidateStockPrice(symbol);
-    console.log(`[PRICE RESOLUTION] ${symbol} | grouped=${bulkStockPrice} | optionUnderlying=${optionUnderlyingPrice} | cached=${cachedPrice?.price ?? null} | previousScan=${candidateScanPrice} | final=${stockPrice} | source=${r.stockSource}`);
   }
 
   // Stock-price filter is applied at the contract level (as a rejection reason)
@@ -1383,16 +1455,16 @@ async function scanSymbol(
       }
 
       // ── TECHNICAL RULES SECTION ──
-      // Only apply if at least one individual rule is active (not just the master toggle).
-      // Base technicals (RSI, MA20, MA50, support, trend) need 60 bars.
-      // MA200-dependent rules (MA50>MA200, Price>MA200) need 200 bars.
-      // When bars >= 60 but < 200 and MA200 rules are enabled, those rules
-      // are Pending, not Rejected.
+      // Each rule is evaluated independently against its own data requirement.
+      // RSI needs 15 bars, MA20>MA50 needs 50, MA200 rules need 200, downtrend needs 60.
+      // Missing data for an OFF rule must NOT cause Pending.
       if (hasActiveTechnicalRule) {
-        if (canComputeBaseTechnicals) {
-          const tech = r.technical;
-          // RSI: use null-safe checks
-          if (tech) {
+        const tech = r.technical;
+        const barsAvailable = bars.length;
+
+        // RSI — needs 20 bars (RSI-14 plus safety margin)
+        if (rsiActive) {
+          if (barsAvailable >= 20 && tech && tech.rsi != null) {
             if (profile.rsi_min != null && tech.rsi < profile.rsi_min) {
               if (!reasons.includes('RSI below minimum')) reasons.push('RSI below minimum');
               r.techRejections!.rsi_below_min++;
@@ -1401,54 +1473,75 @@ async function scanSymbol(
               if (!reasons.includes('RSI above maximum')) reasons.push('RSI above maximum');
               r.techRejections!.rsi_above_max++;
             }
-            // MA20 > MA50 — only if toggle ON
-            if (profile.require_ma20_above_ma50 && tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 <= tech.ma50) {
+          } else {
+            if (!pendingReasons.includes('RSI unavailable')) {
+              pendingReasons.push('RSI unavailable');
+              r.techRejections!.technical_data_missing++;
+            }
+          }
+        }
+
+        // MA20 > MA50 — needs 50 bars
+        if (ma20AboveMa50Active) {
+          if (barsAvailable >= 50 && tech && tech.ma20 != null && tech.ma50 != null) {
+            if (tech.ma20 <= tech.ma50) {
               if (!reasons.includes('MA20 not above MA50')) reasons.push('MA20 not above MA50');
               r.techRejections!.ma20_not_above_ma50++;
             }
-            // MA50 > MA200 — only if toggle ON. Needs 200 bars.
-            if (profile.require_ma50_above_ma200) {
-              if (ma200DataAvailable && tech!.ma200 !== null) {
-                if (tech!.ma50 <= tech!.ma200) {
-                  if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
-                  r.techRejections!.ma50_not_above_ma200++;
-                }
-              } else {
-                if (!pendingReasons.includes('MA50 > MA200 not evaluated — insufficient history (need 200 bars)')) {
-                  pendingReasons.push('MA50 > MA200 not evaluated — insufficient history (need 200 bars)');
-                }
-              }
-            }
-            // Price > MA200 — only if toggle ON. Needs 200 bars.
-            if (profile.require_price_above_ma200) {
-              if (ma200DataAvailable && tech!.ma200 !== null) {
-                if (stockPrice !== null && stockPrice > 0 && stockPrice <= tech!.ma200) {
-                  if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
-                  r.techRejections!.price_not_above_ma200++;
-                }
-              } else {
-                if (!pendingReasons.includes('Price > MA200 not evaluated — insufficient history (need 200 bars)')) {
-                  pendingReasons.push('Price > MA200 not evaluated — insufficient history (need 200 bars)');
-                }
-              }
+          } else {
+            if (!pendingReasons.includes('MA20 > MA50 not evaluated — insufficient history (need 50 bars)')) {
+              pendingReasons.push('MA20 > MA50 not evaluated — insufficient history (need 50 bars)');
             }
           }
-          // Downtrend without support — only if toggle ON
-          if (profile.exclude_downtrend_no_support && trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport) {
-            reasons.push('Downtrend without support');
-            r.techRejections!.downtrend_no_support++;
+        }
+
+        // MA50 > MA200 — needs 200 bars
+        if (ma50AboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null && tech.ma50 != null) {
+            if (tech.ma50 <= tech.ma200) {
+              if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
+              r.techRejections!.ma50_not_above_ma200++;
+            }
+          } else {
+            if (!pendingReasons.includes('MA50 > MA200 not evaluated — insufficient history (need 200 bars)')) {
+              pendingReasons.push('MA50 > MA200 not evaluated — insufficient history (need 200 bars)');
+            }
           }
-        } else {
-          // Technical data (history bars) unavailable — Pending
-          if (!pendingReasons.includes('Missing technical data')) {
-            pendingReasons.push('Missing technical data');
-            r.techRejections!.technical_data_missing++;
+        }
+
+        // Price > MA200 — needs 200 bars
+        if (priceAboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null) {
+            if (stockPrice !== null && stockPrice > 0 && stockPrice <= tech.ma200) {
+              if (!reasons.includes('Price not above MA200')) reasons.push('Price not above MA200');
+              r.techRejections!.price_not_above_ma200++;
+            }
+          } else {
+            if (!pendingReasons.includes('Price > MA200 not evaluated — insufficient history (need 200 bars)')) {
+              pendingReasons.push('Price > MA200 not evaluated — insufficient history (need 200 bars)');
+            }
+          }
+        }
+
+        // Downtrend without support — needs 60 bars (for trend + support)
+        if (downtrendRuleActive) {
+          if (supportDataAvailable) {
+            if (trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport) {
+              reasons.push('Downtrend without support');
+              r.techRejections!.downtrend_no_support++;
+            }
+          } else {
+            if (!pendingReasons.includes('Downtrend rule not evaluated — insufficient history (need 60 bars)')) {
+              pendingReasons.push('Downtrend rule not evaluated — insufficient history (need 60 bars)');
+            }
           }
         }
       }
 
       // ── SUPPORT DISTANCE SECTION (independent of technical_rules_enabled) ──
-      if (!isSectionOff(profile, 'support_distance_enabled')) {
+      // Missing support is ALWAYS Pending here — a contract can never qualify
+      // with Support Dist = "--" while this rule is active.
+      if (supportDistanceActive) {
         if (primarySupport !== null && primarySupport > 0) {
           const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
           const passesMin = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
@@ -1466,27 +1559,24 @@ async function scanSymbol(
           if (finalSupportDistancePass) r.supportDistanceDebug!.passed++;
           else if (!passesMin) r.supportDistanceDebug!.below_min++;
           else if (!passesMax) r.supportDistanceDebug!.above_max++;
-          r.supportDistanceDebug!.details.push({
+          if (r.supportDistanceDebug!.details.length < 25) r.supportDistanceDebug!.details.push({
             ticker: symbol, strike, primarySupport,
             supportDistancePct: Number(supportDistPct.toFixed(2)),
             passesMin, passesMax, finalSupportDistancePass,
             status: finalSupportDistancePass ? 'pass' : !passesMin ? 'fail_below_min' : 'fail_above_max',
           });
-          console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=${primarySupport.toFixed(2)} | supportDistPct=${supportDistPct.toFixed(2)}% | passesMin=${passesMin} | passesMax=${passesMax} | finalPass=${finalSupportDistancePass}`);
         } else {
           r.supportDistanceDebug!.before++;
           r.supportDistanceDebug!.missing_support++;
-          r.supportDistanceDebug!.details.push({
+          if (r.supportDistanceDebug!.details.length < 25) r.supportDistanceDebug!.details.push({
             ticker: symbol, strike, primarySupport: null,
             supportDistancePct: null, passesMin: false, passesMax: false,
             finalSupportDistancePass: false, status: 'pending_missing_support',
           });
-          if (canComputeBaseTechnicals) {
-            if (!pendingReasons.includes('Support distance not evaluated — support unavailable')) {
-              pendingReasons.push('Support distance not evaluated — support unavailable');
-            }
+          if (!pendingReasons.includes('Primary support unavailable')) {
+            pendingReasons.push('Primary support unavailable');
+            r.techRejections!.technical_data_missing++;
           }
-          console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=null | supportDistPct=null | status=Pending — Support unavailable`);
         }
       }
 
@@ -1534,17 +1624,17 @@ async function scanSymbol(
         }
       }
     } else if (!noFilterMode && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
-      // No premium available and CROI filter is ON — cannot qualify
-      reasons.push('CROI too low');
+      // No premium available and CROI filter is ON — required data missing, not a failure
+      if (!pendingReasons.includes('Premium/quote unavailable for CROI calculation')) {
+        pendingReasons.push('Premium/quote unavailable for CROI calculation');
+      }
     }
 
     // A contract is Pending if it has no hard rejections but has pending reasons
     // (data needed to evaluate a rule is temporarily unavailable).
     const hasRejections = reasons.length > 0;
     const hasPending = pendingReasons.length > 0;
-    const supportDistanceActive = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') && (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
-    const historyDependentRulePending = (hasActiveTechnicalRule || supportDistanceActive) && !canComputeBaseTechnicals;
-    const isPending = !hasRejections && (hasPending || historyDependentRulePending);
+    const isPending = !hasRejections && hasPending;
     const qualified = !hasRejections && !isPending;
     r.evaluated++;
     if (qualified) r.qualified++;
@@ -1564,15 +1654,21 @@ async function scanSymbol(
     // ── Build pass/fail rule checks for both scan and analyze modes ──
     const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
     if (!noFilterMode) {
+      if (profile.exclude_existing_positions && openTickers.includes(symbol)) {
+        passFail.push({ rule: 'No existing open position', pass: false, status: 'fail' });
+      }
       if (!isSectionOff(profile, 'order_strike_enabled')) {
         if (profile.max_strike != null) {
           passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
         }
-        if (primarySupport !== null && primarySupport > 0) {
-          const belowSupport = strike < primarySupport;
-          passFail.push({ rule: `Strike below support (${primarySupport.toFixed(2)})`, pass: belowSupport, status: belowSupport ? 'pass' : 'fail' });
-        } else {
-          passFail.push({ rule: 'Support rule not evaluated — historical data unavailable', pass: true, status: 'not_evaluated' });
+        if (profile.minimum_stock_price != null || profile.maximum_stock_price != null) {
+          if (stockPrice !== null && stockPrice > 0) {
+            const minOk = profile.minimum_stock_price == null || stockPrice >= profile.minimum_stock_price;
+            const maxOk = profile.maximum_stock_price == null || stockPrice <= profile.maximum_stock_price;
+            passFail.push({ rule: `Stock price in range (${stockPrice.toFixed(2)})`, pass: minOk && maxOk, status: minOk && maxOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Stock price range — price unavailable', pass: true, status: 'not_evaluated' });
+          }
         }
       }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
@@ -1580,9 +1676,10 @@ async function scanSymbol(
         passFail.push({ rule: `Sufficient liquidity (volume >= ${profile.preferred_daily_volume})`, pass: volume >= profile.preferred_daily_volume, status: volume >= profile.preferred_daily_volume ? 'pass' : 'fail' });
       }
       if (hasActiveTechnicalRule) {
-        if (canComputeBaseTechnicals) {
-          const tech = r.technical;
-          if (tech) {
+        const tech = r.technical;
+        const barsAvailable = bars.length;
+        if (rsiActive) {
+          if (barsAvailable >= 20 && tech && tech.rsi != null) {
             if (profile.rsi_min != null) {
               const rsiOk = tech.rsi >= profile.rsi_min;
               passFail.push({ rule: `RSI >= ${profile.rsi_min} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
@@ -1591,36 +1688,44 @@ async function scanSymbol(
               const rsiOk = tech.rsi <= profile.rsi_max;
               passFail.push({ rule: `RSI <= ${profile.rsi_max} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
             }
-            if (profile.require_ma20_above_ma50) {
-              const maOk = tech.ma20 > 0 && tech.ma50 > 0 && tech.ma20 > tech.ma50;
-              passFail.push({ rule: `MA20 > MA50 (${tech.ma20} vs ${tech.ma50})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
-            }
-            if (profile.require_ma50_above_ma200) {
-              if (ma200DataAvailable && tech.ma200 !== null) {
-                const maOk = tech.ma50 > tech.ma200;
-                passFail.push({ rule: `MA50 > MA200 (${tech.ma50} vs ${tech.ma200})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
-              } else {
-                passFail.push({ rule: 'MA50 > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
-              }
-            }
-            if (profile.require_price_above_ma200) {
-              if (ma200DataAvailable && tech.ma200 !== null) {
-                const priceOk = stockPrice !== null && stockPrice > 0 && stockPrice > tech.ma200;
-                passFail.push({ rule: `Price > MA200 (${stockPrice} vs ${tech.ma200})`, pass: priceOk, status: priceOk ? 'pass' : 'fail' });
-              } else {
-                passFail.push({ rule: 'Price > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
-              }
-            }
+          } else {
+            passFail.push({ rule: `RSI — insufficient history (need 20 bars, have ${barsAvailable})`, pass: true, status: 'not_evaluated' });
           }
-          if (profile.exclude_downtrend_no_support) {
+        }
+        if (ma20AboveMa50Active) {
+          if (barsAvailable >= 50 && tech && tech.ma20 != null && tech.ma50 != null) {
+            const maOk = tech.ma20 > tech.ma50;
+            passFail.push({ rule: `MA20 > MA50 (${tech.ma20} vs ${tech.ma50})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'MA20 > MA50 — insufficient history (need 50 bars)', pass: true, status: 'not_evaluated' });
+          }
+        }
+        if (ma50AboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null && tech.ma50 != null) {
+            const maOk = tech.ma50 > tech.ma200;
+            passFail.push({ rule: `MA50 > MA200 (${tech.ma50} vs ${tech.ma200})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'MA50 > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
+          }
+        }
+        if (priceAboveMa200Active) {
+          if (ma200DataAvailable && tech && tech.ma200 != null) {
+            const priceOk = stockPrice !== null && stockPrice > 0 && stockPrice > tech.ma200;
+            passFail.push({ rule: `Price > MA200 (${stockPrice} vs ${tech.ma200})`, pass: priceOk, status: priceOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Price > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
+          }
+        }
+        if (downtrendRuleActive) {
+          if (supportDataAvailable) {
             const trendOk = !(trendClass === 'Downtrend' && primarySupport !== null && primarySupport > 0 && strike >= primarySupport);
             passFail.push({ rule: `Trend acceptable (${trendClass})`, pass: trendOk, status: trendOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Downtrend rule — insufficient history (need 60 bars)', pass: true, status: 'not_evaluated' });
           }
-        } else {
-          passFail.push({ rule: 'Technical history unavailable', pass: true, status: 'not_evaluated' });
         }
       }
-      if (!isSectionOff(profile, 'support_distance_enabled')) {
+      if (supportDistanceActive) {
         if (primarySupport !== null && primarySupport > 0) {
           const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
           const distMinOk = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
@@ -1641,16 +1746,16 @@ async function scanSymbol(
           const croiOk = croiOptimized && netCroi >= profile.min_net_croi && pc <= profile.max_premium_capture;
           passFail.push({ rule: `Filter Strikes by CROI: Net CROI >= ${profile.min_net_croi}% & PC <= ${profile.max_premium_capture}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
         } else {
-          const croiOk = netCroi >= profile.min_net_croi;
-          const pcOk = pc <= profile.max_premium_capture;
-          passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
-          passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
+          // "Filter Strikes by CROI" is OFF, so CROI/PC do NOT decide status.
+          // Show them as info only — previously they showed as hard "fail"
+          // while the contract was Qualified, which looked inconsistent.
+          passFail.push({ rule: `Net CROI ${croiOptimized ? netCroi.toFixed(2) + '%' : 'n/a'} (info — Filter Strikes by CROI is OFF)`, pass: true, status: 'not_evaluated' });
         }
       }
       if (!hasPremium && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
         passFail.push({ rule: 'Filter Strikes by CROI — Premium required', pass: true, status: 'not_evaluated' });
       }
-      if (!hasPremium) {
+      if (!hasPremium && !isSectionOff(profile, 'croi_pc_enabled') && !profile.filter_strikes_croi) {
         passFail.push({ rule: 'Premium data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
       }
     }
@@ -1671,6 +1776,9 @@ async function scanSymbol(
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
         qualified, technical_pending: isPending, pass_fail: passFail,
+        rejection_reasons: reasons, pending_reasons: pendingReasons,
+        technical_snapshot: r.technical ? { rsi: r.technical.rsi, ma20: r.technical.ma20, ma50: r.technical.ma50, ma200: r.technical.ma200 } : null,
+        history_bars: bars.length,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
@@ -1706,22 +1814,15 @@ async function scanSymbol(
         premium_source: premiumSourceOut,
         secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
         resistance: resistance !== null ? Number(resistance.toFixed(2)) : null,
+        technical_snapshot: r.technical ? { rsi: r.technical.rsi, ma20: r.technical.ma20, ma50: r.technical.ma50, ma200: r.technical.ma200 } : null,
+        history_bars: bars.length,
       });
     }
   }
 
-  // In analyze mode, sort qualifying contracts and pick best
-  if (analyzeMode && analyses.length > 0) {
-    const qualifying = analyses.filter((a) => a.qualified);
-    qualifying.sort((a, b) => {
-      const aBelow = primarySupport !== null && a.strike < primarySupport ? 0 : 1;
-      const bBelow = primarySupport !== null && b.strike < primarySupport ? 0 : 1;
-      if (aBelow !== bBelow) return aBelow - bBelow;
-      if (a.spread_pct !== b.spread_pct) return a.spread_pct - b.spread_pct;
-      if (a.open_interest !== b.open_interest) return b.open_interest - a.open_interest;
-      if (a.volume !== b.volume) return b.volume - a.volume;
-      return Math.abs(a.delta) - Math.abs(b.delta);
-    });
+  if (analyzeMode) {
+    // Same ranking as Today's Candidates (one shared definition).
+    analyses.sort(compareContracts);
     r.analyses = analyses;
   }
 
@@ -1734,10 +1835,9 @@ serve(async (req) => {
   console.log('market-scan started');
   console.log('MASSIVE_API_KEY exists:', Boolean(Deno.env.get('MASSIVE_API_KEY')));
 
-  // stockCache is intentionally only an intra-request dedupe cache.
-  // Supabase is the persistent cache. Warm Edge Function instances must not
-  // carry null/stale stock snapshots into later Analyze requests.
-  stockCache.clear();
+  // All per-request caches live in a ScanContext created below, so warm
+  // isolates and concurrent requests never share or clear each other's state.
+  const requestStart = Date.now();
 
   try {
     const apiKey = Deno.env.get('MASSIVE_API_KEY');
@@ -1759,65 +1859,40 @@ serve(async (req) => {
       const from: number = Number(body.from) || 0;
       const to: number = Number(body.to) || 0;
 
-      const rangeMap: Record<string, string> = {
-        '1D': 'day',
-        '1W': 'week',
-        '1M': 'month',
-      };
-      const rangeUnit = rangeMap[resolution] || 'day';
-
-      let bars: HistoryBar[] = [];
-      const cachedBars = await loadCachedHistory(ticker, 500);
-
-      if (cachedBars.length > 0) {
-        if (resolution === '1D') {
-          bars = cachedBars;
-        } else if (resolution === '1W') {
-          bars = aggregateWeeks(cachedBars);
-        } else if (resolution === '1M') {
-          bars = aggregateMonths(cachedBars);
-        }
-      }
-
+      // Always work in DAILY bars and aggregate locally. Previously 1W/1M
+      // requests fetched weekly/monthly bars from Massive and saved them into
+      // the DAILY history cache, corrupting RSI/support for that ticker.
       const chartToday = new Date();
       const chartFmt = (d: Date) => d.toISOString().slice(0, 10);
-      const chartStart = new Date(chartToday);
-      chartStart.setDate(chartStart.getDate() - 548);
+      const chartTodayStr = chartFmt(chartToday);
+      const chartExpected = lastCompletedBusinessDay(chartToday, chartFmt);
+      let daily = (await loadCachedHistory(ticker, 500)).filter((b) => b.date < chartTodayStr);
 
-      const needsFresh = bars.length < 60 ||
-        (bars.length > 0 && bars.at(-1)!.date < chartFmt(chartToday));
-
-      if (needsFresh || bars.length === 0) {
-        const histPath = `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/${rangeUnit}/${chartFmt(chartStart)}/${chartFmt(chartToday)}?adjusted=true&sort=asc&limit=50000`;
+      const chartNeedsFresh = daily.length < 60 || daily.at(-1)!.date < chartExpected;
+      if (chartNeedsFresh) {
+        const chartStart = new Date(chartToday);
+        chartStart.setDate(chartStart.getDate() - 548);
+        const histPath = `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/day/${chartFmt(chartStart)}/${chartTodayStr}?adjusted=true&sort=asc&limit=50000`;
         const histResult = await massiveFetch(histPath, apiKey, ticker, 'chart_bars');
-
         if (histResult.ok) {
           const freshBars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
             date: new Date(b.t).toISOString().slice(0, 10),
             open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
-          })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-
+          })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0 && b.date < chartTodayStr && !isWeekendDate(b.date));
           if (freshBars.length > 0) {
-            if (resolution === '1D') {
-              const barMap = new Map<string, HistoryBar>();
-              for (const b of cachedBars) barMap.set(b.date, b);
-              for (const b of freshBars) barMap.set(b.date, b);
-              bars = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
-            } else if (resolution === '1W') {
-              const all = [...cachedBars, ...freshBars];
-              const dedup = new Map<string, HistoryBar>();
-              for (const b of all) dedup.set(b.date, b);
-              bars = aggregateWeeks(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
-            } else if (resolution === '1M') {
-              const all = [...cachedBars, ...freshBars];
-              const dedup = new Map<string, HistoryBar>();
-              for (const b of all) dedup.set(b.date, b);
-              bars = aggregateMonths(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
-            }
+            const barMap = new Map<string, HistoryBar>();
+            for (const b of daily) barMap.set(b.date, b);
+            for (const b of freshBars) barMap.set(b.date, b);
+            daily = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
             await saveCachedHistory(ticker, freshBars);
           }
         }
       }
+
+      const bars: HistoryBar[] =
+        resolution === '1W' ? aggregateWeeks(daily)
+        : resolution === '1M' ? aggregateMonths(daily)
+        : daily;
 
       const tvBars = bars
         .filter((b) => Number.isFinite(b.close) && b.close > 0)
@@ -1846,6 +1921,7 @@ serve(async (req) => {
 
     const today = new Date();
     const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const ctx = newScanContext(lastCompletedBusinessDay(today, fmt));
 
     const noFilterMode =
       isSectionOff(profile, 'order_strike_enabled') &&
@@ -1894,7 +1970,7 @@ serve(async (req) => {
 
       console.log(`[Analyze] ${ticker} | seed_price=${analyzeBulkPrice} | seed_source=${analyzePriceSource}`);
 
-      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, analyzeBulkPrice);
+      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, analyzeBulkPrice, true, ctx);
 
       if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') {
         return json({
@@ -1928,14 +2004,15 @@ serve(async (req) => {
       return json({
         success: true,
         ticker,
-        stock_price: result.stockPrice !== null && result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
+        stock_price: result.stockPrice != null && result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
         stock_source: result.stockSource || 'none',
         trend: result.trendClass || 'Unknown',
-        primary_support: result.primarySupport !== null ? Number(result.primarySupport.toFixed(2)) : null,
-        secondary_support: result.secondarySupport !== null ? Number(result.secondarySupport.toFixed(2)) : null,
-        resistance: result.resistance !== null ? Number(result.resistance.toFixed(2)) : null,
+        primary_support: result.primarySupport != null ? Number(result.primarySupport.toFixed(2)) : null,
+        secondary_support: result.secondarySupport != null ? Number(result.secondarySupport.toFixed(2)) : null,
+        resistance: result.resistance != null ? Number(result.resistance.toFixed(2)) : null,
         technical_data_available: Boolean(result.technicalDataAvailable),
-        technical_warning: result.technicalDataAvailable ? null : 'Historical price data was unavailable or insufficient; support/trend rules were not used to reject contracts.',
+        history_bars: result.historyBarCount ?? 0,
+        technical_warning: result.technicalDataAvailable ? null : 'Not enough price history for the active technical/support rules — affected contracts are Pending (not Rejected).',
         technical: result.technical || null,
         qualifies: qualifying.length > 0,
         best_contract: bestContract,
@@ -1955,322 +2032,6 @@ serve(async (req) => {
           qualified: result.qualified,
           rejected: result.rejected,
         },
-      });
-    }
-
-    // ── AB-TEST MODE: deterministic A/B regression test ──
-    // Scans the same symbols with two profiles and compares results.
-    // Profile A: technical_rules_enabled = false
-    // Profile B: technical_rules_enabled = true, all individual rules null/false
-    // Both profiles share the same stock price cache (intra-request), so
-    // stock data is identical. Option chains are fetched fresh per scan but
-    // are effectively identical seconds apart.
-    if (mode === 'ab-test') {
-      const abScanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
-      const abSymbols: string[] = Array.isArray(body.symbols)
-        ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean)
-        : [];
-
-      let abSymbolList: { ticker: string; company_name: string | null }[];
-      if (abScanMode === 'universe' && abSymbols.length > 0) {
-        abSymbolList = abSymbols.map((t) => ({ ticker: t, company_name: null }));
-      } else if (abScanMode === 'universe') {
-        abSymbolList = await fetchScanUniverse();
-      } else {
-        abSymbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
-      }
-
-      if (abSymbolList.length === 0) {
-        return json({ success: false, error: 'No symbols to scan for A/B test' });
-      }
-
-      // Clone the active profile exactly — never use defaults or new objects.
-      const abTechFields = [
-        'technical_rules_enabled', 'rsi_min', 'rsi_max',
-        'require_ma20_above_ma50', 'require_ma50_above_ma200',
-        'require_price_above_ma200', 'exclude_downtrend_no_support',
-      ];
-      const profileA: Profile = structuredClone(profile);
-      profileA.technical_rules_enabled = false;
-      const profileB: Profile = structuredClone(profile);
-      profileB.technical_rules_enabled = true;
-      profileB.rsi_min = null;
-      profileB.rsi_max = null;
-      profileB.require_ma20_above_ma50 = false;
-      profileB.require_ma50_above_ma200 = false;
-      profileB.require_price_above_ma200 = false;
-      profileB.exclude_downtrend_no_support = false;
-
-      // Assert all non-technical fields are identical between A and B.
-      const abMismatches: string[] = [];
-      for (const key of Object.keys(profileA) as (keyof Profile)[]) {
-        if (abTechFields.includes(key)) continue;
-        const va = profileA[key];
-        const vb = profileB[key];
-        if (JSON.stringify(va) !== JSON.stringify(vb)) {
-          abMismatches.push(`${key}: A=${JSON.stringify(va)} B=${JSON.stringify(vb)}`);
-        }
-      }
-      if (abMismatches.length > 0) {
-        console.error(`[AB-TEST] Profile construction mismatch: ${abMismatches.join(', ')}`);
-        return json({
-          success: false,
-          error: 'Profile construction mismatch',
-          mismatches: abMismatches,
-        });
-      }
-      console.log('[AB-TEST] All non-technical fields identical between Profile A and B');
-
-      // Support distance must be identical — log assertions.
-      console.assert(profileA.support_distance_enabled === profileB.support_distance_enabled,
-        `[AB-TEST] support_distance_enabled mismatch: A=${profileA.support_distance_enabled} B=${profileB.support_distance_enabled}`);
-      console.assert(profileA.minimum_support_distance_pct === profileB.minimum_support_distance_pct,
-        `[AB-TEST] minimum_support_distance_pct mismatch: A=${profileA.minimum_support_distance_pct} B=${profileB.minimum_support_distance_pct}`);
-      console.assert(profileA.maximum_support_distance_pct === profileB.maximum_support_distance_pct,
-        `[AB-TEST] maximum_support_distance_pct mismatch: A=${profileA.maximum_support_distance_pct} B=${profileB.maximum_support_distance_pct}`);
-
-      // hasActiveTechnicalRule assertion for Profile B
-      const abHasActiveRule =
-        profileB.technical_rules_enabled &&
-        (profileB.rsi_min != null ||
-          profileB.rsi_max != null ||
-          profileB.require_ma20_above_ma50 === true ||
-          profileB.require_ma50_above_ma200 === true ||
-          profileB.require_price_above_ma200 === true ||
-          profileB.exclude_downtrend_no_support === true);
-      console.log(`[AB-TEST] hasActiveTechnicalRule(Profile B) = ${abHasActiveRule}`);
-      console.assert(!abHasActiveRule, 'AB-TEST: Profile B incorrectly detects an active technical rule');
-
-      // Both profiles must use the SAME noFilterMode as the live scan.
-      // Computing it per-profile would make noFilterA != noFilterB because
-      // isSectionOff(profileB, 'technical_rules_enabled') is false.
-      // The live scan computes noFilterMode from the original active profile,
-      // so we reuse that exact value.
-      console.log(`[AB-TEST] Using live noFilterMode=${noFilterMode} for both profiles`);
-
-      // Bulk stock prices (shared between both scans)
-      const abAllTickers = abSymbolList.map((s) => s.ticker.toUpperCase());
-      const { priceMap: abBulkPriceMap } = await fetchGroupedDailyPrices(apiKey, today, fmt);
-      let abBulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
-      if (abBulkPriceMap.size === 0) {
-        abBulkCachedPrices = await bulkLoadCachedStockPrices(abAllTickers);
-      }
-
-      const AB_BATCH = 5;
-      const candidatesA: any[] = [];
-      const candidatesB: any[] = [];
-
-      for (let i = 0; i < abSymbolList.length; i += AB_BATCH) {
-        const batch = abSymbolList.slice(i, i + AB_BATCH);
-        console.log(`[AB-TEST] Batch ${Math.floor(i / AB_BATCH) + 1}/${Math.ceil(abSymbolList.length / AB_BATCH)}: ${batch.map((b) => b.ticker).join(', ')}`);
-
-        // Scan with Profile A
-        const resultsA = await Promise.all(
-          batch.map((sym) => {
-            const upper = sym.ticker.toUpperCase();
-            const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
-            return scanSymbol(sym.ticker, sym.company_name || '', profileA, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, abScanMode === 'universe')
-              .catch((err) => { console.error(`[AB-TEST A] ${sym.ticker} failed: ${err}`); return null; });
-          })
-        );
-        for (const r of resultsA) { if (r) candidatesA.push(...r.candidates); }
-
-        // Scan with Profile B (same stockCache, same bulk prices)
-        const resultsB = await Promise.all(
-          batch.map((sym) => {
-            const upper = sym.ticker.toUpperCase();
-            const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
-            return scanSymbol(sym.ticker, sym.company_name || '', profileB, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, abScanMode === 'universe')
-              .catch((err) => { console.error(`[AB-TEST B] ${sym.ticker} failed: ${err}`); return null; });
-          })
-        );
-        for (const r of resultsB) { if (r) candidatesB.push(...r.candidates); }
-      }
-
-      // ── STAGE 2 for A/B: Cache warming (mirrors live scan logic) ──
-      // Both profiles get the same cache-warming treatment so pending tickers
-      // have their history fetched and re-scanned, exactly like the live scan.
-      const AB_MAX_HISTORY_FETCHES = 4;
-
-      async function abWarmPending(
-        candidates: any[],
-        prof: Profile,
-        noFilter: boolean,
-        label: string,
-      ): Promise<void> {
-        const hasActiveTech =
-          !noFilter &&
-          !isSectionOff(prof, 'technical_rules_enabled') &&
-          (prof.rsi_min != null || prof.rsi_max != null ||
-            prof.require_ma20_above_ma50 === true || prof.require_ma50_above_ma200 === true ||
-            prof.require_price_above_ma200 === true || prof.exclude_downtrend_no_support === true);
-        const supportDistNeedsHistory = !noFilter &&
-          !isSectionOff(prof, 'support_distance_enabled') &&
-          (prof.minimum_support_distance_pct != null || prof.maximum_support_distance_pct != null);
-        const historyNeeded = hasActiveTech || supportDistNeedsHistory;
-        if (!historyNeeded) return;
-
-        const pendingTickers = new Map<string, { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }>();
-        for (const c of candidates) {
-          if (c.technical_pending && (!c.rejection_reasons || c.rejection_reasons.length === 0)) {
-            const existing = pendingTickers.get(c.ticker);
-            const croi = c.net_croi || 0;
-            const oi = c.open_interest || 0;
-            const vol = c.volume || 0;
-            if (!existing || croi > existing.bestCroi) {
-              pendingTickers.set(c.ticker, { ticker: c.ticker, bestCroi: croi, bestOi: Math.max(oi, existing?.bestOi || 0), bestVolume: Math.max(vol, existing?.bestVolume || 0), cachedBars: 0 });
-            }
-          }
-        }
-
-        const needsFetch: { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }[] = [];
-        for (const info of pendingTickers.values()) {
-          const upper = info.ticker.toUpperCase();
-          const cachedBars = await loadCachedHistory(upper, 260);
-          info.cachedBars = cachedBars.length;
-          const needsMA200 = hasActiveTech && (prof.require_ma50_above_ma200 || prof.require_price_above_ma200);
-          const requiredBars = needsMA200 ? 200 : 60;
-          if (cachedBars.length < requiredBars) {
-            needsFetch.push(info);
-          }
-        }
-
-        needsFetch.sort((a, b) => {
-          const aHasCroi = a.bestCroi > 0 ? 1 : 0;
-          const bHasCroi = b.bestCroi > 0 ? 1 : 0;
-          if (aHasCroi !== bHasCroi) return bHasCroi - aHasCroi;
-          if (a.bestOi !== b.bestOi) return b.bestOi - a.bestOi;
-          return b.bestVolume - a.bestVolume;
-        });
-
-        const toFetch = needsFetch.slice(0, AB_MAX_HISTORY_FETCHES);
-        console.log(`[AB-TEST ${label}] ${needsFetch.length} tickers need history, fetching top ${toFetch.length}`);
-
-        for (const info of toFetch) {
-          const upper = info.ticker.toUpperCase();
-          stockCache.delete(upper);
-          const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null, true);
-          const finalBars = snapshot.historicalBars.length;
-
-          if (finalBars >= 60) {
-            console.log(`[AB-TEST ${label}] ${upper} | fetched ${finalBars} bars, re-scanning`);
-            const price = abBulkPriceMap.get(upper) ?? abBulkCachedPrices.get(upper)?.price ?? null;
-            const rerunResult = await scanSymbol(upper, '', prof, apiKey, openTickers, noFilter, today, fmt, false, false, price, false);
-            if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
-              for (let ci = candidates.length - 1; ci >= 0; ci--) {
-                if (candidates[ci].ticker === upper) candidates.splice(ci, 1);
-              }
-              candidates.push(...rerunResult.candidates);
-            }
-          } else {
-            console.log(`[AB-TEST ${label}] ${upper} | fetch returned only ${finalBars} bars — still pending`);
-          }
-        }
-      }
-
-      await abWarmPending(candidatesA, profileA, noFilterMode, 'A');
-      await abWarmPending(candidatesB, profileB, noFilterMode, 'B');
-
-      // Log SOFI specifically if present in either profile
-      const sofiA = candidatesA.find((c) => c.ticker === 'SOFI');
-      const sofiB = candidatesB.find((c) => c.ticker === 'SOFI');
-      if (sofiA || sofiB) {
-        console.log(`[AB-TEST SOFI] A: qualified=${sofiA?.qualified ?? 'N/A'}, pending=${sofiA?.technical_pending ?? 'N/A'}, reasons=${JSON.stringify(sofiA?.rejection_reasons ?? [])}, pendingReasons=${JSON.stringify(sofiA?.pending_reasons ?? [])}, netCROI=${sofiA?.net_croi ?? 'N/A'}, PC=${sofiA?.premium_capture ?? 'N/A'}, OI=${sofiA?.open_interest ?? 'N/A'}, vol=${sofiA?.volume ?? 'N/A'}, supportDist=${sofiA?.strike_distance_from_support ?? 'N/A'}`);
-        console.log(`[AB-TEST SOFI] B: qualified=${sofiB?.qualified ?? 'N/A'}, pending=${sofiB?.technical_pending ?? 'N/A'}, reasons=${JSON.stringify(sofiB?.rejection_reasons ?? [])}, pendingReasons=${JSON.stringify(sofiB?.pending_reasons ?? [])}, netCROI=${sofiB?.net_croi ?? 'N/A'}, PC=${sofiB?.premium_capture ?? 'N/A'}, OI=${sofiB?.open_interest ?? 'N/A'}, vol=${sofiB?.volume ?? 'N/A'}, supportDist=${sofiB?.strike_distance_from_support ?? 'N/A'}`);
-      }
-
-      // Build comparison maps keyed by ticker|strike|expiration
-      const keyOf = (c: any) => `${c.ticker}|${c.strike}|${c.expiration}`;
-      const mapA = new Map<string, any>();
-      const mapB = new Map<string, any>();
-      for (const c of candidatesA) mapA.set(keyOf(c), c);
-      for (const c of candidatesB) mapB.set(keyOf(c), c);
-
-      const allKeys = new Set([...mapA.keys(), ...mapB.keys()]);
-      const diffs: any[] = [];
-      let identical = 0;
-
-      for (const key of allKeys) {
-        const cA = mapA.get(key);
-        const cB = mapB.get(key);
-        const qA = cA?.qualified ?? false;
-        const qB = cB?.qualified ?? false;
-        const pA = cA?.technical_pending ?? false;
-        const pB = cB?.technical_pending ?? false;
-        const rA = cA?.rejection_reasons ?? [];
-        const rB = cB?.rejection_reasons ?? [];
-        const pendingA = cA?.pending_reasons ?? [];
-        const pendingB = cB?.pending_reasons ?? [];
-
-        const reasonsMatch = JSON.stringify(rA) === JSON.stringify(rB);
-        const pendingMatch = JSON.stringify(pendingA) === JSON.stringify(pendingB);
-        const statusMatch = qA === qB && pA === pB && reasonsMatch && pendingMatch;
-
-        if (statusMatch) {
-          identical++;
-        } else {
-          diffs.push({
-            key,
-            ticker: cA?.ticker ?? cB?.ticker,
-            strike: cA?.strike ?? cB?.strike,
-            expiration: cA?.expiration ?? cB?.expiration,
-            profile_a: {
-              qualified: qA,
-              pending: pA,
-              rejection_reasons: rA,
-              pending_reasons: pendingA,
-              net_croi: cA?.net_croi ?? null,
-              premium_capture: cA?.premium_capture ?? null,
-            },
-            profile_b: {
-              qualified: qB,
-              pending: pB,
-              rejection_reasons: rB,
-              pending_reasons: pendingB,
-              net_croi: cB?.net_croi ?? null,
-              premium_capture: cB?.premium_capture ?? null,
-            },
-          });
-        }
-      }
-
-      const qualifiedA = candidatesA.filter((c) => c.qualified);
-      const qualifiedB = candidatesB.filter((c) => c.qualified);
-      const qualifiedTickersA = new Set(qualifiedA.map((c) => c.ticker));
-      const qualifiedTickersB = new Set(qualifiedB.map((c) => c.ticker));
-
-      console.log(`[AB-TEST] Profile A: ${qualifiedA.length} qualified contracts, ${qualifiedTickersA.size} tickers`);
-      console.log(`[AB-TEST] Profile B: ${qualifiedB.length} qualified contracts, ${qualifiedTickersB.size} tickers`);
-      console.log(`[AB-TEST] Identical: ${identical}, Diffs: ${diffs.length}`);
-
-      return json({
-        success: true,
-        mode: 'ab-test',
-        has_active_technical_rule_profile_b: abHasActiveRule,
-        assertion_passed: !abHasActiveRule,
-        profile_a: {
-          technical_rules_enabled: false,
-          qualified_contracts: qualifiedA.length,
-          qualified_tickers: Array.from(qualifiedTickersA).sort(),
-          total_candidates: candidatesA.length,
-        },
-        profile_b: {
-          technical_rules_enabled: true,
-          rsi_min: null,
-          rsi_max: null,
-          require_ma20_above_ma50: false,
-          require_ma50_above_ma200: false,
-          require_price_above_ma200: false,
-          exclude_downtrend_no_support: false,
-          qualified_contracts: qualifiedB.length,
-          qualified_tickers: Array.from(qualifiedTickersB).sort(),
-          total_candidates: candidatesB.length,
-        },
-        identical_contracts: identical,
-        different_contracts: diffs.length,
-        diffs: diffs.slice(0, 50),
-        test_passed: diffs.length === 0 && qualifiedTickersA.size === qualifiedTickersB.size,
-        scanned_at: new Date().toISOString(),
       });
     }
 
@@ -2307,307 +2068,218 @@ serve(async (req) => {
     }
 
     // ── Bulk stock prices: one grouped daily request for all symbols ──
-    // If grouped daily fails (429/401/403/empty), bulkLoadCachedStockPrices
-    // provides the last valid price for each ticker so they don't go Unavailable.
+    // The same call also returns each ticker's OHLCV for the latest completed
+    // session; we append that bar to the history cache so technicals stay
+    // current every day without per-ticker (rate-limited) history requests.
     const allTickers = symbolList.map((s) => s.ticker.toUpperCase());
-    const { priceMap: bulkPriceMap, httpStatus: bulkHttpStatus } = await fetchGroupedDailyPrices(apiKey, today, fmt);
-    console.log(`[BulkPrices] ${bulkPriceMap.size} stock prices loaded from grouped daily (HTTP ${bulkHttpStatus})`);
-
-    // If grouped daily returned nothing, bulk-load persistent price cache as fallback
-    let bulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
-    if (bulkPriceMap.size === 0) {
-      console.log(`[BulkPrices] Grouped daily returned 0 prices — loading persistent price cache for ${allTickers.length} tickers`);
-      bulkCachedPrices = await bulkLoadCachedStockPrices(allTickers);
-      console.log(`[BulkPrices] Persistent cache returned ${bulkCachedPrices.size} prices`);
+    const { priceMap: bulkPriceMap, barMap: groupedBarMap, tradingDate, httpStatus: bulkHttpStatus } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+    console.log(`[BulkPrices] ${bulkPriceMap.size} stock prices loaded from grouped daily (HTTP ${bulkHttpStatus}, date ${tradingDate})`);
+    if (tradingDate) ctx.expectedLatestDate = tradingDate;
+    let groupedBarsSaved = 0;
+    if (groupedBarMap.size > 0) {
+      groupedBarsSaved = await saveGroupedBarsToCache(groupedBarMap, allTickers);
+      console.log(`[GroupedBars] appended ${groupedBarsSaved} daily bars (${tradingDate}) to stock_history_cache`);
     }
 
-    // ── Main scan ──
-    const candidates: any[] = [];
-    let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
-    let totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
-    let totalValidQuotes = 0, totalAwaitingQuotes = 0;
-    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPending = 0, totalPagesFetched = 0;
-    let totalContractsFound = 0;
+    let bulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
+    if (bulkPriceMap.size === 0) {
+      bulkCachedPrices = await bulkLoadCachedStockPrices(allTickers);
+      console.log(`[BulkPrices] Grouped daily empty — persistent cache returned ${bulkCachedPrices.size} prices`);
+    }
+    const priceFor = (t: string) => bulkPriceMap.get(t) ?? bulkCachedPrices.get(t)?.price ?? null;
+
+    // ── STAGE 1: evaluate every symbol from cache (no per-ticker history calls) ──
+    // Every symbol is scanned — there is no early stop, so the scanned set is
+    // the same on every Rescan.
+    const resultsByTicker = new Map<string, ScanSymbolResult>();
+    const companyByTicker = new Map<string, string>();
+    let symbolsFailed = 0;
     let rawSample: any = null;
     let verboseCount = 0;
-    const techRejTotals = { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 };
-    const supportDistanceDebugTotals = { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] as any[] };
-    const orderStrikeRejTotals = { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 };
-    // Technical cache diagnostics
-    let tickersWith60PlusBars = 0, tickersWith200PlusBars = 0, tickersMissingHistory = 0;
 
     const BATCH_SIZE = 5;
     for (let i = 0; i < symbolList.length; i += BATCH_SIZE) {
       const batch = symbolList.slice(i, i + BATCH_SIZE);
-      console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(symbolList.length / BATCH_SIZE)}: ${batch.map((b) => b.ticker).join(', ')}`);
-
       const batchResults = await Promise.all(
         batch.map((sym) => {
           const isVerbose = verboseCount < 3;
           if (isVerbose) verboseCount++;
           const upper = sym.ticker.toUpperCase();
-          // Use grouped daily price; if missing, use persistent cache fallback
-          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, price, scanMode === 'universe')
+          companyByTicker.set(upper, sym.company_name || '');
+          return scanSymbol(upper, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, priceFor(upper), false, ctx)
+            .then((res) => ({ upper, res }))
             .catch((err) => {
-              console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
-              return null;
+              console.error(`[scanSymbol] ${upper} failed: ${err instanceof Error ? err.message : String(err)}`);
+              return { upper, res: null as ScanSymbolResult | null };
             });
-        })
+        }),
       );
-
-      for (const result of batchResults) {
-        if (!result) { symbolsFailed++; continue; }
-        symbolsScanned++;
-        totalPutsReturned += result.putsReturned;
-        totalFilteredByExp += result.filteredByExpiration;
-        totalFilteredByStrike += result.filteredByStrike;
-        totalValidQuotes += result.validQuotes;
-        totalAwaitingQuotes += result.contractsAwaitingQuotes;
-        totalEvaluated += result.evaluated;
-        totalQualified += result.qualified;
-        totalRejected += result.rejected;
-        totalPending += result.pending || 0;
-        totalPagesFetched += result.pagesFetched;
-        totalContractsFound += result.putsReturned;
-        if (result.techRejections) {
-          techRejTotals.rsi_below_min += result.techRejections.rsi_below_min;
-          techRejTotals.rsi_above_max += result.techRejections.rsi_above_max;
-          techRejTotals.ma20_not_above_ma50 += result.techRejections.ma20_not_above_ma50;
-          techRejTotals.ma50_not_above_ma200 += result.techRejections.ma50_not_above_ma200;
-          techRejTotals.price_not_above_ma200 += result.techRejections.price_not_above_ma200;
-          techRejTotals.downtrend_no_support += result.techRejections.downtrend_no_support;
-          techRejTotals.support_dist_below_min += result.techRejections.support_dist_below_min;
-          techRejTotals.support_dist_above_max += result.techRejections.support_dist_above_max;
-          techRejTotals.technical_data_missing += result.techRejections.technical_data_missing;
-        }
-        if (result.orderStrikeRejections) {
-          orderStrikeRejTotals.stock_below_min += result.orderStrikeRejections.stock_below_min;
-          orderStrikeRejTotals.stock_above_max += result.orderStrikeRejections.stock_above_max;
-          orderStrikeRejTotals.strike_above_max += result.orderStrikeRejections.strike_above_max;
-        }
-        if (result.supportDistanceDebug) {
-          supportDistanceDebugTotals.before += result.supportDistanceDebug.before;
-          supportDistanceDebugTotals.passed += result.supportDistanceDebug.passed;
-          supportDistanceDebugTotals.below_min += result.supportDistanceDebug.below_min;
-          supportDistanceDebugTotals.above_max += result.supportDistanceDebug.above_max;
-          supportDistanceDebugTotals.missing_support += result.supportDistanceDebug.missing_support;
-          supportDistanceDebugTotals.details.push(...result.supportDistanceDebug.details);
-        }
-        // Track technical cache stats
-        const barCount = result.historyBarCount ?? 0;
-        if (barCount >= 200) tickersWith200PlusBars++;
-        else if (barCount >= 60) tickersWith60PlusBars++;
-        else tickersMissingHistory++;
-
-        if (result.chainStatus === 'success') symbolsWithChains++;
-        if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') symbolsFailed++;
-
-        if (!rawSample && result.rawSample) rawSample = result.rawSample;
-        candidates.push(...result.candidates);
-      }
-
-      const qualifiedCount = candidates.filter((c) => c.qualified).length;
-      if (qualifiedCount >= MAX_CANDIDATES) {
-        console.log(`Reached ${MAX_CANDIDATES} qualified candidates, stopping early at ${symbolsScanned} symbols`);
-        break;
+      for (const { upper, res } of batchResults) {
+        if (!res) { symbolsFailed++; continue; }
+        resultsByTicker.set(upper, res);
+        if (!rawSample && res.rawSample) rawSample = res.rawSample;
       }
     }
 
-    // ── STAGE 2: Technical cache warming ──
-    // After the main scan, identify tickers that are Pending only because
-    // technical history was unavailable. Fetch history for the best ones,
-    // save to cache, and re-scan them so they get real technical evaluations.
-    // This progressively warms the cache without hammering the Massive API.
-    const MAX_HISTORY_FETCHES_PER_SCAN = 4;
+    // ── STAGE 2: fill missing history for tickers that are Pending because of it ──
+    // One Rescan now does: find tickers whose contracts are Pending only for
+    // lack of history → fetch history (sequentially, within Massive limits and
+    // a time budget) → re-evaluate using the SAME option chain → final status.
+    const WARM_DEADLINE_MS = 110_000; // keep well under the Edge Function wall-clock limit
     let historyFetchedThisScan = 0;
     let historyFetch403 = 0;
     let historyFetch429 = 0;
-    let cacheSaveFailures = 0;
     let stillPendingHistory = 0;
+    let warmingDeadlineHit = false;
     const warmDiagnostics: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[] = [];
 
-    const hasActiveTechnicalRuleForWarming =
-      !noFilterMode &&
-      !isSectionOff(profile, 'technical_rules_enabled') &&
-      (
-        profile.rsi_min != null ||
-        profile.rsi_max != null ||
-        profile.require_ma20_above_ma50 === true ||
-        profile.require_ma50_above_ma200 === true ||
-        profile.require_price_above_ma200 === true ||
-        profile.exclude_downtrend_no_support === true
-      );
-    const technicalRulesNeedHistory = hasActiveTechnicalRuleForWarming;
-    const supportDistanceNeedsHistory = !noFilterMode &&
-      !isSectionOff(profile, 'support_distance_enabled') &&
-      (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
-    const historyNeeded = technicalRulesNeedHistory || supportDistanceNeedsHistory;
-    if (historyNeeded && scanMode !== 'analyze') {
-      // Find tickers with pending technical data — candidates that have
-      // technical_pending=true and no hard rejections (only pending reasons).
-      // Only fetch history for tickers that survived non-technical screening.
-      const pendingTickers = new Map<string, { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }>();
+    const warmQueue: { ticker: string; res: ScanSymbolResult; score: number }[] = [];
+    for (const [ticker, res] of resultsByTicker) {
+      const need = res.needsHistoryBars ?? 0;
+      if (need <= 0 || (res.historyBarCount ?? 0) >= need) continue;
+      // Only tickers with at least one contract that nothing else rejected.
+      const pendingContracts = res.candidates.filter((c) => c.technical_pending);
+      if (pendingContracts.length === 0) continue;
+      const score = Math.max(...pendingContracts.map((c) => Number(c.net_croi || 0) * 1000 + Number(c.open_interest || 0) / 1000));
+      warmQueue.push({ ticker, res, score });
+    }
+    warmQueue.sort((a, b) => b.score - a.score);
+    console.log(`[CacheWarm] ${warmQueue.length} tickers need history for the active rules`);
 
-      for (const c of candidates) {
-        if (c.technical_pending && (!c.rejection_reasons || c.rejection_reasons.length === 0)) {
-          const existing = pendingTickers.get(c.ticker);
-          const croi = c.net_croi || 0;
-          const oi = c.open_interest || 0;
-          const vol = c.volume || 0;
-          if (!existing || croi > existing.bestCroi) {
-            pendingTickers.set(c.ticker, {
-              ticker: c.ticker,
-              bestCroi: croi,
-              bestOi: Math.max(oi, existing?.bestOi || 0),
-              bestVolume: Math.max(vol, existing?.bestVolume || 0),
-              cachedBars: 0,
-            });
-          }
+    for (const item of warmQueue) {
+      const need = item.res.needsHistoryBars ?? 0;
+      const before = item.res.historyBarCount ?? 0;
+      if (ctx.historyRateLimited) {
+        stillPendingHistory++;
+        warmDiagnostics.push({ ticker: item.ticker, cachedBars: before, requiredBars: need, fetchAttempted: false, fetchStatus: 'skipped_rate_limited', finalBars: before });
+        continue;
+      }
+      if (Date.now() - requestStart > WARM_DEADLINE_MS) {
+        warmingDeadlineHit = true;
+        stillPendingHistory++;
+        warmDiagnostics.push({ ticker: item.ticker, cachedBars: before, requiredBars: need, fetchAttempted: false, fetchStatus: 'skipped_time_budget', finalBars: before });
+        continue;
+      }
+      ctx.stockCache.delete(item.ticker);
+      const snap = await getStockSnapshot(item.ticker, apiKey, today, fmt, priceFor(item.ticker), true, need, ctx);
+      const finalBars = snap.historicalBars.length;
+      const fetchStatus = snap.historyHttpStatus === 200 ? 'ok' : `HTTP_${snap.historyHttpStatus ?? 'none'}`;
+      if (snap.historyHttpStatus === 403) historyFetch403++;
+      if (snap.historyHttpStatus === 429) historyFetch429++;
+      warmDiagnostics.push({ ticker: item.ticker, cachedBars: before, requiredBars: need, fetchAttempted: true, fetchStatus, finalBars });
+
+      if (finalBars > before) {
+        historyFetchedThisScan++;
+        // Re-evaluate with the new history. The chain comes from ctx.chainCache,
+        // so quotes are identical to the first pass.
+        try {
+          const rerun = await scanSymbol(item.ticker, companyByTicker.get(item.ticker) || '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, priceFor(item.ticker), false, ctx);
+          resultsByTicker.set(item.ticker, rerun);
+        } catch (err) {
+          console.error(`[CacheWarm] re-evaluate ${item.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      if (finalBars < need) stillPendingHistory++;
+    }
 
-      // Check cache for each pending ticker to determine which actually need fetching
-      const needsFetch: { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }[] = [];
-      for (const info of pendingTickers.values()) {
-        const upper = info.ticker.toUpperCase();
-        const cachedBars = await loadCachedHistory(upper, 260);
-        info.cachedBars = cachedBars.length;
-        const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
-        const requiredBars = needsMA200 ? 200 : 60;
-        if (cachedBars.length < requiredBars) {
-          needsFetch.push(info);
-        } else {
-          // Already has enough cache — shouldn't be pending, but log anyway
-          warmDiagnostics.push({ ticker: upper, cachedBars: cachedBars.length, requiredBars, fetchAttempted: false, fetchStatus: 'cache_sufficient', finalBars: cachedBars.length });
-        }
-      }
+    // ── Assemble results & counts from the FINAL evaluation only ──
+    const candidates: any[] = [];
+    let symbolsWithChains = 0, totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
+    let totalValidQuotes = 0, totalAwaitingQuotes = 0, totalPagesFetched = 0;
+    let tickersWith60PlusBars = 0, tickersWith200PlusBars = 0, tickersMissingHistory = 0;
+    const techRejTotals = { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 };
+    const orderStrikeRejTotals = { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 };
+    const supportDistanceDebugTotals = { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] as any[] };
 
-      // Rank: tickers with CROI > 0 first (passing CROI/PC), then by OI, then volume
-      needsFetch.sort((a, b) => {
-        const aHasCroi = a.bestCroi > 0 ? 1 : 0;
-        const bHasCroi = b.bestCroi > 0 ? 1 : 0;
-        if (aHasCroi !== bHasCroi) return bHasCroi - aHasCroi;
-        if (a.bestOi !== b.bestOi) return b.bestOi - a.bestOi;
-        return b.bestVolume - a.bestVolume;
-      });
-
-      const toFetch = needsFetch.slice(0, MAX_HISTORY_FETCHES_PER_SCAN);
-      const skippedPending = needsFetch.length - toFetch.length;
-      stillPendingHistory = skippedPending;
-
-      console.log(`[CacheWarm] ${needsFetch.length} tickers need history, fetching top ${toFetch.length}, ${skippedPending} will remain pending`);
-
-      // Fetch history sequentially (respect Massive rate limits)
-      for (const info of toFetch) {
-        const upper = info.ticker.toUpperCase();
-        const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
-        const requiredBars = needsMA200 ? 200 : 60;
-
-        // Invalidate in-memory cache so getStockSnapshot actually fetches
-        stockCache.delete(upper);
-
-        // Fetch history with allowLiveHistory = true
-        const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null, true);
-        const fetchStatus = snapshot.historyHttpStatus === 200 ? 'ok' : `HTTP_${snapshot.historyHttpStatus ?? 'none'}`;
-        const finalBars = snapshot.historicalBars.length;
-
-        if (snapshot.historyHttpStatus === 403) historyFetch403++;
-        if (snapshot.historyHttpStatus === 429) historyFetch429++;
-
-        warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
-
-        if (finalBars >= 60) {
-          historyFetchedThisScan++;
-          console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars, re-scanning`);
-
-          // Re-scan this ticker with the now-cached history.
-          // The in-memory stockCache was populated by the getStockSnapshot call
-          // above, so scanSymbol will find the bars without another Massive call.
-          // Pass allowLiveHistory=false to avoid any further API calls.
-          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-          const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
-
-          if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
-            // Remove old candidates for this ticker and add the new ones
-            for (let ci = candidates.length - 1; ci >= 0; ci--) {
-              if (candidates[ci].ticker === upper) candidates.splice(ci, 1);
-            }
-            candidates.push(...rerunResult.candidates);
-
-            // Update totals
-            totalQualified += rerunResult.qualified;
-            totalRejected += rerunResult.rejected;
-            totalPending += rerunResult.pending;
-            totalEvaluated += rerunResult.evaluated;
-            if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
-            else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
-          }
-        } else {
-          console.log(`[CacheWarm] ${upper} | fetch returned only ${finalBars} bars — still pending`);
-          stillPendingHistory++;
-        }
-      }
-
-      if (warmDiagnostics.length > 0) {
-        console.log(`[CacheWarm] Diagnostics: ${JSON.stringify(warmDiagnostics)}`);
+    for (const res of resultsByTicker.values()) {
+      candidates.push(...res.candidates);
+      totalPutsReturned += res.putsReturned;
+      totalFilteredByExp += res.filteredByExpiration;
+      totalFilteredByStrike += res.filteredByStrike;
+      totalValidQuotes += res.validQuotes;
+      totalAwaitingQuotes += res.contractsAwaitingQuotes;
+      totalPagesFetched += res.pagesFetched;
+      if (res.chainStatus === 'success') symbolsWithChains++;
+      if (res.chainStatus === 'api_error' || res.chainStatus === 'unauthorized' || res.chainStatus === 'rate_limited' || res.chainStatus === 'network_error') symbolsFailed++;
+      const barCount = res.historyBarCount ?? 0;
+      if (barCount >= 200) tickersWith200PlusBars++;
+      else if (barCount >= 60) tickersWith60PlusBars++;
+      else tickersMissingHistory++;
+      if (res.techRejections) for (const k of Object.keys(techRejTotals) as (keyof typeof techRejTotals)[]) techRejTotals[k] += res.techRejections[k];
+      if (res.orderStrikeRejections) for (const k of Object.keys(orderStrikeRejTotals) as (keyof typeof orderStrikeRejTotals)[]) orderStrikeRejTotals[k] += res.orderStrikeRejections[k];
+      if (res.supportDistanceDebug) {
+        supportDistanceDebugTotals.before += res.supportDistanceDebug.before;
+        supportDistanceDebugTotals.passed += res.supportDistanceDebug.passed;
+        supportDistanceDebugTotals.below_min += res.supportDistanceDebug.below_min;
+        supportDistanceDebugTotals.above_max += res.supportDistanceDebug.above_max;
+        supportDistanceDebugTotals.missing_support += res.supportDistanceDebug.missing_support;
+        if (supportDistanceDebugTotals.details.length < 200) supportDistanceDebugTotals.details.push(...res.supportDistanceDebug.details.slice(0, 200 - supportDistanceDebugTotals.details.length));
       }
     }
 
-    // Send all contracts to the client. The client's selectBestContractPerTicker
-    // helper handles one-contract-per-ticker display logic. Keeping all contracts
-    // preserves them for Analyze Ticker / Candidate Detail views.
-    candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
-    const capped = candidates.slice(0, MAX_CANDIDATES * 10);
-
-    // Build rejection reason breakdown from all candidates
+    const statusOf = (c: any) => (c.qualified && !c.technical_pending) ? 'qualified' : c.technical_pending ? 'pending' : 'rejected';
+    let totalQualified = 0, totalPending = 0, totalRejected = 0;
     const rejectionBreakdown: Record<string, number> = {};
+    const pendingBreakdown: Record<string, number> = {};
+    const tickerStatus = new Map<string, number>(); // best status per ticker: 0 qualified, 1 pending, 2 rejected
     for (const c of candidates) {
-      if (c.rejection_reasons && Array.isArray(c.rejection_reasons)) {
-        for (const reason of c.rejection_reasons) {
-          rejectionBreakdown[reason] = (rejectionBreakdown[reason] || 0) + 1;
-        }
-      }
+      const st = statusOf(c);
+      if (st === 'qualified') totalQualified++;
+      else if (st === 'pending') totalPending++;
+      else totalRejected++;
+      for (const reason of (c.rejection_reasons || [])) rejectionBreakdown[reason] = (rejectionBreakdown[reason] || 0) + 1;
+      for (const reason of (c.pending_reasons || [])) pendingBreakdown[reason] = (pendingBreakdown[reason] || 0) + 1;
+      const rank = st === 'qualified' ? 0 : st === 'pending' ? 1 : 2;
+      const prev = tickerStatus.get(c.ticker);
+      if (prev === undefined || rank < prev) tickerStatus.set(c.ticker, rank);
+    }
+    let qualifiedTickerCount = 0, pendingTickerCount = 0, rejectedTickerCount = 0;
+    for (const rank of tickerStatus.values()) {
+      if (rank === 0) qualifiedTickerCount++;
+      else if (rank === 1) pendingTickerCount++;
+      else rejectedTickerCount++;
     }
 
-    // Count unique qualified tickers
-    const qualifiedTickers = new Set<string>();
+    // Response cap PER TICKER (not a global slice), so every scanned ticker
+    // keeps its best contracts in the response. The old global 500-contract
+    // cap could silently drop a ticker's pending/rejected rows.
+    const perTickerCap = Math.max(5, Number(profile.max_strikes_per_ticker || 1));
+    const byTicker = new Map<string, any[]>();
     for (const c of candidates) {
-      if (c.qualified) qualifiedTickers.add(c.ticker);
+      const arr = byTicker.get(c.ticker);
+      if (arr) arr.push(c); else byTicker.set(c.ticker, [c]);
     }
+    const capped: any[] = [];
+    for (const [, arr] of [...byTicker.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      arr.sort(compareContracts);
+      capped.push(...arr.slice(0, perTickerCap));
+    }
+    capped.sort(compareContracts);
 
-    // Build closest-match debug: 20 nearest-miss contracts when qualified tickers = 0
     let closestMatches: any[] = [];
-    if (totalQualified === 0 && capped.length > 0) {
-      const notQualified = capped.filter((c) => !c.qualified);
-      notQualified.sort((a, b) => {
-        // Sort by fewest rejection reasons, then by highest net_croi
-        const aReasons = (a.rejection_reasons || []).length;
-        const bReasons = (b.rejection_reasons || []).length;
-        if (aReasons !== bReasons) return aReasons - bReasons;
-        return (b.net_croi || 0) - (a.net_croi || 0);
-      });
-      closestMatches = notQualified.slice(0, 20).map((c) => ({
-        ticker: c.ticker,
-        price: c.stock_price,
-        strike: c.strike,
-        rsi: null,
-        ma20: null,
-        ma50: null,
-        ma200: null,
-        primary_support: c.primary_support,
-        support_distance: c.strike_distance_from_support,
-        net_croi: c.net_croi,
-        premium_capture: c.premium_capture,
-        open_interest: c.open_interest,
-        volume: c.volume,
-        failed_rules: [...(c.rejection_reasons || []), ...(c.pending_reasons || [])],
-      }));
+    if (totalQualified === 0 && candidates.length > 0) {
+      closestMatches = candidates
+        .filter((c) => !c.qualified)
+        .sort((a, b) => {
+          const ar = (a.rejection_reasons || []).length, br = (b.rejection_reasons || []).length;
+          if (ar !== br) return ar - br;
+          return (b.net_croi || 0) - (a.net_croi || 0);
+        })
+        .slice(0, 20)
+        .map((c) => ({
+          ticker: c.ticker, price: c.stock_price, strike: c.strike,
+          rsi: c.technical_snapshot?.rsi ?? null, ma20: c.technical_snapshot?.ma20 ?? null,
+          ma50: c.technical_snapshot?.ma50 ?? null, ma200: c.technical_snapshot?.ma200 ?? null,
+          primary_support: c.primary_support, support_distance: c.strike_distance_from_support,
+          net_croi: c.net_croi, premium_capture: c.premium_capture,
+          open_interest: c.open_interest, volume: c.volume,
+          failed_rules: [...(c.rejection_reasons || []), ...(c.pending_reasons || [])],
+        }));
     }
 
     const scan_counts = {
       symbols_in_universe: symbolList.length,
-      symbols_returned: symbolsScanned,
+      symbols_returned: resultsByTicker.size,
       symbols_failed: symbolsFailed,
       symbols_with_chains: symbolsWithChains,
       puts_returned: totalPutsReturned,
@@ -2615,14 +2287,17 @@ serve(async (req) => {
       filtered_by_strike: totalFilteredByStrike,
       valid_quotes: totalValidQuotes,
       contracts_awaiting_quotes: totalAwaitingQuotes,
-      contracts_evaluated: totalEvaluated,
+      contracts_evaluated: candidates.length,
       qualified: totalQualified,
       rejected: totalRejected,
       pending: totalPending,
       pages_fetched: totalPagesFetched,
-      contracts_found: totalContractsFound,
+      contracts_found: totalPutsReturned,
       rejection_breakdown: rejectionBreakdown,
-      unique_qualified_tickers: qualifiedTickers.size,
+      pending_breakdown: pendingBreakdown,
+      unique_qualified_tickers: qualifiedTickerCount,
+      unique_pending_tickers: pendingTickerCount,
+      unique_rejected_tickers: rejectedTickerCount,
       technical_rejections: techRejTotals,
       order_strike_rejections: orderStrikeRejTotals,
       technical_cache: {
@@ -2633,14 +2308,19 @@ serve(async (req) => {
         still_pending_history: stillPendingHistory,
         massive_history_403: historyFetch403,
         massive_history_429: historyFetch429,
-        cache_save_failures: cacheSaveFailures,
+        history_rate_limited: ctx.historyRateLimited,
+        warming_time_budget_hit: warmingDeadlineHit,
+        grouped_bars_saved: groupedBarsSaved,
+        latest_trading_date: ctx.expectedLatestDate,
+        cache_save_failures: 0,
         warm_diagnostics: warmDiagnostics,
       },
       closest_matches: closestMatches,
       support_distance_debug: supportDistanceDebugTotals,
     };
 
-    console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));
+    console.log(`[SCAN SUMMARY] mode=${scanMode} symbols=${resultsByTicker.size} contracts=${candidates.length} Q=${totalQualified} P=${totalPending} R=${totalRejected} | tickers Q=${qualifiedTickerCount} P=${pendingTickerCount} R=${rejectedTickerCount} | historyFetched=${historyFetchedThisScan} stillPendingHistory=${stillPendingHistory} rateLimited=${ctx.historyRateLimited} | ${Date.now() - requestStart}ms`);
+    console.log(`[SCAN SUMMARY] rejection reasons: ${JSON.stringify(rejectionBreakdown)} | pending reasons: ${JSON.stringify(pendingBreakdown)}`);
 
     return json({
       success: true, candidates: capped, source: 'massive',
