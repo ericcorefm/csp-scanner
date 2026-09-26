@@ -35,7 +35,9 @@ export function EnterQuoteModal({ candidate, profile, onClose, onSubmit }: Enter
     const increment = profile.allow_penny_increments ? 0.01 : Math.max(0.01, profile.btc_increment);
     let best: { btc: number; netProfit: number; netCroi: number; pc: number } | null = null;
 
-    for (let btc = increment; btc < stoNum; btc += increment) {
+    // Same price grid as the edge function's calcBtc ($0.01, then +increment),
+    // so a manual quote produces the same BTC target the scan would.
+    for (let btc = 0.01; btc < stoNum; btc += increment) {
       const px = parseFloat(btc.toFixed(2));
       const netProfit = calcNetProfit(stoNum, px, contractsNum, profile.round_trip_commission);
       const netCroi = calcCroiFromCollateral(netProfit, candidate.strike, contractsNum);

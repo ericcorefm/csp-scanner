@@ -17,6 +17,7 @@ import {
 import type { AppState } from '@/lib/store';
 import { Badge } from '@/components/ui';
 import { selectBestContractPerTicker } from '@/lib/bestContract';
+import { isQualified, isRejected } from '@/lib/status';
 
 export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
 
@@ -41,12 +42,8 @@ export function Layout({ children, currentPage, onNavigate, state }: LayoutProps
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const bestPerTicker = selectBestContractPerTicker(state.candidates);
-  const isUniverseMode = state.scanMode === 'universe';
-  const qualifiedTickers = bestPerTicker.filter((c) =>
-    isUniverseMode ? (c.qualified && !c.technical_pending) : c.qualified
-  );
-  const qualifiedCount = new Set(qualifiedTickers.map((c) => c.ticker)).size;
-  const rejectedCount = new Set(bestPerTicker.filter((c) => !c.qualified).map((c) => c.ticker)).size;
+  const qualifiedCount = new Set(bestPerTicker.filter(isQualified).map((c) => c.ticker)).size;
+  const rejectedCount = new Set(bestPerTicker.filter(isRejected).map((c) => c.ticker)).size;
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
 
   const handleNav = (page: Page) => {

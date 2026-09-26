@@ -10,7 +10,6 @@ import {
   type LineData,
 } from 'lightweight-charts';
 import { Loader2, AlertTriangle } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
 import { getCachedBars, fetchCachedBars, type OhlcBar } from '@/lib/technicalCache';
 
 interface Props {
@@ -48,7 +47,7 @@ function aggregateBars(bars: OhlcBar[], resolution: Resolution): OhlcBar[] {
     open: group[0].open,
     high: Math.max(...group.map((b) => b.high)),
     low: Math.min(...group.map((b) => b.low)),
-    close: group.at(-1)!.close,
+    close: group[group.length - 1].close,
     volume: group.reduce((sum, b) => sum + b.volume, 0),
   })).sort((a, b) => a.date.localeCompare(b.date));
 }

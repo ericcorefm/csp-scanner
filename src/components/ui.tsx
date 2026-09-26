@@ -59,11 +59,16 @@ export function Card({ children, className = '', title, action }: { children: Re
   );
 }
 
-export function StatRow({ label, value, highlight }: { label: string; value: string | number; highlight?: boolean }) {
+export function StatRow({ label, value, highlight, icon, sub }: { label: string; value: string | number; highlight?: boolean; icon?: ReactNode; sub?: string }) {
+  // `icon` and `sub` were already passed by Candidate Detail but silently
+  // dropped, so MACD histogram / Bollinger band levels never displayed.
   return (
     <div className="flex items-center justify-between py-2">
-      <span className="text-sm text-slate-400">{label}</span>
-      <span className={`text-sm font-medium tabular-nums ${highlight ? 'text-emerald-400' : 'text-slate-200'}`}>{value}</span>
+      <span className="flex items-center gap-1.5 text-sm text-slate-400">{icon}{label}</span>
+      <span className="text-right">
+        <span className={`block text-sm font-medium tabular-nums ${highlight ? 'text-emerald-400' : 'text-slate-200'}`}>{value}</span>
+        {sub && <span className="block text-[11px] text-slate-500 tabular-nums">{sub}</span>}
+      </span>
     </div>
   );
 }
