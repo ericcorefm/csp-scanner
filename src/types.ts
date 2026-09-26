@@ -164,6 +164,10 @@ export interface CandidateScan {
   has_quotes: boolean;
   premium_source?: PremiumSource;
   scan_mode?: 'discovery' | 'universe';
+  /** Indicator values the scan used to evaluate this contract (not persisted). */
+  technical_snapshot?: { rsi: number | null; ma20: number | null; ma50: number | null; ma200: number | null } | null;
+  /** Gap-free daily bars available when this contract was evaluated. */
+  history_bars?: number;
 }
 
 export type PremiumSource = 'MID' | 'LAST' | 'DAY CLOSE' | 'MANUAL' | 'UNAVAILABLE';
