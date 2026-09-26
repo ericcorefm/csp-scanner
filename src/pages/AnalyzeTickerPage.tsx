@@ -23,45 +23,31 @@ import { getCachedStockPrice } from '@/lib/technicalCache';
 import { TradingViewChart } from '@/components/TradingViewChart';
 import { calcProbabilities } from '@/lib/probability';
 import { calcBtcOptimization, calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcBreakeven } from '@/lib/calculations';
+import { getContractStatus } from '@/lib/status';
 
 function getFailedRules(c: ContractAnalysis): string[] {
   if (!c.pass_fail || c.pass_fail.length === 0) return [];
   return c.pass_fail.filter((pf) => pf.status === 'fail').map((pf) => pf.rule);
 }
 
-function getNotEvaluatedRules(c: ContractAnalysis): string[] {
-  if (!c.pass_fail || c.pass_fail.length === 0) return [];
-  return c.pass_fail.filter((pf) => pf.status === 'not_evaluated').map((pf) => pf.rule);
-}
-
+// Status comes straight from the shared evaluator (same as Today's Candidates):
+// informational "not evaluated" rows never turn a Rejected contract into a warning.
 function contractStatus(c: ContractAnalysis): 'qualifies' | 'warning' | 'fail' {
-  if (c.qualified) return 'qualifies';
-  if (c.technical_pending || getNotEvaluatedRules(c).length > 0) return 'warning';
+  const status = getContractStatus(c);
+  if (status === 'qualified') return 'qualifies';
+  if (status === 'pending') return 'warning';
   return 'fail';
 }
 
-function primaryReason(c: ContractAnalysis): string {
-  const failed = getFailedRules(c);
-  if (c.technical_pending) return 'Technical data unavailable';
-  if (failed.length > 0) return failed[0];
-  const notEval = getNotEvaluatedRules(c);
-  if (notEval.length > 0) return 'Trend/support could not be evaluated';
-  if (!c.has_quotes) return 'No option quotes available';
-  return '--';
-}
-
 function reasonSummary(c: ContractAnalysis): { primary: string; count: number; all: string[] } {
-  const failed = getFailedRules(c);
-  const notEval = getNotEvaluatedRules(c);
-  const all = [...failed, ...notEval];
-  if (c.technical_pending) {
-    return { primary: 'Technical data unavailable', count: all.length, all };
+  const rejections = c.rejection_reasons ?? getFailedRules(c);
+  const pending = c.pending_reasons ?? [];
+  const status = getContractStatus(c);
+  if (status === 'rejected' && rejections.length > 0) {
+    return { primary: rejections[0], count: rejections.length, all: [...rejections, ...pending.map((p) => `Pending: ${p}`)] };
   }
-  if (failed.length > 0) {
-    return { primary: failed[0], count: failed.length, all };
-  }
-  if (notEval.length > 0) {
-    return { primary: 'Trend/support could not be evaluated', count: notEval.length, all };
+  if (status === 'pending') {
+    return { primary: pending[0] ?? 'Required data unavailable', count: pending.length, all: pending };
   }
   if (!c.has_quotes) return { primary: 'No option quotes available', count: 0, all: [] };
   return { primary: '--', count: 0, all: [] };

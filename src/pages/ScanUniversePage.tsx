@@ -3,6 +3,8 @@ import { Plus, Trash2, RotateCcw, Power, AlertCircle, CheckCircle2, XCircle, Ale
 import type { AppState } from '@/lib/types';
 import type { Page } from '@/components/Layout';
 import { Card, Badge } from '@/components/ui';
+import { selectBestContractPerTicker } from '@/lib/bestContract';
+import { getContractStatus, type ContractStatus } from '@/lib/status';
 
 function formatAddedDate(value?: string | null): string {
   if (!value) return '—';
@@ -21,21 +23,13 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
   const activeCount = entries.filter((e) => e.enabled).length;
   const disabledCount = entries.filter((e) => !e.enabled).length;
 
-  // Derive per-ticker scan status from the most recent universe candidates
+  // Per-ticker status = status of that ticker's BEST contract (same ranking as
+  // Today's Candidates). Previously the first contract returned was used, so a
+  // ticker with a qualified contract could show as Rejected here.
   const universeStatus = useMemo(() => {
-    const statusMap = new Map<string, 'qualified' | 'pending' | 'rejected'>();
-    const bestByTicker = new Map<string, typeof state.universeCandidates[number]>();
-    for (const c of state.universeCandidates) {
-      const key = c.ticker.toUpperCase();
-      const existing = bestByTicker.get(key);
-      if (!existing) {
-        bestByTicker.set(key, c);
-      }
-    }
-    for (const [ticker, c] of bestByTicker) {
-      if (c.qualified && !c.technical_pending) statusMap.set(ticker, 'qualified');
-      else if (c.technical_pending) statusMap.set(ticker, 'pending');
-      else statusMap.set(ticker, 'rejected');
+    const statusMap = new Map<string, ContractStatus>();
+    for (const c of selectBestContractPerTicker(state.universeCandidates)) {
+      statusMap.set(c.ticker.toUpperCase(), getContractStatus(c));
     }
     return statusMap;
   }, [state.universeCandidates]);
@@ -121,7 +115,7 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
     try {
       await state.removeFromScanUniverseBulk([...selected]);
       setSelected(new Set());
-    } catch (err) {
+    } catch {
       setError('Could not delete selected tickers.');
     } finally {
       setActionLoading(false);

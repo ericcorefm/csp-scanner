@@ -12,6 +12,7 @@ import { TradingViewChart } from '@/components/TradingViewChart';
 import type { Page } from '@/components/Layout';
 import type { TechnicalData } from '@/lib/liveMarketData';
 import { getCachedTechnical, type TechFetchError } from '@/lib/technicalCache';
+import { selectBestContractPerTicker } from '@/lib/bestContract';
 
 const trendIcons: Record<string, typeof TrendingUp> = {
   Bullish: TrendingUp,
@@ -79,7 +80,9 @@ export function DetailPage({
       );
       if (exact) return exact;
     }
-    return state.candidates.find((c) => c.ticker === ticker && c.qualified);
+    // No exact contract: show this ticker's best contract (same ranking as
+    // Today's Candidates) instead of an arbitrary one.
+    return selectBestContractPerTicker(state.candidates.filter((c) => c.ticker === ticker))[0];
   }, [state.candidates, ticker, strike, expiration]);
 
   // ── Auto-fetch missing technical data (non-blocking) ──
@@ -421,6 +424,14 @@ export function DetailPage({
                   <StatRow label="Secondary Support" value={displayPrice(effectiveSecondarySupport)} />
                   <StatRow label="Resistance" value={displayPrice(effectiveResistance)} />
                 </div>
+                {!extraTech && candidate.technical_snapshot && (
+                  <div className="grid grid-cols-2 gap-x-6 border-t border-slate-800 pt-4">
+                    <StatRow label="RSI (scan)" value={formatNum(candidate.technical_snapshot.rsi, 1)} icon={<Activity className="h-3.5 w-3.5 text-slate-500" />} />
+                    <StatRow label="20 DMA" value={`$${formatNum(candidate.technical_snapshot.ma20)}`} />
+                    <StatRow label="50 DMA" value={`$${formatNum(candidate.technical_snapshot.ma50)}`} />
+                    <StatRow label="200 DMA" value={candidate.technical_snapshot.ma200 != null ? formatNum(candidate.technical_snapshot.ma200) : 'N/A'} />
+                  </div>
+                )}
                 {extraTech && (
                   <div className="grid grid-cols-2 gap-x-6 border-t border-slate-800 pt-4">
                     <StatRow label="RSI" value={formatNum(extraTech.rsi, 1)} icon={<Activity className="h-3.5 w-3.5 text-slate-500" />} />

@@ -6,6 +6,7 @@ import type { Page } from '@/components/Layout';
 import { Badge, MetricIndicator, formatPct, formatNum } from '@/components/ui';
 import { EnterQuoteModal } from '@/components/EnterQuoteModal';
 import { selectBestContractPerTicker } from '@/lib/bestContract';
+import { getContractStatus } from '@/lib/status';
 
 const rejectionColors: Record<string, 'error' | 'warning'> = {
   'CROI too low': 'error',
@@ -43,38 +44,38 @@ export function CandidatesPage({
     [state.candidates, state.activeProfile?.max_strikes_per_ticker],
   );
 
+  // Same rule in both scan modes: Qualified always shows; Pending and Rejected
+  // show only when their toggle is on.
   const filtered = useMemo(() => {
     let list = displayCandidates.filter((c) => {
-      // In universe mode: only fully-qualified contracts show by default.
-      // Pending (qualified but missing technical data) and rejected are hidden
-      // unless their respective toggles are on.
-      // In discovery mode: all qualified contracts (including pending) show by default.
-      if (isDiscovery) {
-        if (c.qualified) return true;
-        if (showPending && !c.qualified && c.technical_pending) return true;
-        if (showRejected && !c.qualified && !c.technical_pending) return true;
-        return false;
-      } else {
-        if (c.qualified && !c.technical_pending) return true;
-        if (showPending && c.qualified && c.technical_pending) return true;
-        if (showPending && !c.qualified && c.technical_pending) return true;
-        if (showRejected && !c.qualified) return true;
-        return false;
-      }
+      const status = getContractStatus(c);
+      if (status === 'qualified') return true;
+      if (status === 'pending') return showPending;
+      return showRejected;
     });
     list = [...list].sort((a, b) => {
-      let aVal = a[sortKey as keyof CandidateScan];
-      let bVal = b[sortKey as keyof CandidateScan];
-      if (aVal === null || aVal === undefined) aVal = 0;
-      if (bVal === null || bVal === undefined) bVal = 0;
-      if (typeof aVal === 'string') aVal = aVal.toLowerCase();
-      if (typeof bVal === 'string') bVal = bVal.toLowerCase();
-      if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
-      if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
+      const aRaw = a[sortKey as keyof CandidateScan];
+      const bRaw = b[sortKey as keyof CandidateScan];
+      // Missing values always sort last, regardless of direction.
+      const aMissing = aRaw === null || aRaw === undefined;
+      const bMissing = bRaw === null || bRaw === undefined;
+      if (aMissing !== bMissing) return aMissing ? 1 : -1;
+      const aVal = typeof aRaw === 'string' ? aRaw.toLowerCase() : aRaw;
+      const bVal = typeof bRaw === 'string' ? bRaw.toLowerCase() : bRaw;
+      if (aVal! < bVal!) return sortDir === 'asc' ? -1 : 1;
+      if (aVal! > bVal!) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
     return list;
-  }, [displayCandidates, showRejected, showPending, sortKey, sortDir, isDiscovery]);
+  }, [displayCandidates, showRejected, showPending, sortKey, sortDir]);
+
+  const tickerCounts = useMemo(() => {
+    const byStatus = { qualified: new Set<string>(), pending: new Set<string>(), rejected: new Set<string>() };
+    for (const c of filtered) byStatus[getContractStatus(c)].add(c.ticker);
+    return { qualified: byStatus.qualified.size, pending: byStatus.pending.size, rejected: byStatus.rejected.size };
+  }, [filtered]);
+
+  const minCroi = state.activeProfile?.min_net_croi ?? 0;
 
   const quoteModalCandidate = useMemo(() => {
     if (!quoteModalRow) return null;
@@ -125,6 +126,12 @@ export function CandidatesPage({
         </div>
       )}
 
+      {state.scanNotice && !state.scanning && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-sm text-amber-300">
+          {state.scanNotice}
+        </div>
+      )}
+
       {state.scanError && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm text-red-400">
           {state.scanError}
@@ -151,14 +158,15 @@ export function CandidatesPage({
 
       {state.scanCounts && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-8 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-9 gap-4">
             <ScanCountItem label={isDiscovery ? 'Stocks Screened' : 'In Universe'} value={state.scanCounts.symbols_in_universe} />
             <ScanCountItem label="With Option Chains" value={state.scanCounts.symbols_with_chains} color="text-sky-400" />
             <ScanCountItem label="Contracts Evaluated" value={state.scanCounts.contracts_evaluated} color="text-sky-400" />
             <ScanCountItem label="Qualified Contracts" value={state.scanCounts.qualified} color="text-emerald-400" />
             <ScanCountItem label="Rejected Contracts" value={state.scanCounts.rejected} color="text-red-400" />
             <ScanCountItem label="Pending Contracts" value={state.scanCounts.pending ?? Math.max(0, state.scanCounts.contracts_evaluated - state.scanCounts.qualified - state.scanCounts.rejected)} color="text-amber-400" />
-            <ScanCountItem label="Qualified Tickers" value={state.scanCounts.unique_qualified_tickers ?? new Set(displayCandidates.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} color="text-emerald-400" />
+            <ScanCountItem label="Qualified Tickers" value={state.scanCounts.unique_qualified_tickers ?? new Set(displayCandidates.filter((c) => getContractStatus(c) === 'qualified').map((c) => c.ticker)).size} color="text-emerald-400" />
+            <ScanCountItem label="Pending Tickers" value={state.scanCounts.unique_pending_tickers ?? '--'} color="text-amber-400" />
             <ScanCountItem
               label="Last Scan"
               value={state.lastScanAt ? new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '--'}
@@ -206,9 +214,9 @@ export function CandidatesPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-slate-500">
-            {new Set(filtered.filter((c) => isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)).map((c) => c.ticker)).size} qualified
-            {showPending && ` · ${new Set(filtered.filter((c) => c.technical_pending && !(isDiscovery ? c.qualified : (c.qualified && !c.technical_pending))).map((c) => c.ticker)).size} pending`}
-            {showRejected && ` · ${new Set(filtered.filter((c) => !c.qualified && !c.technical_pending).map((c) => c.ticker)).size} rejected`}
+            {tickerCounts.qualified} qualified
+            {showPending && ` · ${tickerCounts.pending} pending`}
+            {showRejected && ` · ${tickerCounts.rejected} rejected`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -259,20 +267,23 @@ export function CandidatesPage({
               {filtered.map((c) => {
                 const rowKey = `${c.ticker}-${c.strike}-${c.expiration}`;
                 const isExpanded = expandedRow === rowKey;
-                const hasNoPremium = c.suggested_sto === 0 || c.suggested_btc === 0;
+                const status = getContractStatus(c);
+                const hasNoPremium = !c.has_quotes || !(c.suggested_sto > 0);
+                const hasNoBtc = hasNoPremium || !(c.suggested_btc > 0);
+                const reasonCount = c.rejection_reasons.length + (c.pending_reasons?.length ?? 0);
                 return (
                   <Fragment key={rowKey}>
                     <tr
                       onClick={() => onNavigate('detail', c.ticker, { strike: c.strike, expiration: c.expiration })}
                       className={`cursor-pointer transition-colors ${
-                        (isDiscovery ? c.qualified : (c.qualified && !c.technical_pending)) ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
+                        status === 'qualified' ? 'hover:bg-slate-800/40' : 'opacity-75 hover:bg-slate-800/40'
                       }`}
                     >
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
-                          {c.qualified && !c.technical_pending && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />}
-                          {c.qualified && c.technical_pending && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
-                          {!c.qualified && <XCircle className="h-3.5 w-3.5 text-red-400" />}
+                          {status === 'qualified' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-label="Qualified" />}
+                          {status === 'pending' && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" aria-label="Pending" />}
+                          {status === 'rejected' && <XCircle className="h-3.5 w-3.5 text-red-400" aria-label="Rejected" />}
                           <span className="font-semibold text-slate-100">{c.ticker}</span>
                         </div>
                       </td>
@@ -297,17 +308,17 @@ export function CandidatesPage({
                         {hasNoPremium ? DASH : `${formatNum(c.suggested_sto)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">
-                        {hasNoPremium ? DASH : `${formatNum(c.suggested_btc)}`}
+                        {hasNoBtc ? DASH : `${formatNum(c.suggested_btc)}`}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums">
-                        {hasNoPremium ? DASH : (
-                          <span className={typeof c.net_croi === 'number' && c.net_croi >= 3.5 ? 'text-emerald-400 font-medium' : 'text-red-400'}>
+                        {hasNoBtc ? DASH : (
+                          <span className={typeof c.net_croi === 'number' && c.net_croi >= minCroi ? 'text-emerald-400 font-medium' : 'text-red-400'}>
                             {formatPct(c.net_croi)}
                           </span>
                         )}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {hasNoPremium ? DASH : formatPct(c.premium_capture)}
+                        {hasNoBtc ? DASH : formatPct(c.premium_capture)}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">
                         {c.open_interest > 0 ? c.open_interest.toLocaleString() : DASH}
@@ -329,18 +340,21 @@ export function CandidatesPage({
                         </button>
                       </td>
                     </tr>
-                    {showRejected && !c.qualified && isExpanded && (
+                    {status !== 'qualified' && reasonCount > 0 && isExpanded && (
                       <tr key={rowKey + '-detail'}>
                         <td colSpan={colCount} className="px-4 py-3 bg-slate-900/80">
                           <div className="flex flex-wrap gap-2">
                             {c.rejection_reasons.map((r) => (
-                              <Badge key={r} variant={rejectionColors[r] || 'warning'}>{r}</Badge>
+                              <Badge key={r} variant={rejectionColors[r] || 'error'}>{r}</Badge>
+                            ))}
+                            {(c.pending_reasons ?? []).map((r) => (
+                              <Badge key={'p-' + r} variant="warning">Pending: {r}</Badge>
                             ))}
                           </div>
                         </td>
                       </tr>
                     )}
-                    {showRejected && !c.qualified && !isExpanded && (
+                    {status !== 'qualified' && reasonCount > 0 && !isExpanded && (
                       <tr
                         key={rowKey + '-expand'}
                         className="cursor-pointer hover:bg-slate-800/30"
@@ -349,7 +363,9 @@ export function CandidatesPage({
                         <td colSpan={colCount} className="px-4 py-1.5 bg-slate-900/40">
                           <div className="flex items-center gap-2 text-xs text-slate-500">
                             <Info className="h-3 w-3" />
-                            {c.rejection_reasons.length} rejection reason(s) — click to expand
+                            {status === 'pending'
+                              ? `Pending — ${c.pending_reasons?.length ?? 0} missing data item(s) — click to expand`
+                              : `${c.rejection_reasons.length} rejection reason(s) — click to expand`}
                           </div>
                         </td>
                       </tr>

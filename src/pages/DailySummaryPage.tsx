@@ -5,8 +5,10 @@ import {
 } from 'lucide-react';
 import type { AppState } from '@/lib/types';
 import type { OpenPosition } from '@/types';
-import { Card, Badge, formatMoney, formatPercent, formatNum } from '@/components/ui';
+import { Card, Badge, formatMoney, formatPercent } from '@/components/ui';
 import { calcPositionStatus, calcDaysOpen } from '@/lib/calculations';
+import { selectBestContractPerTicker } from '@/lib/bestContract';
+import { isQualified } from '@/lib/status';
 
 const REVIEW_WARNING_DAYS = 14;
 
@@ -23,7 +25,8 @@ export function DailySummaryPage({ state }: { state: AppState }) {
   const maxCycleDays = state.activeProfile?.max_recycle_days ?? 120;
 
   const summary = useMemo(() => {
-    const qualified = state.candidates.filter((c) => c.qualified);
+    // One best qualified contract per ticker — same as Today's Candidates.
+    const qualified = selectBestContractPerTicker(state.candidates, state.activeProfile?.max_strikes_per_ticker ?? 1).filter(isQualified);
     const openTickers = state.openPositions.map((p) => p.ticker);
     const nearBtc = state.openPositions.filter((p) => {
       const status = calcPositionStatus(
@@ -58,7 +61,7 @@ export function DailySummaryPage({ state }: { state: AppState }) {
       openTickers,
       qualified,
     };
-  }, [state.candidates, state.openPositions, maxCycleDays]);
+  }, [state.candidates, state.openPositions, maxCycleDays, state.activeProfile?.max_strikes_per_ticker]);
 
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 

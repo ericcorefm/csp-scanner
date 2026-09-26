@@ -134,7 +134,7 @@ export function SettingsPage({ state }: { state: AppState }) {
 
   if (!profile) return <div className="text-slate-400">Loading...</div>;
 
-  const updateField = (key: keyof StrategyProfile, value: string | number | boolean | string[] | number[]) => {
+  const updateField = (key: keyof StrategyProfile, value: string | number | boolean | string[] | number[] | null) => {
     setProfile({ ...profile, [key]: value });
     setSaved(false);
     setSaveError(null);
@@ -189,7 +189,7 @@ export function SettingsPage({ state }: { state: AppState }) {
 
   const renderField = (field: FieldDef, disabled: boolean) => {
     if (field.type === 'number_array') {
-      const arr = profile[field.key] as number[];
+      const arr = (profile[field.key] as unknown as number[] | null) ?? [];
       return (
         <div className="flex flex-col items-end gap-1">
           <input
@@ -317,8 +317,26 @@ export function SettingsPage({ state }: { state: AppState }) {
     );
   };
 
+  // Rescans always use the SAVED profile. Make unsaved edits impossible to miss.
+  const isDirty = JSON.stringify(profile) !== JSON.stringify(state.activeProfile);
+
   return (
     <div className="space-y-5">
+      {isDirty && (
+        <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-slate-900/95 px-4 py-2.5 text-sm text-amber-300 backdrop-blur">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            Unsaved changes — Rescan will keep using the last saved settings until you save.
+          </span>
+          <button
+            onClick={handleSave}
+            className="flex items-center gap-2 rounded-lg bg-sky-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-600 transition-colors"
+          >
+            <Save className="h-4 w-4" />
+            Save now
+          </button>
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-slate-100">Settings</h1>
