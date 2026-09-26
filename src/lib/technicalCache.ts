@@ -1,6 +1,7 @@
 import type { AnalyzeTickerResponse, TechnicalData } from '@/lib/liveMarketData';
 import { analyzeTicker } from '@/lib/liveMarketData';
 import type { CandidateScan, StrategyProfile, OhlcBar } from '@/types';
+export type { OhlcBar };
 import { supabase } from '@/lib/supabase';
 
 export interface TechnicalSnapshot {
@@ -387,6 +388,8 @@ export function mergeCandidateWithTechnical<
     resistance: mergedResistance,
     stock_price: mergedStockPrice,
     strike_distance_from_support: supportDist,
-    technical_pending: false,
+    // Display-only merge: status (qualified / technical_pending) stays exactly
+    // what the scan evaluated. Forcing technical_pending=false here used to turn
+    // Pending rows into "Rejected" after opening Candidate Detail.
   };
 }

@@ -193,10 +193,12 @@ export function calcRecycleDate(openDate: string, maxRecycleDays: number): strin
 }
 
 export function calcStrikeDistanceFromStock(strike: number, stockPrice: number): number {
-  return parseFloat(((stockPrice - strike) / stockPrice) * 100).toFixed(1) as unknown as number;
+  if (stockPrice <= 0) return 0;
+  // Previously returned a string ("12.3") disguised as a number.
+  return Number((((stockPrice - strike) / stockPrice) * 100).toFixed(1));
 }
 
 export function calcStrikeDistanceFromSupport(strike: number, support: number): number {
   if (support <= 0) return 0;
-  return parseFloat(((support - strike) / support) * 100).toFixed(1) as unknown as number;
+  return Number((((support - strike) / support) * 100).toFixed(1));
 }

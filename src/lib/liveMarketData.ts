@@ -25,7 +25,10 @@ export interface ScanCounts {
   pages_fetched: number;
   contracts_found: number;
   rejection_breakdown?: Record<string, number>;
+  pending_breakdown?: Record<string, number>;
   unique_qualified_tickers?: number;
+  unique_pending_tickers?: number;
+  unique_rejected_tickers?: number;
   technical_rejections?: {
     rsi_below_min: number;
     rsi_above_max: number;
@@ -51,6 +54,10 @@ export interface ScanCounts {
     massive_history_403?: number;
     massive_history_429?: number;
     cache_save_failures?: number;
+    history_rate_limited?: boolean;
+    warming_time_budget_hit?: boolean;
+    grouped_bars_saved?: number;
+    latest_trading_date?: string;
     warm_diagnostics?: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[];
   };
   closest_matches?: ClosestMatch[];
@@ -130,9 +137,10 @@ function formatMassiveError(d: MassiveApiError): string {
 }
 
 export interface TechnicalData {
-  rsi: number;
-  ma20: number;
-  ma50: number;
+  // null = not enough history to compute (never shown as a fake 0)
+  rsi: number | null;
+  ma20: number | null;
+  ma50: number | null;
   ma200: number | null;
   macd: number;
   macd_signal: number;
@@ -187,6 +195,9 @@ export interface ContractAnalysis {
   qualified: boolean;
   technical_pending?: boolean;
   pass_fail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[];
+  rejection_reasons?: string[];
+  pending_reasons?: string[];
+  technical_snapshot?: { rsi: number | null; ma20: number | null; ma50: number | null; ma200: number | null } | null;
   has_quotes?: boolean;
   premium_source?: PremiumSource;
   strike_distance_from_stock?: number | null;
@@ -221,9 +232,12 @@ function normalizeContract(c: any): ContractAnalysis {
     premium_capture: num(c?.premium_capture) ?? 0,
     breakeven: num(c?.breakeven) ?? 0,
     qualified: !!c?.qualified,
-    technical_pending: c?.technical_pending,
+    technical_pending: !!c?.technical_pending,
     pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
-    has_quotes: c?.has_quotes,
+    rejection_reasons: Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [],
+    pending_reasons: Array.isArray(c?.pending_reasons) ? c.pending_reasons : [],
+    technical_snapshot: c?.technical_snapshot ?? null,
+    has_quotes: !!c?.has_quotes,
     premium_source: c?.premium_source,
     strike_distance_from_stock: num(c?.strike_distance_from_stock),
     strike_distance_from_support: num(c?.strike_distance_from_support),
@@ -232,9 +246,9 @@ function normalizeContract(c: any): ContractAnalysis {
 
 function normalizeAnalyzeResponse(data: any): AnalyzeTickerResponse {
   const technical: TechnicalData | null = data.technical ? {
-    rsi: num(data.technical.rsi) ?? 0,
-    ma20: num(data.technical.ma20) ?? 0,
-    ma50: num(data.technical.ma50) ?? 0,
+    rsi: num(data.technical.rsi),
+    ma20: num(data.technical.ma20),
+    ma50: num(data.technical.ma50),
     ma200: num(data.technical.ma200),
     macd: num(data.technical.macd) ?? 0,
     macd_signal: num(data.technical.macd_signal) ?? 0,
@@ -277,6 +291,7 @@ export async function analyzeTicker(
   ticker: string,
   profile: StrategyProfile,
   knownStockPrice?: number | null,
+  openTickers: string[] = [],
 ): Promise<AnalyzeTickerResponse> {
   // Route through market-scan edge function with mode=analyze.
   // Pass any price already known from Today's Candidates so Analyze does not
@@ -286,6 +301,9 @@ export async function analyzeTicker(
       mode: 'analyze',
       ticker,
       profile,
+      // Same "Exclude existing positions" input as the scan, so Analyze Ticker
+      // and Today's Candidates reach the same status for the same contract.
+      openTickers: openTickers.map((t) => t.toUpperCase()),
       knownStockPrice:
         typeof knownStockPrice === 'number' && Number.isFinite(knownStockPrice) && knownStockPrice > 0
           ? knownStockPrice
@@ -371,7 +389,7 @@ function normalizeCandidateScan(c: any): CandidateScan {
     premium_capture: num(c?.premium_capture) ?? 0,
     breakeven: num(c?.breakeven) ?? 0,
     qualified: !!c?.qualified,
-    technical_pending: c?.technical_pending,
+    technical_pending: !!c?.technical_pending,
     rejection_reasons: Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [],
     pending_reasons: Array.isArray(c?.pending_reasons) ? c.pending_reasons : [],
     pass_fail: Array.isArray(c?.pass_fail) ? c.pass_fail : [],
@@ -380,6 +398,8 @@ function normalizeCandidateScan(c: any): CandidateScan {
     strike_distance_from_support: num(c?.strike_distance_from_support),
     has_quotes: !!c?.has_quotes,
     premium_source: c?.premium_source,
+    technical_snapshot: c?.technical_snapshot ?? null,
+    history_bars: typeof c?.history_bars === 'number' ? c.history_bars : undefined,
   };
 }
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { scanCandidatesLive, analyzeTicker } from '@/lib/liveMarketData';
 import { selectBestContractPerTicker } from '@/lib/bestContract';
+import { isQualified, isPending, isRejected, PREMIUM_PENDING_REASON } from '@/lib/status';
 import { populateFromAnalyzeResponse, fetchTechnicalSnapshot, mergeCandidateWithTechnical, getCachedTechnical, getCachedStockPrice, populateStockPricesFromCandidates, fetchCachedBars, type TechFetchError } from '@/lib/technicalCache';
 import { calcNetProfit, calcCroiFromCollateral, calcPremiumCapture, calcDaysOpen, annualizedReturn, formatLocalDate } from '@/lib/calculations';
 import type {
@@ -97,6 +98,8 @@ export function useAppState() {
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  // Informational (non-error) message after a scan, e.g. history still loading.
+  const [scanNotice, setScanNotice] = useState<string | null>(null);
   const [lastScanAt, setLastScanAt] = useState<string | null>(null);
   const [scanSource, setScanSource] = useState<'live' | null>(null);
   const [positionsLoaded, setPositionsLoaded] = useState(false);
@@ -295,7 +298,8 @@ export function useAppState() {
         candidates.find((c) => c.ticker.toUpperCase() === sym && c.stock_price != null && c.stock_price > 0)?.stock_price ?? null;
       const knownStockPrice = cachedPrice ?? candidatePrice;
 
-      const result = await analyzeTicker(sym, activeProfile, knownStockPrice);
+      const openTickers = openPositions.map((p) => p.ticker.toUpperCase());
+      const result = await analyzeTicker(sym, activeProfile, knownStockPrice, openTickers);
       populateFromAnalyzeResponse(result);
       // Warm bars cache so Analyze Ticker's chart loads instantly
       void fetchCachedBars(sym);
@@ -307,7 +311,7 @@ export function useAppState() {
     } finally {
       setAnalyzing(false);
     }
-  }, [activeProfile, analyzing, candidates]);
+  }, [activeProfile, analyzing, candidates, openPositions]);
 
   const clearAnalyzeResult = useCallback(() => {
     setAnalyzeResult(null);
@@ -346,6 +350,7 @@ export function useAppState() {
 
     setScanning(true);
     setScanError(null);
+    setScanNotice(null);
     setSettingsChanged(false);
 
     try {
@@ -380,19 +385,32 @@ export function useAppState() {
 
       setCandidates(results);
       setScanCounts(newCounts);
+      {
+        const cache = newCounts?.technical_cache;
+        const stillPending = cache?.still_pending_history ?? 0;
+        if (stillPending > 0) {
+          const why = cache?.history_rate_limited
+            ? 'Massive rate limit reached'
+            : cache?.warming_time_budget_hit ? 'scan time budget reached' : 'history unavailable';
+          setScanNotice(
+            `${stillPending} ticker(s) are Pending because price history is still loading (${why}). ` +
+            'Each Rescan backfills more; once loaded, history stays current automatically.',
+          );
+        }
+      }
       setNoFilterMode(newNoFilter);
       setRawSample(newRawSample);
 
       // ── Debug: trace scan pipeline ──
       {
         const raw = results.length;
-        const fullyQualified = results.filter((r) => r.qualified && !r.technical_pending);
-        const pending = results.filter((r) => r.technical_pending);
-        const rejected = results.filter((r) => !r.qualified);
+        const fullyQualified = results.filter(isQualified);
+        const pending = results.filter(isPending);
+        const rejected = results.filter(isRejected);
         const uniqueQualifiedTickers = new Set(fullyQualified.map((r) => r.ticker.toUpperCase()));
         const uniquePendingTickers = new Set(pending.map((r) => r.ticker.toUpperCase()));
         const bestByTicker = selectBestContractPerTicker(results, activeProfile?.max_strikes_per_ticker ?? 1);
-        const displayedQualified = bestByTicker.filter((c) => c.qualified && !c.technical_pending);
+        const displayedQualified = bestByTicker.filter(isQualified);
         console.log(`[SCAN PIPELINE] mode=${scanMode} raw=${raw} fullyQualified=${fullyQualified.length} pending=${pending.length} rejected=${rejected.length} qualifiedTickers=${uniqueQualifiedTickers.size} pendingTickers=${uniquePendingTickers.size} bestByTicker=${bestByTicker.length} displayedQualified=${displayedQualified.length}`);
         if (fullyQualified.length === 0 && raw > 0) {
           const reasonCounts = new Map<string, number>();
@@ -494,61 +512,10 @@ export function useAppState() {
         setScanError(`Scan completed, but saving scan history failed: ${detail}`);
       }
 
-      // ── Universe mode sync: disable non-qualifying tickers, keep pending ──
-      if (scanMode === 'universe') {
-        try {
-          // A ticker is "fully qualified" if it has at least one contract
-          // that passes all rules AND has technical data available.
-          // "Pending" = all contracts are technical_pending (data unavailable).
-          // "Rejected" = at least one contract was fully evaluated and none qualified.
-          const fullyQualifiedTickers = new Set(
-            results
-              .filter((r) => r.qualified && !r.technical_pending)
-              .map((r) => r.ticker.toUpperCase())
-          );
-          const pendingTickers = new Set(
-            results
-              .filter((r) => r.technical_pending)
-              .map((r) => r.ticker.toUpperCase())
-          );
-
-          // Tickers to disable: were scanned, have results, none fully qualified, none pending
-          const disableSymbols = universeSymbols
-            .map((s) => s.toUpperCase())
-            .filter((s) =>
-              !fullyQualifiedTickers.has(s) &&
-              !pendingTickers.has(s) &&
-              results.some((r) => r.ticker.toUpperCase() === s)
-            );
-
-          if (disableSymbols.length > 0) {
-            const { error: disableError } = await supabase
-              .from('scan_universe')
-              .update({ enabled: false })
-              .in('symbol', disableSymbols);
-
-            if (disableError) {
-              console.error('[Universe Sync] Failed to disable non-qualifying tickers:', disableError);
-            }
-          }
-
-          // Reload universe state from the database so both pages agree
-          await loadScanUniverse();
-
-          const qualifiedCount = fullyQualifiedTickers.size;
-          const pendingCount = pendingTickers.size - fullyQualifiedTickers.size;
-          const disabledCount = disableSymbols.length;
-          const parts: string[] = [];
-          if (qualifiedCount > 0) parts.push(`${qualifiedCount} qualified`);
-          if (pendingCount > 0) parts.push(`${pendingCount} pending`);
-          if (disabledCount > 0) parts.push(`${disabledCount} disabled`);
-          if (parts.length > 0) {
-            setScanError(`Scan Universe synced: ${parts.join(', ')}.`);
-          }
-        } catch (syncErr) {
-          console.error('[Universe Sync] Error during sync:', syncErr);
-        }
-      }
+      // NOTE: a scan never modifies the Scan Universe. It previously disabled
+      // every ticker that did not qualify, so turning on stricter rules
+      // permanently shrank the universe and results never came back after
+      // relaxing the settings.
     } catch (err) {
       const message = formatDataError(err);
       const modeLabel = scanMode === 'universe' ? 'universe results' : 'results';
@@ -557,7 +524,7 @@ export function useAppState() {
     } finally {
       setScanning(false);
     }
-  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse, loadScanUniverse]);
+  }, [activeProfile, openPositions, scanning, positionsLoaded, scanMode, scanUniverse]);
 
   const loadData = useCallback(async () => {
     try {
@@ -675,6 +642,7 @@ export function useAppState() {
   }, []);
 
   const duplicateProfile = useCallback(async (profile: StrategyProfile): Promise<StrategyProfile> => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { id, created_at, updated_at, ...rest } = profile;
     const { data, error } = await supabase
       .from('strategy_profiles')
@@ -742,7 +710,7 @@ export function useAppState() {
   }, []);
 
   const closePosition = useCallback(async (pos: OpenPosition, btcPrice: number) => {
-    const netProfit = calcNetProfit(pos.actual_sto, btcPrice, pos.contracts, 1.34);
+    const netProfit = calcNetProfit(pos.actual_sto, btcPrice, pos.contracts, activeProfile?.round_trip_commission ?? 1.34);
     const netCroi = calcCroiFromCollateral(netProfit, pos.strike, pos.contracts);
     const pc = calcPremiumCapture(pos.actual_sto, btcPrice);
     const daysInTrade = calcDaysOpen(pos.open_date);
@@ -774,7 +742,7 @@ export function useAppState() {
     await deleteOpenPosition(pos.id!);
     setClosedPositions((prev) => [data as ClosedPosition, ...prev]);
     return data as ClosedPosition;
-  }, [deleteOpenPosition]);
+  }, [deleteOpenPosition, activeProfile]);
 
   const resetProfile = useCallback(async (): Promise<StrategyProfile | null> => {
     if (!activeProfile) return null;
@@ -793,14 +761,40 @@ export function useAppState() {
   }, [activeProfile]);
 
   const updateCandidateWithQuote = useCallback((rowKey: string, updates: Partial<CandidateScan>) => {
-    const apply = (list: CandidateScan[]) => list.map((c) => {
-      const key = `${c.ticker}-${c.strike}-${c.expiration}`;
-      return key === rowKey ? { ...c, ...updates } : c;
-    });
+    const profile = activeProfile;
+    // Re-evaluate ONLY the premium-dependent rules (CROI/PC, spread) with the
+    // manual quote, using the same rules as the edge function. Every other
+    // reason from the scan is kept as-is.
+    const reevaluate = (c: CandidateScan): CandidateScan => {
+      const next: CandidateScan = { ...c, ...updates };
+      if (!profile) return next;
+      const croiRuleOn = profile.croi_pc_enabled !== false && profile.filter_strikes_croi;
+      const spreadRuleOn = profile.spread_enabled !== false;
+      const rejections = (c.rejection_reasons || []).filter((r) => r !== 'CROI too low' && r !== 'Spread too wide');
+      const pending = (c.pending_reasons || []).filter((r) => r !== PREMIUM_PENDING_REASON);
+      if (croiRuleOn) {
+        const croiOk = next.suggested_btc > 0 && next.net_croi >= profile.min_net_croi && next.premium_capture <= profile.max_premium_capture;
+        if (!croiOk) rejections.push('CROI too low');
+      }
+      if (spreadRuleOn && next.bid > 0 && next.ask >= next.bid && next.spread_pct > profile.max_spread_pct) {
+        rejections.push('Spread too wide');
+      }
+      const technicalPending = rejections.length === 0 && pending.length > 0;
+      return {
+        ...next,
+        rejection_reasons: rejections,
+        pending_reasons: pending,
+        technical_pending: technicalPending,
+        qualified: rejections.length === 0 && pending.length === 0,
+      };
+    };
+    const apply = (list: CandidateScan[]) => list.map((c) =>
+      `${c.ticker}-${c.strike}-${c.expiration}` === rowKey ? reevaluate(c) : c,
+    );
     setCandidates(apply);
     if (scanMode === 'discovery') setDiscoveryCandidates(apply);
     else setUniverseCandidates(apply);
-  }, [scanMode]);
+  }, [scanMode, activeProfile]);
 
   const refreshCandidateTechnical = useCallback(async (ticker: string): Promise<{ ok: boolean; error: TechFetchError | null }> => {
     if (!activeProfile) return { ok: false, error: 'error' };
@@ -811,9 +805,11 @@ export function useAppState() {
     const cached = getCachedTechnical(sym);
     if (cached) {
       console.log(`[PERF] ${sym} cache hit (${Date.now() - t0}ms)`);
-      setCandidates((prev) => prev.map((c) =>
+      const merge = (prev: CandidateScan[]) => prev.map((c) =>
         c.ticker === sym ? mergeCandidateWithTechnical(c, cached) : c,
-      ));
+      );
+      setCandidates(merge);
+      if (scanMode === 'discovery') setDiscoveryCandidates(merge); else setUniverseCandidates(merge);
       // Warm bars cache in background so chart loads instantly
       void fetchCachedBars(sym);
       return { ok: true, error: null };
@@ -823,12 +819,14 @@ export function useAppState() {
     const snap = await fetchTechnicalSnapshot(sym, activeProfile);
     if (!snap) return { ok: false, error: 'error' };
 
-    setCandidates((prev) => prev.map((c) =>
+    const merge = (prev: CandidateScan[]) => prev.map((c) =>
       c.ticker === sym ? mergeCandidateWithTechnical(c, snap) : c,
-    ));
+    );
+    setCandidates(merge);
+    if (scanMode === 'discovery') setDiscoveryCandidates(merge); else setUniverseCandidates(merge);
     console.log(`[PERF] ${sym} technical calculations done (${Date.now() - t0}ms)`);
     return { ok: true, error: null };
-  }, [activeProfile]);
+  }, [activeProfile, scanMode]);
 
   return {
     profiles,
@@ -847,6 +845,7 @@ export function useAppState() {
     error,
     scanning,
     scanError,
+    scanNotice,
     lastScanAt,
     scanSource,
     runScan,
