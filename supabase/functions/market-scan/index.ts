@@ -4,6 +4,13 @@
 //   "discovery" — scan broad universe from market_universe table
 //   "universe"  — scan user's enabled scan_universe tickers
 //   "analyze"   — deep-analyze a single ticker (replaces analyze-ticker)
+//   "chart-bars"— OHLCV bars for the chart
+//
+// Qualification model (identical for scans and Analyze Ticker):
+//   any enabled hard rule definitely fails            → Rejected
+//   no failures, but data for an enabled rule missing → Pending
+//   every enabled rule has data and passes            → Qualified
+// Disabled rules have zero effect.
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
@@ -16,7 +23,6 @@ const corsHeaders = {
 const MASSIVE_API = 'https://api.massive.com';
 const MAX_CHAIN_PAGES = 10;
 const MAX_DISCOVERY_SYMBOLS = 250;
-const MAX_CANDIDATES = 50;
 
 type Profile = {
   id: string;
@@ -71,8 +77,9 @@ async function fetchGroupedDailyPrices(
   apiKey: string,
   today: Date,
   fmt: (d: Date) => string,
-): Promise<{ priceMap: Map<string, number>; tradingDate: string | null; httpStatus: number | null }> {
+): Promise<{ priceMap: Map<string, number>; barMap: Map<string, HistoryBar>; tradingDate: string | null; httpStatus: number | null }> {
   const priceMap = new Map<string, number>();
+  const barMap = new Map<string, HistoryBar>();
   let lastHttpStatus: number | null = null;
 
   // Stocks Basic is end-of-day and limited to 5 stock API calls/minute.
@@ -112,19 +119,24 @@ async function fetchGroupedDailyPrices(
       const close = Number(r.c || r.close || 0);
       if (ticker && Number.isFinite(close) && close > 0) {
         priceMap.set(ticker, close);
+        barMap.set(ticker, {
+          date: dateStr,
+          open: Number(r.o || close), high: Number(r.h || close), low: Number(r.l || close),
+          close, volume: Number(r.v || 0),
+        });
       }
     }
 
     if (priceMap.size > 0) {
       console.log(`[GroupedDaily] Found ${priceMap.size} stock prices for completed trading date ${dateStr}`);
       console.log(`[PRICE BULK] HTTP ${lastHttpStatus} | trading_date=${dateStr} | prices_returned=${priceMap.size}`);
-      return { priceMap, tradingDate: dateStr, httpStatus: lastHttpStatus };
+      return { priceMap, barMap, tradingDate: dateStr, httpStatus: lastHttpStatus };
     }
   }
 
   console.log(`[PRICE BULK] HTTP ${lastHttpStatus} | trading_date=null | prices_returned=0 — GROUPED FAILED, using fallbacks`);
   console.log('[GroupedDaily] No completed grouped daily response available');
-  return { priceMap, tradingDate: null, httpStatus: lastHttpStatus };
+  return { priceMap, barMap, tradingDate: null, httpStatus: lastHttpStatus };
 }
 
 type ChainStatus = 'success' | 'no_options' | 'api_error' | 'unauthorized' | 'rate_limited' | 'network_error';
@@ -197,8 +209,10 @@ async function fetchScanUniverse(): Promise<{ ticker: string; company_name: stri
 async function fetchMarketUniverse(limit: number): Promise<{ ticker: string; company_name: string | null }[]> {
   const rows = await supabaseSelect('market_universe', 'ticker,company_name', 'active=eq.true&optionable=eq.true&order=ticker');
   const mapped = (rows || []).map((r: any) => ({ ticker: String(r.ticker).toUpperCase(), company_name: r.company_name || null }));
-  const shuffled = mapped.sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, limit);
+  // Deterministic order. This used to be a random shuffle, so every Rescan
+  // processed symbols in a different order (and, with the old early-stop,
+  // scanned a different subset) — a direct cause of inconsistent results.
+  return mapped.sort((a, b) => a.ticker.localeCompare(b.ticker)).slice(0, limit);
 }
 
 async function fetchLatestCandidateStockPrice(ticker: string): Promise<number | null> {
@@ -306,7 +320,7 @@ async function loadCachedHistory(ticker: string, maxBars = 250): Promise<History
       low: Number(r.low || 0),
       close: Number(r.close || 0),
       volume: Number(r.volume || 0),
-    })).filter((b) => Number.isFinite(b.close) && b.close > 0).reverse();
+    })).filter((b) => Number.isFinite(b.close) && b.close > 0 && !isWeekendDate(b.date)).reverse();
   } catch {
     return [];
   }
@@ -346,6 +360,36 @@ async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<vo
   } catch (e) {
     console.log(`[Cache SAVE ERROR] ${ticker} | ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+// Append the grouped-daily bar (one API call covers every ticker) to the
+// history cache for all scanned symbols. This keeps technical history current
+// every trading day without spending one rate-limited request per ticker.
+async function saveGroupedBarsToCache(barMap: Map<string, HistoryBar>, tickers: string[]): Promise<number> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey || barMap.size === 0) return 0;
+  const now = new Date().toISOString();
+  const rows = tickers
+    .map((t) => ({ t, b: barMap.get(t) }))
+    .filter((x) => x.b)
+    .map(({ t, b }) => ({ ticker: t, trade_date: b!.date, open: b!.open, high: b!.high, low: b!.low, close: b!.close, volume: b!.volume, updated_at: now }));
+  let saved = 0;
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    try {
+      const resp = await fetch(`${supabaseUrl}/rest/v1/stock_history_cache`, {
+        method: 'POST',
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+        body: JSON.stringify(chunk),
+      });
+      if (resp.ok) saved += chunk.length;
+      else console.log(`[GroupedBars SAVE FAIL] HTTP ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+    } catch (e) {
+      console.log(`[GroupedBars SAVE ERROR] ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return saved;
 }
 
 // ── Weekly / Monthly aggregation from daily bars ──
@@ -396,15 +440,25 @@ function sma(values: number[], n: number) {
   return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
 
-function rsi(values: number[], period = 14) {
-  if (values.length <= period) return 50;
-  let gains = 0, losses = 0;
-  for (let i = values.length - period; i < values.length; i++) {
+// Wilder's RSI (same method TradingView uses), seeded with a simple average of
+// the first `period` changes and smoothed across all available history.
+// Returns null when there is not enough data — never a fake neutral value.
+function rsi(values: number[], period = 14): number | null {
+  if (values.length <= period) return null;
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
     const d = values[i] - values[i - 1];
-    if (d >= 0) gains += d; else losses -= d;
+    if (d >= 0) avgGain += d; else avgLoss -= d;
   }
-  if (losses === 0) return 70;
-  const rs = (gains / period) / (losses / period);
+  avgGain /= period;
+  avgLoss /= period;
+  for (let i = period + 1; i < values.length; i++) {
+    const d = values[i] - values[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(d, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-d, 0)) / period;
+  }
+  if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
+  const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
 }
 
@@ -533,7 +587,7 @@ function trend(bars: HistoryBar[]) {
   const price = closes.at(-1) || 0;
   const ma20 = sma(closes, 20);
   const ma50 = sma(closes, 50);
-  const rr = rsi(closes);
+  const rr = rsi(closes) ?? 50;
   // If we have 200+ bars, use full MA200-based trend
   if (closes.length >= 200) {
     const ma200 = sma(closes, 200);
@@ -718,9 +772,58 @@ type StockSnapshot = {
   historyHttpStatus?: number;
 };
 
-// Per-request cache: ticker -> StockSnapshot. Avoids re-fetching history
-// for symbols that appear multiple times (e.g. HUT with 20 contracts).
-const stockCache = new Map<string, StockSnapshot>();
+// Request-scoped state. Previously these were module-level globals, which a
+// concurrent request (e.g. Analyze during a Rescan) could clear mid-scan.
+type ScanContext = {
+  stockCache: Map<string, StockSnapshot>;
+  // Raw option-chain results per symbol, so the cache-warming re-evaluation
+  // uses the SAME quotes as the first pass (no second chain fetch, no drift).
+  chainCache: Map<string, { contracts: any[]; pages: number }>;
+  // Latest completed trading date (YYYY-MM-DD). Cache is "fresh" if it has this bar.
+  expectedLatestDate: string;
+  // Once Massive returns 429 for stock history, stop asking in this request.
+  historyRateLimited: boolean;
+  historyFetchAttempts: number;
+};
+
+function newScanContext(expectedLatestDate: string): ScanContext {
+  return { stockCache: new Map(), chainCache: new Map(), expectedLatestDate, historyRateLimited: false, historyFetchAttempts: 0 };
+}
+
+// Most recent weekday strictly before `today` (holidays are handled by the
+// grouped-daily walk-back; here a holiday just costs one extra fetch in Analyze).
+function lastCompletedBusinessDay(today: Date, fmt: (d: Date) => string): string {
+  const d = new Date(today);
+  d.setDate(d.getDate() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+  return fmt(d);
+}
+
+// Keep only the trailing run of bars without a data gap. A gap (2+ consecutive
+// missing business days) means the cache skipped days — indicators computed
+// across it would be wrong, so they must be treated as insufficient history.
+function trailingContiguousBars(bars: HistoryBar[]): HistoryBar[] {
+  if (bars.length < 2) return bars;
+  for (let i = bars.length - 1; i > 0; i--) {
+    const cur = new Date(bars[i].date + 'T00:00:00Z');
+    const prev = new Date(bars[i - 1].date + 'T00:00:00Z');
+    let missingBusinessDays = 0;
+    const d = new Date(prev);
+    d.setUTCDate(d.getUTCDate() + 1);
+    while (d < cur) {
+      const dow = d.getUTCDay();
+      if (dow !== 0 && dow !== 6) missingBusinessDays++;
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    if (missingBusinessDays > 1) return bars.slice(i);
+  }
+  return bars;
+}
+
+function isWeekendDate(date: string): boolean {
+  const dow = new Date(date + 'T00:00:00Z').getUTCDay();
+  return dow === 0 || dow === 6;
+}
 
 type TechnicalRejections = {
   rsi_below_min: number;
@@ -791,22 +894,24 @@ type ScanSymbolResult = {
   resistance?: number | null;
   trendClass?: string;
   technicalDataAvailable?: boolean;
-  historyStatus?: 'success' | 'fallback' | 'empty' | 'error';
+  historyStatus?: 'success' | 'partial' | 'fallback' | 'empty' | 'error';
   historyError?: string;
-  technical?: { rsi: number; ma20: number; ma50: number; ma200: number | null; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
+  technical?: { rsi: number | null; ma20: number | null; ma50: number | null; ma200: number | null; macd: number; macd_signal: number; macd_histogram: number; bb_upper: number; bb_middle: number; bb_lower: number; bb_position: string; volume_trend: string };
   techRejections?: TechnicalRejections;
   orderStrikeRejections?: OrderStrikeRejections;
   historyBarCount?: number;
   supportDistanceDebug?: SupportDistanceDebug;
+  needsHistoryBars?: number; // bars required by the active rules
 };
 
 // ── Cache-first stock history fetcher ──
 // 1. Load cached bars from Supabase stock_history_cache
-// 2. If cache has enough recent bars, use them directly
-// 3. If cache is stale or incomplete, fetch from Massive daily aggregates
-// 4. Save new bars back to cache
-// Stock price comes from the bulk grouped daily (passed in) or from the
-// latest historical close. History is only for technicals.
+// 2. Cache is fresh if it contains the latest completed trading day
+//    (the grouped-daily bar saved at scan start keeps it fresh for free)
+// 3. Only if live history is allowed AND the cache is stale/short/gapped,
+//    fetch ~18 months of daily aggregates from Massive and save them back
+// 4. Only the trailing gap-free run of bars is used for indicators
+// Stock price comes from grouped daily (passed in) or the latest close.
 // No retries on 401/403/429 — only one retry on network error or 5xx.
 async function getStockSnapshot(
   ticker: string,
@@ -814,29 +919,23 @@ async function getStockSnapshot(
   today: Date,
   fmt: (d: Date) => string,
   bulkStockPrice: number | null,
-  allowLiveHistory = true,
-  minHistoryBarsForFetch = 60,
+  allowLiveHistory: boolean,
+  minHistoryBarsForFetch: number,
+  ctx: ScanContext,
 ): Promise<StockSnapshot> {
   const upper = ticker.toUpperCase();
-  const cached = stockCache.get(upper);
+  const cached = ctx.stockCache.get(upper);
   if (cached) {
-    // Edge Function isolates can stay warm across multiple HTTP requests.
-    // Never let an old/empty snapshot poison a later Analyze request.
-    if (bulkStockPrice !== null && Number.isFinite(bulkStockPrice) && bulkStockPrice > 0) {
-      const refreshed: StockSnapshot = {
-        ...cached,
-        currentPrice: bulkStockPrice,
-        source: 'grouped_daily',
-        error: null,
-      };
-      stockCache.set(upper, refreshed);
-      return refreshed;
-    }
-    if (cached.currentPrice !== null || cached.historicalBars.length > 0) {
+    const cacheCoversRequest = cached.historicalBars.length >= minHistoryBarsForFetch || !allowLiveHistory;
+    if (cacheCoversRequest && (cached.currentPrice !== null || cached.historicalBars.length > 0)) {
+      if (bulkStockPrice !== null && Number.isFinite(bulkStockPrice) && bulkStockPrice > 0 && cached.currentPrice !== bulkStockPrice) {
+        const refreshed: StockSnapshot = { ...cached, currentPrice: bulkStockPrice, source: 'grouped_daily', error: null };
+        ctx.stockCache.set(upper, refreshed);
+        return refreshed;
+      }
       return cached;
     }
-    // Empty cached snapshot: discard it and try live/persistent fallbacks again.
-    stockCache.delete(upper);
+    ctx.stockCache.delete(upper);
   }
 
   let currentPrice: number | null = null;
@@ -850,117 +949,101 @@ async function getStockSnapshot(
     source = 'grouped_daily';
   }
 
-  // 2. Load cached bars from Supabase
-  let bars = await loadCachedHistory(upper, 260);
-
-  // Determine the latest cached date to decide if we need fresh data
-  const latestCachedDate = bars.length > 0 ? bars.at(-1)!.date : null;
+  // 2. Load cached bars from Supabase; use only the trailing gap-free run
   const todayStr = fmt(today);
-  const needsFresh = latestCachedDate === null || latestCachedDate < todayStr;
+  let bars = trailingContiguousBars((await loadCachedHistory(upper, 300)).filter((b) => b.date < todayStr));
 
-  // 3. If cache is insufficient or stale, fetch from Massive daily aggregates
-  // Use ~18 calendar months of history (enough for 200 DMA with holidays)
-  const start = new Date(today);
-  start.setDate(start.getDate() - 548); // ~18 months
+  const latestCachedDate = bars.length > 0 ? bars.at(-1)!.date : null;
+  const isStale = latestCachedDate === null || latestCachedDate < ctx.expectedLatestDate;
+  const isShort = bars.length < minHistoryBarsForFetch;
+  const wantsFetch = minHistoryBarsForFetch > 0 && (isShort || isStale);
 
-  if (allowLiveHistory && (needsFresh || bars.length < minHistoryBarsForFetch)) {
+  if (allowLiveHistory && wantsFetch && !ctx.historyRateLimited) {
+    const start = new Date(today);
+    start.setDate(start.getDate() - 548); // ~18 months: enough for MA200 with holidays
     const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
+    ctx.historyFetchAttempts++;
     let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
-
-    // Only retry on network error (status 0) or 5xx — NOT on 401/403/429
     if (!histResult.ok && isRetryableStatus(histResult.status)) {
       histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates_retry');
     }
     historyHttpStatus = histResult.ok ? 200 : histResult.status;
 
-    // Explicitly log 403/429 for debug tickers without retrying
-    if (!histResult.ok && (histResult.status === 403 || histResult.status === 429)) {
-      console.log(`[History] ${upper} | HTTP ${histResult.status} — NOT retrying (non-retryable)`);
+    if (!histResult.ok && histResult.status === 429) {
+      // Stocks Basic allows only a few calls per minute. Stop hammering it for
+      // the rest of this request; remaining tickers stay Pending (honestly).
+      ctx.historyRateLimited = true;
     }
 
     if (histResult.ok) {
-      const freshBars = (histResult.data?.results || []).map((b: any) => ({
+      // Completed sessions only — a partial "today" bar would make RSI/support
+      // change during the day and differ between Rescan and Analyze.
+      const freshBars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
         date: new Date(b.t).toISOString().slice(0, 10),
         open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
-      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
+      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0 && b.date < todayStr && !isWeekendDate(b.date));
 
       if (freshBars.length > 0) {
-        // Merge fresh bars with cached bars (dedup by date)
         const barMap = new Map<string, HistoryBar>();
         for (const b of bars) barMap.set(b.date, b);
         for (const b of freshBars) barMap.set(b.date, b); // fresh overrides cached
-        bars = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
-
-        // Save fresh bars to cache (only the new ones to minimize writes)
-        const cachedDates = new Set(bars.filter(b => b.date <= (latestCachedDate || '')).map(b => b.date));
-        const newBars = freshBars.filter(b => !cachedDates.has(b.date));
-        if (newBars.length > 0) {
-          await saveCachedHistory(upper, freshBars); // upsert all fresh bars
-          if (DEBUG_TICKERS.has(upper)) {
-            console.log(`[Cache] ${upper} | saved ${freshBars.length} bars to cache`);
-          }
-        }
-
-        // Use latest close as price fallback if no bulk price
-        if (currentPrice === null) {
-          currentPrice = Number(bars.at(-1)!.close);
-          source = 'daily_aggregates';
-        }
-      }
-    } else {
-      if (!error) {
-        error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
-      }
-      // If we have cached bars but fresh fetch failed, still use cached bars
-      if (bars.length > 0 && currentPrice === null) {
-        currentPrice = Number(bars.at(-1)!.close);
-        source = 'daily_aggregates';
-      }
-    }
-  } else if (!allowLiveHistory && (needsFresh || bars.length < 60)) {
-    // Broad Market Discovery / Scan Universe runs on Stocks Basic.
-    // Never make one stock-history request per symbol; use the grouped close for
-    // Price and any already-cached bars for technicals. Analyze Ticker can fetch
-    // fresh history for a single symbol.
-    historyHttpStatus = bars.length > 0 ? 200 : undefined;
-    if (currentPrice === null && bars.length > 0) {
-      currentPrice = Number(bars.at(-1)!.close);
-      source = 'daily_aggregates';
-    }
-  } else {
-    // Cache is sufficient — use cached bars, no Massive call needed
-    historyHttpStatus = 200;
-    if (currentPrice === null && bars.length > 0) {
-      currentPrice = Number(bars.at(-1)!.close);
-      source = 'daily_aggregates';
-    }
-    if (DEBUG_TICKERS.has(upper)) {
-      console.log(`[Cache] ${upper} | using ${bars.length} cached bars (no Massive call needed)`);
-    }
-  }
-
-  // 4. Fallback: previous close — only if we still have NO price at all
-  if (currentPrice === null) {
-    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
-    const prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
-    // No retry on 401/403/429
-    if (prevResult.ok) {
-      const prevBars = (prevResult.data?.results || []).map((b: any) => ({
-        date: b.t ? new Date(b.t).toISOString().slice(0, 10) : fmt(today),
-        open: Number(b.o || b.c || 0), high: Number(b.h || b.c || 0), low: Number(b.l || b.c || 0), close: Number(b.c || 0), volume: Number(b.v || 0),
-      })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-      if (prevBars.length) {
-        currentPrice = Number(prevBars.at(-1)!.close);
-        source = 'previous_close';
+        bars = trailingContiguousBars(Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date)));
+        await saveCachedHistory(upper, freshBars);
       }
     } else if (!error) {
-      error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
+      error = `Aggregates HTTP ${histResult.status}: ${histResult.body.slice(0, 200)}`;
+    }
+  } else if (allowLiveHistory && wantsFetch && ctx.historyRateLimited) {
+    error = 'History fetch skipped — Massive rate limit reached earlier in this request';
+  }
+
+  if (currentPrice === null && bars.length > 0) {
+    currentPrice = Number(bars.at(-1)!.close);
+    source = 'daily_aggregates';
+  }
+  if (historyHttpStatus === undefined && bars.length > 0) historyHttpStatus = 200;
+
+  // 4. Fallback: previous close — only if we still have NO price at all
+  if (currentPrice === null && allowLiveHistory && !ctx.historyRateLimited) {
+    const prevPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/prev?adjusted=true`;
+    const prevResult = await massiveFetch(prevPath, apiKey, upper, 'stock_previous_close');
+    if (prevResult.ok) {
+      const prevBars = (prevResult.data?.results || []).map((b: any) => Number(b.c || 0)).filter((c: number) => Number.isFinite(c) && c > 0);
+      if (prevBars.length) {
+        currentPrice = Number(prevBars.at(-1));
+        source = 'previous_close';
+      }
+    } else {
+      if (prevResult.status === 429) ctx.historyRateLimited = true;
+      if (!error) error = `Previous-close HTTP ${prevResult.status}: ${prevResult.body.slice(0, 200)}`;
     }
   }
 
   const snapshot: StockSnapshot = { ticker: upper, currentPrice, historicalBars: bars, source, error, historyHttpStatus };
-  stockCache.set(upper, snapshot);
+  ctx.stockCache.set(upper, snapshot);
   return snapshot;
+}
+
+// ── One ranking used everywhere (Today's Candidates, Analyze best contract,
+// per-ticker response cap). Must match src/lib/status.ts on the client. ──
+// Qualified > Pending > Rejected, then higher option volume, lower Premium
+// Capture (contracts without a premium rank last), higher Net CROI, higher OI.
+function contractStatusRank(c: any): number {
+  if (c.qualified && !c.technical_pending) return 0;
+  if (c.technical_pending) return 1;
+  return 2;
+}
+function compareContracts(a: any, b: any): number {
+  const sa = contractStatusRank(a), sb = contractStatusRank(b);
+  if (sa !== sb) return sa - sb;
+  const va = Number(a.volume || 0), vb = Number(b.volume || 0);
+  if (va !== vb) return vb - va;
+  const pa = a.has_quotes ? Number(a.premium_capture ?? Infinity) : Infinity;
+  const pb = b.has_quotes ? Number(b.premium_capture ?? Infinity) : Infinity;
+  if (pa !== pb) return pa - pb;
+  const ca = Number(a.net_croi || 0), cb = Number(b.net_croi || 0);
+  if (ca !== cb) return cb - ca;
+  return Number(b.open_interest || 0) - Number(a.open_interest || 0);
 }
 
 async function scanSymbol(
@@ -974,8 +1057,9 @@ async function scanSymbol(
   fmt: (d: Date) => string,
   verbose: boolean,
   analyzeMode: boolean,
-  bulkStockPrice: number | null = null,
-  allowLiveHistory: boolean = false,
+  bulkStockPrice: number | null,
+  allowLiveHistory: boolean,
+  ctx: ScanContext,
 ): Promise<ScanSymbolResult> {
   const r: ScanSymbolResult = {
     candidates: [],
@@ -990,25 +1074,33 @@ async function scanSymbol(
     supportDistanceDebug: { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] },
   };
 
-  // Step 1: Stock snapshot via shared function (cached per ticker)
-  // For discovery/universe mode, bulkStockPrice from grouped daily is passed in.
-  // For analyze mode, bulkStockPrice is null so getStockSnapshot falls back to history.
-  // Compute the minimum bars needed for the active rules so getStockSnapshot
-  // only fetches when the cache truly lacks enough data. For RSI-only (15 bars),
-  // a cache with 15+ bars won't trigger an unnecessary fetch.
-  const _rsiActive = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && (profile.rsi_min != null || profile.rsi_max != null);
-  const _ma20Active = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && profile.require_ma20_above_ma50 === true;
-  const _ma200Active = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && (profile.require_ma50_above_ma200 === true || profile.require_price_above_ma200 === true);
-  const _downtrendActive = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled') && profile.exclude_downtrend_no_support === true;
-  const _supportDistActive = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') && (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
-  let _minFetchBars = 0; // calculated strictly from enabled rules below
-  if (_rsiActive) _minFetchBars = Math.max(_minFetchBars, 20);
-  if (_ma20Active) _minFetchBars = Math.max(_minFetchBars, 50);
-  if (_downtrendActive || _supportDistActive) _minFetchBars = Math.max(_minFetchBars, 60);
-  if (_ma200Active) _minFetchBars = Math.max(_minFetchBars, 200);
+  // ── Which rules are active (single source of truth for this contract set) ──
+  // The master Technical Rules toggle alone never requires data or changes
+  // results; only individual rules that are actually set do.
+  const technicalSectionOn = !noFilterMode && !isSectionOff(profile, 'technical_rules_enabled');
+  const rsiActive = technicalSectionOn && (profile.rsi_min != null || profile.rsi_max != null);
+  const ma20AboveMa50Active = technicalSectionOn && profile.require_ma20_above_ma50 === true;
+  const ma50AboveMa200Active = technicalSectionOn && profile.require_ma50_above_ma200 === true;
+  const priceAboveMa200Active = technicalSectionOn && profile.require_price_above_ma200 === true;
+  const downtrendRuleActive = technicalSectionOn && profile.exclude_downtrend_no_support === true;
+  const hasActiveTechnicalRule = rsiActive || ma20AboveMa50Active || ma50AboveMa200Active || priceAboveMa200Active || downtrendRuleActive;
+  // Support Distance is its own section and only counts when a bound is set.
+  const supportDistanceActive = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') &&
+    (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
 
-  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice, analyzeMode || allowLiveHistory, _minFetchBars);
-  let bars = snapshot.historicalBars;
+  // Minimum bars needed to evaluate the ACTIVE rules only (0 if none).
+  let minBarsRequired = 0;
+  if (rsiActive) minBarsRequired = Math.max(minBarsRequired, 20);
+  if (ma20AboveMa50Active) minBarsRequired = Math.max(minBarsRequired, 50);
+  if (downtrendRuleActive || supportDistanceActive) minBarsRequired = Math.max(minBarsRequired, 60);
+  if (ma50AboveMa200Active || priceAboveMa200Active) minBarsRequired = Math.max(minBarsRequired, 200);
+  r.needsHistoryBars = minBarsRequired;
+
+  // Analyze Ticker always tries to have 60 bars so it can DISPLAY technicals;
+  // that never changes evaluation, which depends only on the active rules.
+  const fetchBars = analyzeMode ? Math.max(minBarsRequired, 60) : minBarsRequired;
+  const snapshot = await getStockSnapshot(symbol, apiKey, today, fmt, bulkStockPrice, analyzeMode || allowLiveHistory, fetchBars, ctx);
+  const bars = snapshot.historicalBars;
   let stockPrice: number | null = snapshot.currentPrice;
   r.stockSource = snapshot.source;
 
@@ -1031,57 +1123,17 @@ async function scanSymbol(
     r.historyStatus = 'empty';
   }
 
-  // Determine if any individual technical rule is actually active.
-  // The master toggle alone must NOT require history or affect qualification.
-  const hasActiveTechnicalRule =
-    !noFilterMode &&
-    !isSectionOff(profile, 'technical_rules_enabled') &&
-    (
-      profile.rsi_min != null ||
-      profile.rsi_max != null ||
-      profile.require_ma20_above_ma50 === true ||
-      profile.require_ma50_above_ma200 === true ||
-      profile.require_price_above_ma200 === true ||
-      profile.exclude_downtrend_no_support === true
-    );
-
-
-
-  const needsMA200 = hasActiveTechnicalRule && (profile.require_ma50_above_ma200 || profile.require_price_above_ma200);
-
-  // Determine which rules are active and their minimum bar requirements.
-  // RSI needs 15 bars, MA20 needs 20, MA50 needs 50, MA200 needs 200,
-  // support/trend need 60. Only require what's actually enabled.
-  const rsiActive = hasActiveTechnicalRule && (profile.rsi_min != null || profile.rsi_max != null);
-  const ma20AboveMa50Active = hasActiveTechnicalRule && profile.require_ma20_above_ma50 === true;
-  const ma50AboveMa200Active = hasActiveTechnicalRule && profile.require_ma50_above_ma200 === true;
-  const priceAboveMa200Active = hasActiveTechnicalRule && profile.require_price_above_ma200 === true;
-  const downtrendRuleActive = hasActiveTechnicalRule && profile.exclude_downtrend_no_support === true;
-  const supportDistanceActiveForData = !noFilterMode && !isSectionOff(profile, 'support_distance_enabled') && (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
-
-  // Minimum bars needed to evaluate the ACTIVE rules only.
-  // If no history-dependent rule is active, 0 bars needed.
-  let minBarsRequired = 0;
-  if (rsiActive) minBarsRequired = Math.max(minBarsRequired, 20);
-  if (ma20AboveMa50Active) minBarsRequired = Math.max(minBarsRequired, 50);
-  if (ma50AboveMa200Active || priceAboveMa200Active) minBarsRequired = Math.max(minBarsRequired, 200);
-  if (downtrendRuleActive || supportDistanceActiveForData) minBarsRequired = Math.max(minBarsRequired, 60);
-
   const ma200DataAvailable = bars.length >= 200;
   const technicalDataAvailable = bars.length >= minBarsRequired;
   r.technicalDataAvailable = technicalDataAvailable;
   r.historyBarCount = bars.length;
-
-  // canComputeBaseTechnicals now means: enough bars for the ACTIVE rules.
-  // E.g. RSI-only needs 15 bars, not 60.
-  const canComputeBaseTechnicals = bars.length >= minBarsRequired;
 
   // Support/trend require 60 bars regardless of RSI-only rules.
   const supportDataAvailable = bars.length >= 60;
   let primarySupport: number | null = supportDataAvailable && stockPrice !== null && stockPrice > 0 ? calcPrimarySupport(bars, stockPrice) : null;
   let secondarySupport: number | null = supportDataAvailable && primarySupport !== null ? calcSecondarySupport(bars, primarySupport) : null;
   let resistance: number | null = supportDataAvailable && stockPrice !== null && stockPrice > 0 ? findResistance(bars, stockPrice) : null;
-  let trendClass = supportDataAvailable ? trend(bars) : 'Pending';
+  const trendClass = supportDataAvailable ? trend(bars) : 'Pending';
 
   r.stockPrice = stockPrice;
   r.primarySupport = primarySupport;
@@ -1101,13 +1153,16 @@ async function scanSymbol(
   // Compute technicals whenever we have enough bars for ANY indicator.
   // RSI needs 15, MA20 needs 20, MA50 needs 50, MA200 needs 200.
   // Compute what we can; missing indicators stay null/0.
-  if (bars.length >= 15) {
+  if (bars.length >= 20) {
     const closes = bars.map((b) => b.close);
+    // Fixed 250-bar window so Rescan and Analyze get the identical RSI even if
+    // one of them holds a longer history slice.
+    const rsiValue = rsi(closes.slice(-250));
     const m = closes.length >= 26 ? macd(closes) : { macd: 0, signal: 0, histogram: 0 };
     const bb = closes.length >= 20 ? bollingerBands(closes) : { upper: 0, middle: 0, lower: 0, position: 'Insufficient data' };
     const has200 = closes.length >= 200;
     r.technical = {
-      rsi: Number(rsi(closes).toFixed(1)),
+      rsi: rsiValue !== null ? Number(rsiValue.toFixed(1)) : null,
       ma20: closes.length >= 20 ? Number(sma(closes, 20).toFixed(2)) : null,
       ma50: closes.length >= 50 ? Number(sma(closes, 50).toFixed(2)) : null,
       ma200: has200 ? Number(sma(closes, 200).toFixed(2)) : null,
@@ -1120,16 +1175,6 @@ async function scanSymbol(
       bb_position: bb.position,
       volume_trend: volumeTrend(bars),
     };
-  }
-
-  // RSI-specific audit logging for requested tickers
-  {
-    const RSI_AUDIT_TICKERS = new Set(['XPEV', 'CLSK', 'SOFI', 'RUN', 'RIVN', 'RIOT', 'WULF', 'CIFR', 'PINS', 'RGTI', 'APLD']);
-    if (RSI_AUDIT_TICKERS.has(symbol.toUpperCase())) {
-      const rsiVal = r.technical?.rsi ?? null;
-      const barCount = bars.length;
-      console.log(`[RSI AUDIT] ${symbol} | bars=${barCount} | rsi=${rsiVal} | technical=${r.technical ? 'computed' : 'null'} | rsiActive=${rsiActive} | hasActiveTechnicalRule=${hasActiveTechnicalRule}`);
-    }
   }
 
   // Step 2: Options chain — build URL with server-side filters to reduce pages
@@ -1159,6 +1204,14 @@ async function scanSymbol(
   let sampleWithQuote: any = null;
   let sampleWithoutQuote: any = null;
   let sampleOtherInvalid: any = null;
+
+  const cachedChain = ctx.chainCache.get(symbol.toUpperCase());
+  if (cachedChain) {
+    // Re-evaluation pass: reuse the exact chain from the first pass.
+    allRawContracts.push(...cachedChain.contracts);
+    pageCount = cachedChain.pages;
+    currentPath = '';
+  }
 
   while (currentPath && pageCount < MAX_CHAIN_PAGES) {
     pageCount++;
@@ -1203,21 +1256,23 @@ async function scanSymbol(
     } else { currentPath = ''; }
   }
 
+  if (!chainError && !cachedChain) {
+    ctx.chainCache.set(symbol.toUpperCase(), { contracts: allRawContracts, pages: pageCount });
+  }
+
   // Determine chain status
   const contracts = allRawContracts.filter((c: any) => c?.details?.contract_type === 'put');
   r.putsReturned = contracts.length;
 
   // ── Tier 2: Option snapshot underlying_asset price ──
   // Always extract it (even if we already have a price) so we can save it to cache.
-  let optionUnderlyingPrice: number | null = null;
   if (allRawContracts.length) {
     const underlyingPrice = allRawContracts
       .map((c: any) => Number(c?.underlying_asset?.price || c?.underlying_asset?.value || 0))
       .find((v: number) => Number.isFinite(v) && v > 0) || 0;
     if (underlyingPrice > 0) {
-      optionUnderlyingPrice = underlyingPrice;
       // Save to persistent price cache
-      void saveCachedStockPrice(symbol, underlyingPrice, 'option_snapshot', fmt(today));
+      if (!cachedChain) void saveCachedStockPrice(symbol, underlyingPrice, 'option_snapshot', fmt(today));
       // Use as stock price if we don't already have one from grouped daily
       if (stockPrice === null || stockPrice <= 0) {
         stockPrice = underlyingPrice;
@@ -1268,14 +1323,6 @@ async function scanSymbol(
     r.trendClass = trendClass;
   } else {
     r.stockPrice = stockPrice;
-  }
-
-  // Per-ticker price resolution logging for debug tickers
-  const PRICE_LOG_TICKERS = new Set(['PLUG', 'LCID', 'NIO', 'MARA', 'NVAX', 'SOFI', 'RIOT', 'RGTI', 'CIFR']);
-  if (DEBUG_TICKERS.has(symbol.toUpperCase()) || PRICE_LOG_TICKERS.has(symbol.toUpperCase())) {
-    const cachedPrice = await loadCachedStockPrice(symbol);
-    const candidateScanPrice = await fetchLatestCandidateStockPrice(symbol);
-    console.log(`[PRICE RESOLUTION] ${symbol} | grouped=${bulkStockPrice} | optionUnderlying=${optionUnderlyingPrice} | cached=${cachedPrice?.price ?? null} | previousScan=${candidateScanPrice} | final=${stockPrice} | source=${r.stockSource}`);
   }
 
   // Stock-price filter is applied at the contract level (as a rejection reason)
@@ -1417,7 +1464,7 @@ async function scanSymbol(
 
         // RSI — needs 20 bars (RSI-14 plus safety margin)
         if (rsiActive) {
-          if (barsAvailable >= 20 && tech) {
+          if (barsAvailable >= 20 && tech && tech.rsi != null) {
             if (profile.rsi_min != null && tech.rsi < profile.rsi_min) {
               if (!reasons.includes('RSI below minimum')) reasons.push('RSI below minimum');
               r.techRejections!.rsi_below_min++;
@@ -1450,8 +1497,8 @@ async function scanSymbol(
 
         // MA50 > MA200 — needs 200 bars
         if (ma50AboveMa200Active) {
-          if (ma200DataAvailable && tech && tech.ma200 != null) {
-            if (tech.ma50! <= tech.ma200) {
+          if (ma200DataAvailable && tech && tech.ma200 != null && tech.ma50 != null) {
+            if (tech.ma50 <= tech.ma200) {
               if (!reasons.includes('MA50 not above MA200')) reasons.push('MA50 not above MA200');
               r.techRejections!.ma50_not_above_ma200++;
             }
@@ -1492,7 +1539,9 @@ async function scanSymbol(
       }
 
       // ── SUPPORT DISTANCE SECTION (independent of technical_rules_enabled) ──
-      if (!isSectionOff(profile, 'support_distance_enabled')) {
+      // Missing support is ALWAYS Pending here — a contract can never qualify
+      // with Support Dist = "--" while this rule is active.
+      if (supportDistanceActive) {
         if (primarySupport !== null && primarySupport > 0) {
           const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
           const passesMin = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
@@ -1510,25 +1559,24 @@ async function scanSymbol(
           if (finalSupportDistancePass) r.supportDistanceDebug!.passed++;
           else if (!passesMin) r.supportDistanceDebug!.below_min++;
           else if (!passesMax) r.supportDistanceDebug!.above_max++;
-          r.supportDistanceDebug!.details.push({
+          if (r.supportDistanceDebug!.details.length < 25) r.supportDistanceDebug!.details.push({
             ticker: symbol, strike, primarySupport,
             supportDistancePct: Number(supportDistPct.toFixed(2)),
             passesMin, passesMax, finalSupportDistancePass,
             status: finalSupportDistancePass ? 'pass' : !passesMin ? 'fail_below_min' : 'fail_above_max',
           });
-          console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=${primarySupport.toFixed(2)} | supportDistPct=${supportDistPct.toFixed(2)}% | passesMin=${passesMin} | passesMax=${passesMax} | finalPass=${finalSupportDistancePass}`);
         } else {
           r.supportDistanceDebug!.before++;
           r.supportDistanceDebug!.missing_support++;
-          r.supportDistanceDebug!.details.push({
+          if (r.supportDistanceDebug!.details.length < 25) r.supportDistanceDebug!.details.push({
             ticker: symbol, strike, primarySupport: null,
             supportDistancePct: null, passesMin: false, passesMax: false,
             finalSupportDistancePass: false, status: 'pending_missing_support',
           });
           if (!pendingReasons.includes('Primary support unavailable')) {
             pendingReasons.push('Primary support unavailable');
+            r.techRejections!.technical_data_missing++;
           }
-          console.log(`[SUPPORT_DIST] ${symbol} | strike=${strike} | primarySupport=null | supportDistPct=null | status=Pending — Support unavailable`);
         }
       }
 
@@ -1606,11 +1654,22 @@ async function scanSymbol(
     // ── Build pass/fail rule checks for both scan and analyze modes ──
     const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
     if (!noFilterMode) {
+      if (profile.exclude_existing_positions && openTickers.includes(symbol)) {
+        passFail.push({ rule: 'No existing open position', pass: false, status: 'fail' });
+      }
       if (!isSectionOff(profile, 'order_strike_enabled')) {
         if (profile.max_strike != null) {
           passFail.push({ rule: `Strike <= ${profile.max_strike}`, pass: strike <= profile.max_strike, status: strike <= profile.max_strike ? 'pass' : 'fail' });
         }
-
+        if (profile.minimum_stock_price != null || profile.maximum_stock_price != null) {
+          if (stockPrice !== null && stockPrice > 0) {
+            const minOk = profile.minimum_stock_price == null || stockPrice >= profile.minimum_stock_price;
+            const maxOk = profile.maximum_stock_price == null || stockPrice <= profile.maximum_stock_price;
+            passFail.push({ rule: `Stock price in range (${stockPrice.toFixed(2)})`, pass: minOk && maxOk, status: minOk && maxOk ? 'pass' : 'fail' });
+          } else {
+            passFail.push({ rule: 'Stock price range — price unavailable', pass: true, status: 'not_evaluated' });
+          }
+        }
       }
       if (!isSectionOff(profile, 'cycle_liquidity_enabled')) {
         passFail.push({ rule: `OI >= ${profile.min_target_oi}`, pass: oi >= profile.min_target_oi, status: oi >= profile.min_target_oi ? 'pass' : 'fail' });
@@ -1620,7 +1679,7 @@ async function scanSymbol(
         const tech = r.technical;
         const barsAvailable = bars.length;
         if (rsiActive) {
-          if (barsAvailable >= 20 && tech) {
+          if (barsAvailable >= 20 && tech && tech.rsi != null) {
             if (profile.rsi_min != null) {
               const rsiOk = tech.rsi >= profile.rsi_min;
               passFail.push({ rule: `RSI >= ${profile.rsi_min} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
@@ -1630,7 +1689,7 @@ async function scanSymbol(
               passFail.push({ rule: `RSI <= ${profile.rsi_max} (${tech.rsi})`, pass: rsiOk, status: rsiOk ? 'pass' : 'fail' });
             }
           } else {
-            passFail.push({ rule: 'Technical history unavailable', pass: true, status: 'not_evaluated' });
+            passFail.push({ rule: `RSI — insufficient history (need 20 bars, have ${barsAvailable})`, pass: true, status: 'not_evaluated' });
           }
         }
         if (ma20AboveMa50Active) {
@@ -1642,8 +1701,8 @@ async function scanSymbol(
           }
         }
         if (ma50AboveMa200Active) {
-          if (ma200DataAvailable && tech && tech.ma200 != null) {
-            const maOk = tech.ma50! > tech.ma200;
+          if (ma200DataAvailable && tech && tech.ma200 != null && tech.ma50 != null) {
+            const maOk = tech.ma50 > tech.ma200;
             passFail.push({ rule: `MA50 > MA200 (${tech.ma50} vs ${tech.ma200})`, pass: maOk, status: maOk ? 'pass' : 'fail' });
           } else {
             passFail.push({ rule: 'MA50 > MA200 — insufficient history (need 200 bars)', pass: true, status: 'not_evaluated' });
@@ -1666,7 +1725,7 @@ async function scanSymbol(
           }
         }
       }
-      if (!isSectionOff(profile, 'support_distance_enabled')) {
+      if (supportDistanceActive) {
         if (primarySupport !== null && primarySupport > 0) {
           const supportDistPct = ((primarySupport - strike) / primarySupport) * 100;
           const distMinOk = profile.minimum_support_distance_pct == null || supportDistPct >= profile.minimum_support_distance_pct;
@@ -1687,16 +1746,16 @@ async function scanSymbol(
           const croiOk = croiOptimized && netCroi >= profile.min_net_croi && pc <= profile.max_premium_capture;
           passFail.push({ rule: `Filter Strikes by CROI: Net CROI >= ${profile.min_net_croi}% & PC <= ${profile.max_premium_capture}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
         } else {
-          const croiOk = netCroi >= profile.min_net_croi;
-          const pcOk = pc <= profile.max_premium_capture;
-          passFail.push({ rule: `Net CROI >= ${profile.min_net_croi}%`, pass: croiOk, status: croiOk ? 'pass' : 'fail' });
-          passFail.push({ rule: `Premium Capture <= ${profile.max_premium_capture}%`, pass: pcOk, status: pcOk ? 'pass' : 'fail' });
+          // "Filter Strikes by CROI" is OFF, so CROI/PC do NOT decide status.
+          // Show them as info only — previously they showed as hard "fail"
+          // while the contract was Qualified, which looked inconsistent.
+          passFail.push({ rule: `Net CROI ${croiOptimized ? netCroi.toFixed(2) + '%' : 'n/a'} (info — Filter Strikes by CROI is OFF)`, pass: true, status: 'not_evaluated' });
         }
       }
       if (!hasPremium && !isSectionOff(profile, 'croi_pc_enabled') && profile.filter_strikes_croi) {
         passFail.push({ rule: 'Filter Strikes by CROI — Premium required', pass: true, status: 'not_evaluated' });
       }
-      if (!hasPremium) {
+      if (!hasPremium && !isSectionOff(profile, 'croi_pc_enabled') && !profile.filter_strikes_croi) {
         passFail.push({ rule: 'Premium data — enter manually for CROI / PC', pass: true, status: 'not_evaluated' });
       }
     }
@@ -1717,6 +1776,9 @@ async function scanSymbol(
         premium_capture: hasPremium ? Number(pc.toFixed(1)) : 0,
         breakeven: hasPremium ? Number(breakeven.toFixed(2)) : 0,
         qualified, technical_pending: isPending, pass_fail: passFail,
+        rejection_reasons: reasons, pending_reasons: pendingReasons,
+        technical_snapshot: r.technical ? { rsi: r.technical.rsi, ma20: r.technical.ma20, ma50: r.technical.ma50, ma200: r.technical.ma200 } : null,
+        history_bars: bars.length,
         has_quotes: hasPremium,
         premium_source: premiumSourceOut,
         strike_distance_from_stock: stockPrice !== null && stockPrice > 0 ? Number(((stockPrice - strike) / stockPrice * 100).toFixed(1)) : null,
@@ -1752,22 +1814,15 @@ async function scanSymbol(
         premium_source: premiumSourceOut,
         secondary_support: secondarySupport !== null ? Number(secondarySupport.toFixed(2)) : null,
         resistance: resistance !== null ? Number(resistance.toFixed(2)) : null,
+        technical_snapshot: r.technical ? { rsi: r.technical.rsi, ma20: r.technical.ma20, ma50: r.technical.ma50, ma200: r.technical.ma200 } : null,
+        history_bars: bars.length,
       });
     }
   }
 
-  // In analyze mode, sort qualifying contracts and pick best
-  if (analyzeMode && analyses.length > 0) {
-    const qualifying = analyses.filter((a) => a.qualified);
-    qualifying.sort((a, b) => {
-      const aBelow = primarySupport !== null && a.strike < primarySupport ? 0 : 1;
-      const bBelow = primarySupport !== null && b.strike < primarySupport ? 0 : 1;
-      if (aBelow !== bBelow) return aBelow - bBelow;
-      if (a.spread_pct !== b.spread_pct) return a.spread_pct - b.spread_pct;
-      if (a.open_interest !== b.open_interest) return b.open_interest - a.open_interest;
-      if (a.volume !== b.volume) return b.volume - a.volume;
-      return Math.abs(a.delta) - Math.abs(b.delta);
-    });
+  if (analyzeMode) {
+    // Same ranking as Today's Candidates (one shared definition).
+    analyses.sort(compareContracts);
     r.analyses = analyses;
   }
 
@@ -1780,10 +1835,9 @@ serve(async (req) => {
   console.log('market-scan started');
   console.log('MASSIVE_API_KEY exists:', Boolean(Deno.env.get('MASSIVE_API_KEY')));
 
-  // stockCache is intentionally only an intra-request dedupe cache.
-  // Supabase is the persistent cache. Warm Edge Function instances must not
-  // carry null/stale stock snapshots into later Analyze requests.
-  stockCache.clear();
+  // All per-request caches live in a ScanContext created below, so warm
+  // isolates and concurrent requests never share or clear each other's state.
+  const requestStart = Date.now();
 
   try {
     const apiKey = Deno.env.get('MASSIVE_API_KEY');
@@ -1805,65 +1859,40 @@ serve(async (req) => {
       const from: number = Number(body.from) || 0;
       const to: number = Number(body.to) || 0;
 
-      const rangeMap: Record<string, string> = {
-        '1D': 'day',
-        '1W': 'week',
-        '1M': 'month',
-      };
-      const rangeUnit = rangeMap[resolution] || 'day';
-
-      let bars: HistoryBar[] = [];
-      const cachedBars = await loadCachedHistory(ticker, 500);
-
-      if (cachedBars.length > 0) {
-        if (resolution === '1D') {
-          bars = cachedBars;
-        } else if (resolution === '1W') {
-          bars = aggregateWeeks(cachedBars);
-        } else if (resolution === '1M') {
-          bars = aggregateMonths(cachedBars);
-        }
-      }
-
+      // Always work in DAILY bars and aggregate locally. Previously 1W/1M
+      // requests fetched weekly/monthly bars from Massive and saved them into
+      // the DAILY history cache, corrupting RSI/support for that ticker.
       const chartToday = new Date();
       const chartFmt = (d: Date) => d.toISOString().slice(0, 10);
-      const chartStart = new Date(chartToday);
-      chartStart.setDate(chartStart.getDate() - 548);
+      const chartTodayStr = chartFmt(chartToday);
+      const chartExpected = lastCompletedBusinessDay(chartToday, chartFmt);
+      let daily = (await loadCachedHistory(ticker, 500)).filter((b) => b.date < chartTodayStr);
 
-      const needsFresh = bars.length < 60 ||
-        (bars.length > 0 && bars.at(-1)!.date < chartFmt(chartToday));
-
-      if (needsFresh || bars.length === 0) {
-        const histPath = `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/${rangeUnit}/${chartFmt(chartStart)}/${chartFmt(chartToday)}?adjusted=true&sort=asc&limit=50000`;
+      const chartNeedsFresh = daily.length < 60 || daily.at(-1)!.date < chartExpected;
+      if (chartNeedsFresh) {
+        const chartStart = new Date(chartToday);
+        chartStart.setDate(chartStart.getDate() - 548);
+        const histPath = `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/day/${chartFmt(chartStart)}/${chartTodayStr}?adjusted=true&sort=asc&limit=50000`;
         const histResult = await massiveFetch(histPath, apiKey, ticker, 'chart_bars');
-
         if (histResult.ok) {
           const freshBars: HistoryBar[] = (histResult.data?.results || []).map((b: any) => ({
             date: new Date(b.t).toISOString().slice(0, 10),
             open: Number(b.o), high: Number(b.h), low: Number(b.l), close: Number(b.c), volume: Number(b.v || 0),
-          })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0);
-
+          })).filter((b: HistoryBar) => Number.isFinite(b.close) && b.close > 0 && b.date < chartTodayStr && !isWeekendDate(b.date));
           if (freshBars.length > 0) {
-            if (resolution === '1D') {
-              const barMap = new Map<string, HistoryBar>();
-              for (const b of cachedBars) barMap.set(b.date, b);
-              for (const b of freshBars) barMap.set(b.date, b);
-              bars = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
-            } else if (resolution === '1W') {
-              const all = [...cachedBars, ...freshBars];
-              const dedup = new Map<string, HistoryBar>();
-              for (const b of all) dedup.set(b.date, b);
-              bars = aggregateWeeks(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
-            } else if (resolution === '1M') {
-              const all = [...cachedBars, ...freshBars];
-              const dedup = new Map<string, HistoryBar>();
-              for (const b of all) dedup.set(b.date, b);
-              bars = aggregateMonths(Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date)));
-            }
+            const barMap = new Map<string, HistoryBar>();
+            for (const b of daily) barMap.set(b.date, b);
+            for (const b of freshBars) barMap.set(b.date, b);
+            daily = Array.from(barMap.values()).sort((a, b) => a.date.localeCompare(b.date));
             await saveCachedHistory(ticker, freshBars);
           }
         }
       }
+
+      const bars: HistoryBar[] =
+        resolution === '1W' ? aggregateWeeks(daily)
+        : resolution === '1M' ? aggregateMonths(daily)
+        : daily;
 
       const tvBars = bars
         .filter((b) => Number.isFinite(b.close) && b.close > 0)
@@ -1892,6 +1921,7 @@ serve(async (req) => {
 
     const today = new Date();
     const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const ctx = newScanContext(lastCompletedBusinessDay(today, fmt));
 
     const noFilterMode =
       isSectionOff(profile, 'order_strike_enabled') &&
@@ -1940,7 +1970,7 @@ serve(async (req) => {
 
       console.log(`[Analyze] ${ticker} | seed_price=${analyzeBulkPrice} | seed_source=${analyzePriceSource}`);
 
-      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, analyzeBulkPrice);
+      const result = await scanSymbol(ticker, ticker, profile, apiKey, openTickers, noFilterMode, today, fmt, true, true, analyzeBulkPrice, true, ctx);
 
       if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') {
         return json({
@@ -1974,14 +2004,15 @@ serve(async (req) => {
       return json({
         success: true,
         ticker,
-        stock_price: result.stockPrice !== null && result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
+        stock_price: result.stockPrice != null && result.stockPrice > 0 ? Number(result.stockPrice.toFixed(2)) : null,
         stock_source: result.stockSource || 'none',
         trend: result.trendClass || 'Unknown',
-        primary_support: result.primarySupport !== null ? Number(result.primarySupport.toFixed(2)) : null,
-        secondary_support: result.secondarySupport !== null ? Number(result.secondarySupport.toFixed(2)) : null,
-        resistance: result.resistance !== null ? Number(result.resistance.toFixed(2)) : null,
+        primary_support: result.primarySupport != null ? Number(result.primarySupport.toFixed(2)) : null,
+        secondary_support: result.secondarySupport != null ? Number(result.secondarySupport.toFixed(2)) : null,
+        resistance: result.resistance != null ? Number(result.resistance.toFixed(2)) : null,
         technical_data_available: Boolean(result.technicalDataAvailable),
-        technical_warning: result.technicalDataAvailable ? null : 'Historical price data was unavailable or insufficient; support/trend rules were not used to reject contracts.',
+        history_bars: result.historyBarCount ?? 0,
+        technical_warning: result.technicalDataAvailable ? null : 'Not enough price history for the active technical/support rules — affected contracts are Pending (not Rejected).',
         technical: result.technical || null,
         qualifies: qualifying.length > 0,
         best_contract: bestContract,
@@ -2037,375 +2068,218 @@ serve(async (req) => {
     }
 
     // ── Bulk stock prices: one grouped daily request for all symbols ──
-    // If grouped daily fails (429/401/403/empty), bulkLoadCachedStockPrices
-    // provides the last valid price for each ticker so they don't go Unavailable.
+    // The same call also returns each ticker's OHLCV for the latest completed
+    // session; we append that bar to the history cache so technicals stay
+    // current every day without per-ticker (rate-limited) history requests.
     const allTickers = symbolList.map((s) => s.ticker.toUpperCase());
-    const { priceMap: bulkPriceMap, httpStatus: bulkHttpStatus } = await fetchGroupedDailyPrices(apiKey, today, fmt);
-    console.log(`[BulkPrices] ${bulkPriceMap.size} stock prices loaded from grouped daily (HTTP ${bulkHttpStatus})`);
-
-    // If grouped daily returned nothing, bulk-load persistent price cache as fallback
-    let bulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
-    if (bulkPriceMap.size === 0) {
-      console.log(`[BulkPrices] Grouped daily returned 0 prices — loading persistent price cache for ${allTickers.length} tickers`);
-      bulkCachedPrices = await bulkLoadCachedStockPrices(allTickers);
-      console.log(`[BulkPrices] Persistent cache returned ${bulkCachedPrices.size} prices`);
+    const { priceMap: bulkPriceMap, barMap: groupedBarMap, tradingDate, httpStatus: bulkHttpStatus } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+    console.log(`[BulkPrices] ${bulkPriceMap.size} stock prices loaded from grouped daily (HTTP ${bulkHttpStatus}, date ${tradingDate})`);
+    if (tradingDate) ctx.expectedLatestDate = tradingDate;
+    let groupedBarsSaved = 0;
+    if (groupedBarMap.size > 0) {
+      groupedBarsSaved = await saveGroupedBarsToCache(groupedBarMap, allTickers);
+      console.log(`[GroupedBars] appended ${groupedBarsSaved} daily bars (${tradingDate}) to stock_history_cache`);
     }
 
-    // ── Main scan ──
-    const candidates: any[] = [];
-    let symbolsScanned = 0, symbolsFailed = 0, symbolsWithChains = 0;
-    let totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
-    let totalValidQuotes = 0, totalAwaitingQuotes = 0;
-    let totalEvaluated = 0, totalQualified = 0, totalRejected = 0, totalPending = 0, totalPagesFetched = 0;
-    let totalContractsFound = 0;
+    let bulkCachedPrices = new Map<string, { price: number; source: string; tradeDate: string | null }>();
+    if (bulkPriceMap.size === 0) {
+      bulkCachedPrices = await bulkLoadCachedStockPrices(allTickers);
+      console.log(`[BulkPrices] Grouped daily empty — persistent cache returned ${bulkCachedPrices.size} prices`);
+    }
+    const priceFor = (t: string) => bulkPriceMap.get(t) ?? bulkCachedPrices.get(t)?.price ?? null;
+
+    // ── STAGE 1: evaluate every symbol from cache (no per-ticker history calls) ──
+    // Every symbol is scanned — there is no early stop, so the scanned set is
+    // the same on every Rescan.
+    const resultsByTicker = new Map<string, ScanSymbolResult>();
+    const companyByTicker = new Map<string, string>();
+    let symbolsFailed = 0;
     let rawSample: any = null;
     let verboseCount = 0;
-    const techRejTotals = { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 };
-    const supportDistanceDebugTotals = { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] as any[] };
-    const orderStrikeRejTotals = { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 };
-    // Technical cache diagnostics
-    let tickersWith60PlusBars = 0, tickersWith200PlusBars = 0, tickersMissingHistory = 0;
 
     const BATCH_SIZE = 5;
     for (let i = 0; i < symbolList.length; i += BATCH_SIZE) {
       const batch = symbolList.slice(i, i + BATCH_SIZE);
-      console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(symbolList.length / BATCH_SIZE)}: ${batch.map((b) => b.ticker).join(', ')}`);
-
       const batchResults = await Promise.all(
         batch.map((sym) => {
           const isVerbose = verboseCount < 3;
           if (isVerbose) verboseCount++;
           const upper = sym.ticker.toUpperCase();
-          // Use grouped daily price; if missing, use persistent cache fallback
-          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-          return scanSymbol(sym.ticker, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, price, scanMode === 'universe')
+          companyByTicker.set(upper, sym.company_name || '');
+          return scanSymbol(upper, sym.company_name || '', profile, apiKey, openTickers, noFilterMode, today, fmt, isVerbose, false, priceFor(upper), false, ctx)
+            .then((res) => ({ upper, res }))
             .catch((err) => {
-              console.error(`[scanSymbol] ${sym.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
-              return null;
+              console.error(`[scanSymbol] ${upper} failed: ${err instanceof Error ? err.message : String(err)}`);
+              return { upper, res: null as ScanSymbolResult | null };
             });
-        })
+        }),
       );
-
-      for (const result of batchResults) {
-        if (!result) { symbolsFailed++; continue; }
-        symbolsScanned++;
-        totalPutsReturned += result.putsReturned;
-        totalFilteredByExp += result.filteredByExpiration;
-        totalFilteredByStrike += result.filteredByStrike;
-        totalValidQuotes += result.validQuotes;
-        totalAwaitingQuotes += result.contractsAwaitingQuotes;
-        totalEvaluated += result.evaluated;
-        totalQualified += result.qualified;
-        totalRejected += result.rejected;
-        totalPending += result.pending || 0;
-        totalPagesFetched += result.pagesFetched;
-        totalContractsFound += result.putsReturned;
-        if (result.techRejections) {
-          techRejTotals.rsi_below_min += result.techRejections.rsi_below_min;
-          techRejTotals.rsi_above_max += result.techRejections.rsi_above_max;
-          techRejTotals.ma20_not_above_ma50 += result.techRejections.ma20_not_above_ma50;
-          techRejTotals.ma50_not_above_ma200 += result.techRejections.ma50_not_above_ma200;
-          techRejTotals.price_not_above_ma200 += result.techRejections.price_not_above_ma200;
-          techRejTotals.downtrend_no_support += result.techRejections.downtrend_no_support;
-          techRejTotals.support_dist_below_min += result.techRejections.support_dist_below_min;
-          techRejTotals.support_dist_above_max += result.techRejections.support_dist_above_max;
-          techRejTotals.technical_data_missing += result.techRejections.technical_data_missing;
-        }
-        if (result.orderStrikeRejections) {
-          orderStrikeRejTotals.stock_below_min += result.orderStrikeRejections.stock_below_min;
-          orderStrikeRejTotals.stock_above_max += result.orderStrikeRejections.stock_above_max;
-          orderStrikeRejTotals.strike_above_max += result.orderStrikeRejections.strike_above_max;
-        }
-        if (result.supportDistanceDebug) {
-          supportDistanceDebugTotals.before += result.supportDistanceDebug.before;
-          supportDistanceDebugTotals.passed += result.supportDistanceDebug.passed;
-          supportDistanceDebugTotals.below_min += result.supportDistanceDebug.below_min;
-          supportDistanceDebugTotals.above_max += result.supportDistanceDebug.above_max;
-          supportDistanceDebugTotals.missing_support += result.supportDistanceDebug.missing_support;
-          supportDistanceDebugTotals.details.push(...result.supportDistanceDebug.details);
-        }
-        // Track technical cache stats
-        const barCount = result.historyBarCount ?? 0;
-        if (barCount >= 200) tickersWith200PlusBars++;
-        else if (barCount >= 60) tickersWith60PlusBars++;
-        else tickersMissingHistory++;
-
-        if (result.chainStatus === 'success') symbolsWithChains++;
-        if (result.chainStatus === 'api_error' || result.chainStatus === 'unauthorized' || result.chainStatus === 'rate_limited' || result.chainStatus === 'network_error') symbolsFailed++;
-
-        if (!rawSample && result.rawSample) rawSample = result.rawSample;
-        candidates.push(...result.candidates);
-      }
-
-      const qualifiedCount = candidates.filter((c) => c.qualified).length;
-      if (qualifiedCount >= MAX_CANDIDATES) {
-        console.log(`Reached ${MAX_CANDIDATES} qualified candidates, stopping early at ${symbolsScanned} symbols`);
-        break;
+      for (const { upper, res } of batchResults) {
+        if (!res) { symbolsFailed++; continue; }
+        resultsByTicker.set(upper, res);
+        if (!rawSample && res.rawSample) rawSample = res.rawSample;
       }
     }
 
-    // ── STAGE 2: Technical cache warming ──
-    // After the main scan, identify tickers that are Pending only because
-    // technical history was unavailable. Fetch history for ALL of them,
-    // save to cache, and re-scan so they get real technical evaluations.
-    // Processes in small batches with delays to respect Massive API limits.
-    const HISTORY_BATCH_SIZE = 5;
-    const HISTORY_BATCH_DELAY_MS = 150;
+    // ── STAGE 2: fill missing history for tickers that are Pending because of it ──
+    // One Rescan now does: find tickers whose contracts are Pending only for
+    // lack of history → fetch history (sequentially, within Massive limits and
+    // a time budget) → re-evaluate using the SAME option chain → final status.
+    const WARM_DEADLINE_MS = 110_000; // keep well under the Edge Function wall-clock limit
     let historyFetchedThisScan = 0;
     let historyFetch403 = 0;
     let historyFetch429 = 0;
-    let cacheSaveFailures = 0;
     let stillPendingHistory = 0;
-    let cacheHits = 0;
-    let historyFetchesRequired = 0;
-    let historyFetchesSuccessful = 0;
-    let rsiCalculated = 0;
-    let stillUnavailable = 0;
+    let warmingDeadlineHit = false;
     const warmDiagnostics: { ticker: string; cachedBars: number; requiredBars: number; fetchAttempted: boolean; fetchStatus: string; finalBars: number }[] = [];
 
-    const hasActiveTechnicalRuleForWarming =
-      !noFilterMode &&
-      !isSectionOff(profile, 'technical_rules_enabled') &&
-      (
-        profile.rsi_min != null ||
-        profile.rsi_max != null ||
-        profile.require_ma20_above_ma50 === true ||
-        profile.require_ma50_above_ma200 === true ||
-        profile.require_price_above_ma200 === true ||
-        profile.exclude_downtrend_no_support === true
-      );
-    const technicalRulesNeedHistory = hasActiveTechnicalRuleForWarming;
-    const supportDistanceNeedsHistory = !noFilterMode &&
-      !isSectionOff(profile, 'support_distance_enabled') &&
-      (profile.minimum_support_distance_pct != null || profile.maximum_support_distance_pct != null);
-    const historyNeeded = technicalRulesNeedHistory || supportDistanceNeedsHistory;
-    const needsMA200 = technicalRulesNeedHistory && (profile.require_ma50_above_ma200 === true || profile.require_price_above_ma200 === true);
+    const warmQueue: { ticker: string; res: ScanSymbolResult; score: number }[] = [];
+    for (const [ticker, res] of resultsByTicker) {
+      const need = res.needsHistoryBars ?? 0;
+      if (need <= 0 || (res.historyBarCount ?? 0) >= need) continue;
+      // Only tickers with at least one contract that nothing else rejected.
+      const pendingContracts = res.candidates.filter((c) => c.technical_pending);
+      if (pendingContracts.length === 0) continue;
+      const score = Math.max(...pendingContracts.map((c) => Number(c.net_croi || 0) * 1000 + Number(c.open_interest || 0) / 1000));
+      warmQueue.push({ ticker, res, score });
+    }
+    warmQueue.sort((a, b) => b.score - a.score);
+    console.log(`[CacheWarm] ${warmQueue.length} tickers need history for the active rules`);
 
-    // Compute minimum bars needed for the currently active rules.
-    // Each rule contributes its own requirement; RSI needs 15, MA20>MA50 needs 50,
-    // downtrend/support need 60, MA200 rules need 200. If a rule's toggle is OFF,
-    // it contributes zero — we do NOT inflate the requirement just because
-    // Technical Rules master toggle is ON.
-    let minBarsForActiveRules = 0;
-    const needsRSI = technicalRulesNeedHistory && (profile.rsi_min != null || profile.rsi_max != null);
-    if (needsRSI) minBarsForActiveRules = Math.max(minBarsForActiveRules, 20);
-    if (profile.require_ma20_above_ma50 === true) minBarsForActiveRules = Math.max(minBarsForActiveRules, 50);
-    if (profile.exclude_downtrend_no_support === true) minBarsForActiveRules = Math.max(minBarsForActiveRules, 60);
-    if (supportDistanceNeedsHistory) minBarsForActiveRules = Math.max(minBarsForActiveRules, 60);
-    if (needsMA200) minBarsForActiveRules = Math.max(minBarsForActiveRules, 200);
+    for (const item of warmQueue) {
+      const need = item.res.needsHistoryBars ?? 0;
+      const before = item.res.historyBarCount ?? 0;
+      if (ctx.historyRateLimited) {
+        stillPendingHistory++;
+        warmDiagnostics.push({ ticker: item.ticker, cachedBars: before, requiredBars: need, fetchAttempted: false, fetchStatus: 'skipped_rate_limited', finalBars: before });
+        continue;
+      }
+      if (Date.now() - requestStart > WARM_DEADLINE_MS) {
+        warmingDeadlineHit = true;
+        stillPendingHistory++;
+        warmDiagnostics.push({ ticker: item.ticker, cachedBars: before, requiredBars: need, fetchAttempted: false, fetchStatus: 'skipped_time_budget', finalBars: before });
+        continue;
+      }
+      ctx.stockCache.delete(item.ticker);
+      const snap = await getStockSnapshot(item.ticker, apiKey, today, fmt, priceFor(item.ticker), true, need, ctx);
+      const finalBars = snap.historicalBars.length;
+      const fetchStatus = snap.historyHttpStatus === 200 ? 'ok' : `HTTP_${snap.historyHttpStatus ?? 'none'}`;
+      if (snap.historyHttpStatus === 403) historyFetch403++;
+      if (snap.historyHttpStatus === 429) historyFetch429++;
+      warmDiagnostics.push({ ticker: item.ticker, cachedBars: before, requiredBars: need, fetchAttempted: true, fetchStatus, finalBars });
 
-    if (historyNeeded && scanMode !== 'analyze') {
-      // Find tickers with pending technical data — candidates that have
-      // technical_pending=true and no hard rejections (only pending reasons).
-      // Only fetch history for tickers that survived non-technical screening.
-      const pendingTickers = new Map<string, { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }>();
-
-      for (const c of candidates) {
-        if (c.technical_pending && (!c.rejection_reasons || c.rejection_reasons.length === 0)) {
-          const existing = pendingTickers.get(c.ticker);
-          const croi = c.net_croi || 0;
-          const oi = c.open_interest || 0;
-          const vol = c.volume || 0;
-          if (!existing || croi > existing.bestCroi) {
-            pendingTickers.set(c.ticker, {
-              ticker: c.ticker,
-              bestCroi: croi,
-              bestOi: Math.max(oi, existing?.bestOi || 0),
-              bestVolume: Math.max(vol, existing?.bestVolume || 0),
-              cachedBars: 0,
-            });
-          }
+      if (finalBars > before) {
+        historyFetchedThisScan++;
+        // Re-evaluate with the new history. The chain comes from ctx.chainCache,
+        // so quotes are identical to the first pass.
+        try {
+          const rerun = await scanSymbol(item.ticker, companyByTicker.get(item.ticker) || '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, priceFor(item.ticker), false, ctx);
+          resultsByTicker.set(item.ticker, rerun);
+        } catch (err) {
+          console.error(`[CacheWarm] re-evaluate ${item.ticker} failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      if (finalBars < need) stillPendingHistory++;
+    }
 
-      // Check cache for each pending ticker to determine which actually need fetching
-      const needsFetch: { ticker: string; bestCroi: number; bestOi: number; bestVolume: number; cachedBars: number }[] = [];
-      for (const info of pendingTickers.values()) {
-        const upper = info.ticker.toUpperCase();
-        const cachedBars = await loadCachedHistory(upper, 260);
-        info.cachedBars = cachedBars.length;
-        const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
-        if (cachedBars.length < requiredBars) {
-          needsFetch.push(info);
-        } else {
-          // Already has enough cache — shouldn't be pending, re-scan to fix
-          cacheHits++;
-          warmDiagnostics.push({ ticker: upper, cachedBars: cachedBars.length, requiredBars, fetchAttempted: false, fetchStatus: 'cache_sufficient', finalBars: cachedBars.length });
-          // Re-scan with cached data to clear stale pending state
-          stockCache.delete(upper);
-          const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-          const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
-          if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
-            let oldPending = 0, oldQualified = 0, oldRejected = 0, oldEvaluated = 0;
-            for (let ci = candidates.length - 1; ci >= 0; ci--) {
-              if (candidates[ci].ticker === upper) {
-                if (candidates[ci].technical_pending) oldPending++;
-                else if (candidates[ci].qualified) oldQualified++;
-                else oldRejected++;
-                oldEvaluated++;
-                candidates.splice(ci, 1);
-              }
-            }
-            candidates.push(...rerunResult.candidates);
-            totalQualified += rerunResult.qualified - oldQualified;
-            totalRejected += rerunResult.rejected - oldRejected;
-            totalPending += rerunResult.pending - oldPending;
-            totalEvaluated += rerunResult.evaluated - oldEvaluated;
-            if (rerunResult.technical?.rsi != null) rsiCalculated++;
-          }
-        }
-      }
+    // ── Assemble results & counts from the FINAL evaluation only ──
+    const candidates: any[] = [];
+    let symbolsWithChains = 0, totalPutsReturned = 0, totalFilteredByExp = 0, totalFilteredByStrike = 0;
+    let totalValidQuotes = 0, totalAwaitingQuotes = 0, totalPagesFetched = 0;
+    let tickersWith60PlusBars = 0, tickersWith200PlusBars = 0, tickersMissingHistory = 0;
+    const techRejTotals = { rsi_below_min: 0, rsi_above_max: 0, ma20_not_above_ma50: 0, ma50_not_above_ma200: 0, price_not_above_ma200: 0, downtrend_no_support: 0, support_dist_below_min: 0, support_dist_above_max: 0, technical_data_missing: 0 };
+    const orderStrikeRejTotals = { stock_below_min: 0, stock_above_max: 0, strike_above_max: 0 };
+    const supportDistanceDebugTotals = { before: 0, passed: 0, below_min: 0, above_max: 0, missing_support: 0, details: [] as any[] };
 
-      // Rank: tickers with CROI > 0 first (passing CROI/PC), then by OI, then volume
-      needsFetch.sort((a, b) => {
-        const aHasCroi = a.bestCroi > 0 ? 1 : 0;
-        const bHasCroi = b.bestCroi > 0 ? 1 : 0;
-        if (aHasCroi !== bHasCroi) return bHasCroi - aHasCroi;
-        if (a.bestOi !== b.bestOi) return b.bestOi - a.bestOi;
-        return b.bestVolume - a.bestVolume;
-      });
-
-      historyFetchesRequired = needsFetch.length;
-      console.log(`[CacheWarm] ${needsFetch.length} tickers need history fetch (cache hits: ${cacheHits}), processing ALL in batches of ${HISTORY_BATCH_SIZE}`);
-
-      // ── PER-TICKER AGGREGATE HISTORY FETCH (batched, no arbitrary cap) ──
-      // Fetch history for every pending ticker using the per-ticker aggregates
-      // endpoint. Process in small batches with delays to respect rate limits.
-      for (let batchStart = 0; batchStart < needsFetch.length; batchStart += HISTORY_BATCH_SIZE) {
-        const batch = needsFetch.slice(batchStart, batchStart + HISTORY_BATCH_SIZE);
-
-        // Process batch sequentially to avoid concurrent API bursts
-        for (const info of batch) {
-          const upper = info.ticker.toUpperCase();
-          const requiredBars = needsMA200 ? 200 : minBarsForActiveRules;
-
-          // Invalidate in-memory cache so getStockSnapshot actually fetches
-          stockCache.delete(upper);
-
-          // Fetch history with allowLiveHistory = true
-          const snapshot = await getStockSnapshot(upper, apiKey, today, fmt, bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null, true, requiredBars);
-          const fetchStatus = snapshot.historyHttpStatus === 200 ? 'ok' : `HTTP_${snapshot.historyHttpStatus ?? 'none'}`;
-          const finalBars = snapshot.historicalBars.length;
-
-          if (snapshot.historyHttpStatus === 403) historyFetch403++;
-          if (snapshot.historyHttpStatus === 429) historyFetch429++;
-
-          warmDiagnostics.push({ ticker: upper, cachedBars: info.cachedBars, requiredBars, fetchAttempted: true, fetchStatus, finalBars });
-
-          if (finalBars >= minBarsForActiveRules) {
-            historyFetchesSuccessful++;
-            historyFetchedThisScan++;
-            console.log(`[CacheWarm] ${upper} | fetched ${finalBars} bars (needed ${requiredBars}), re-scanning`);
-
-            const price = bulkPriceMap.get(upper) ?? bulkCachedPrices.get(upper)?.price ?? null;
-            const rerunResult = await scanSymbol(upper, '', profile, apiKey, openTickers, noFilterMode, today, fmt, false, false, price, false);
-
-            if (rerunResult.chainStatus === 'success' || rerunResult.candidates.length > 0) {
-              // Remove old candidates for this ticker, adjusting totals
-              let oldPending = 0, oldQualified = 0, oldRejected = 0, oldEvaluated = 0;
-              for (let ci = candidates.length - 1; ci >= 0; ci--) {
-                if (candidates[ci].ticker === upper) {
-                  if (candidates[ci].technical_pending) oldPending++;
-                  else if (candidates[ci].qualified) oldQualified++;
-                  else oldRejected++;
-                  oldEvaluated++;
-                  candidates.splice(ci, 1);
-                }
-              }
-              candidates.push(...rerunResult.candidates);
-
-              // Update totals: subtract old, add new
-              totalQualified += rerunResult.qualified - oldQualified;
-              totalRejected += rerunResult.rejected - oldRejected;
-              totalPending += rerunResult.pending - oldPending;
-              totalEvaluated += rerunResult.evaluated - oldEvaluated;
-              if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 200) tickersWith200PlusBars++;
-              else if (rerunResult.historyBarCount && rerunResult.historyBarCount >= 60) tickersWith60PlusBars++;
-              if (rerunResult.technical?.rsi != null) rsiCalculated++;
-            }
-          } else {
-            console.log(`[CacheWarm] ${upper} | fetch returned only ${finalBars} bars (needed ${requiredBars}) — still pending`);
-            stillPendingHistory++;
-            stillUnavailable++;
-          }
-        }
-
-        // Delay between batches to respect rate limits (skip after last batch)
-        if (batchStart + HISTORY_BATCH_SIZE < needsFetch.length) {
-          // If we got 429s, wait longer
-          const delay = historyFetch429 > 0 ? 500 : HISTORY_BATCH_DELAY_MS;
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-      }
-
-      // Final summary log
-      const finalQualifiedTickers = new Set<string>();
-      const finalPendingTickers = new Set<string>();
-      for (const c of candidates) {
-        if (c.qualified) finalQualifiedTickers.add(c.ticker);
-        if (c.technical_pending) finalPendingTickers.add(c.ticker);
-      }
-      console.log(`[CacheWarm Summary] Unique tickers needing RSI history: ${needsFetch.length} | Cache hits: ${cacheHits} | History fetches required: ${historyFetchesRequired} | History fetches successful: ${historyFetchesSuccessful} | RSI calculated: ${rsiCalculated} | Still unavailable: ${stillUnavailable} | Final qualified tickers: ${finalQualifiedTickers.size} | Final pending tickers: ${finalPendingTickers.size}`);
-
-      if (warmDiagnostics.length > 0) {
-        console.log(`[CacheWarm] Diagnostics: ${JSON.stringify(warmDiagnostics)}`);
+    for (const res of resultsByTicker.values()) {
+      candidates.push(...res.candidates);
+      totalPutsReturned += res.putsReturned;
+      totalFilteredByExp += res.filteredByExpiration;
+      totalFilteredByStrike += res.filteredByStrike;
+      totalValidQuotes += res.validQuotes;
+      totalAwaitingQuotes += res.contractsAwaitingQuotes;
+      totalPagesFetched += res.pagesFetched;
+      if (res.chainStatus === 'success') symbolsWithChains++;
+      if (res.chainStatus === 'api_error' || res.chainStatus === 'unauthorized' || res.chainStatus === 'rate_limited' || res.chainStatus === 'network_error') symbolsFailed++;
+      const barCount = res.historyBarCount ?? 0;
+      if (barCount >= 200) tickersWith200PlusBars++;
+      else if (barCount >= 60) tickersWith60PlusBars++;
+      else tickersMissingHistory++;
+      if (res.techRejections) for (const k of Object.keys(techRejTotals) as (keyof typeof techRejTotals)[]) techRejTotals[k] += res.techRejections[k];
+      if (res.orderStrikeRejections) for (const k of Object.keys(orderStrikeRejTotals) as (keyof typeof orderStrikeRejTotals)[]) orderStrikeRejTotals[k] += res.orderStrikeRejections[k];
+      if (res.supportDistanceDebug) {
+        supportDistanceDebugTotals.before += res.supportDistanceDebug.before;
+        supportDistanceDebugTotals.passed += res.supportDistanceDebug.passed;
+        supportDistanceDebugTotals.below_min += res.supportDistanceDebug.below_min;
+        supportDistanceDebugTotals.above_max += res.supportDistanceDebug.above_max;
+        supportDistanceDebugTotals.missing_support += res.supportDistanceDebug.missing_support;
+        if (supportDistanceDebugTotals.details.length < 200) supportDistanceDebugTotals.details.push(...res.supportDistanceDebug.details.slice(0, 200 - supportDistanceDebugTotals.details.length));
       }
     }
 
-    // Send all contracts to the client. The client's selectBestContractPerTicker
-    // helper handles one-contract-per-ticker display logic. Keeping all contracts
-    // preserves them for Analyze Ticker / Candidate Detail views.
-    candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || a.spread_pct - b.spread_pct || b.net_croi - a.net_croi);
-    const capped = candidates.slice(0, MAX_CANDIDATES * 10);
-
-    // Build rejection reason breakdown from all candidates
+    const statusOf = (c: any) => (c.qualified && !c.technical_pending) ? 'qualified' : c.technical_pending ? 'pending' : 'rejected';
+    let totalQualified = 0, totalPending = 0, totalRejected = 0;
     const rejectionBreakdown: Record<string, number> = {};
+    const pendingBreakdown: Record<string, number> = {};
+    const tickerStatus = new Map<string, number>(); // best status per ticker: 0 qualified, 1 pending, 2 rejected
     for (const c of candidates) {
-      if (c.rejection_reasons && Array.isArray(c.rejection_reasons)) {
-        for (const reason of c.rejection_reasons) {
-          rejectionBreakdown[reason] = (rejectionBreakdown[reason] || 0) + 1;
-        }
-      }
+      const st = statusOf(c);
+      if (st === 'qualified') totalQualified++;
+      else if (st === 'pending') totalPending++;
+      else totalRejected++;
+      for (const reason of (c.rejection_reasons || [])) rejectionBreakdown[reason] = (rejectionBreakdown[reason] || 0) + 1;
+      for (const reason of (c.pending_reasons || [])) pendingBreakdown[reason] = (pendingBreakdown[reason] || 0) + 1;
+      const rank = st === 'qualified' ? 0 : st === 'pending' ? 1 : 2;
+      const prev = tickerStatus.get(c.ticker);
+      if (prev === undefined || rank < prev) tickerStatus.set(c.ticker, rank);
+    }
+    let qualifiedTickerCount = 0, pendingTickerCount = 0, rejectedTickerCount = 0;
+    for (const rank of tickerStatus.values()) {
+      if (rank === 0) qualifiedTickerCount++;
+      else if (rank === 1) pendingTickerCount++;
+      else rejectedTickerCount++;
     }
 
-    // Count unique qualified tickers
-    const qualifiedTickers = new Set<string>();
+    // Response cap PER TICKER (not a global slice), so every scanned ticker
+    // keeps its best contracts in the response. The old global 500-contract
+    // cap could silently drop a ticker's pending/rejected rows.
+    const perTickerCap = Math.max(5, Number(profile.max_strikes_per_ticker || 1));
+    const byTicker = new Map<string, any[]>();
     for (const c of candidates) {
-      if (c.qualified) qualifiedTickers.add(c.ticker);
+      const arr = byTicker.get(c.ticker);
+      if (arr) arr.push(c); else byTicker.set(c.ticker, [c]);
     }
+    const capped: any[] = [];
+    for (const [, arr] of [...byTicker.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      arr.sort(compareContracts);
+      capped.push(...arr.slice(0, perTickerCap));
+    }
+    capped.sort(compareContracts);
 
-    // Build closest-match debug: 20 nearest-miss contracts when qualified tickers = 0
     let closestMatches: any[] = [];
-    if (totalQualified === 0 && capped.length > 0) {
-      const notQualified = capped.filter((c) => !c.qualified);
-      notQualified.sort((a, b) => {
-        // Sort by fewest rejection reasons, then by highest net_croi
-        const aReasons = (a.rejection_reasons || []).length;
-        const bReasons = (b.rejection_reasons || []).length;
-        if (aReasons !== bReasons) return aReasons - bReasons;
-        return (b.net_croi || 0) - (a.net_croi || 0);
-      });
-      closestMatches = notQualified.slice(0, 20).map((c) => ({
-        ticker: c.ticker,
-        price: c.stock_price,
-        strike: c.strike,
-        rsi: null,
-        ma20: null,
-        ma50: null,
-        ma200: null,
-        primary_support: c.primary_support,
-        support_distance: c.strike_distance_from_support,
-        net_croi: c.net_croi,
-        premium_capture: c.premium_capture,
-        open_interest: c.open_interest,
-        volume: c.volume,
-        failed_rules: [...(c.rejection_reasons || []), ...(c.pending_reasons || [])],
-      }));
+    if (totalQualified === 0 && candidates.length > 0) {
+      closestMatches = candidates
+        .filter((c) => !c.qualified)
+        .sort((a, b) => {
+          const ar = (a.rejection_reasons || []).length, br = (b.rejection_reasons || []).length;
+          if (ar !== br) return ar - br;
+          return (b.net_croi || 0) - (a.net_croi || 0);
+        })
+        .slice(0, 20)
+        .map((c) => ({
+          ticker: c.ticker, price: c.stock_price, strike: c.strike,
+          rsi: c.technical_snapshot?.rsi ?? null, ma20: c.technical_snapshot?.ma20 ?? null,
+          ma50: c.technical_snapshot?.ma50 ?? null, ma200: c.technical_snapshot?.ma200 ?? null,
+          primary_support: c.primary_support, support_distance: c.strike_distance_from_support,
+          net_croi: c.net_croi, premium_capture: c.premium_capture,
+          open_interest: c.open_interest, volume: c.volume,
+          failed_rules: [...(c.rejection_reasons || []), ...(c.pending_reasons || [])],
+        }));
     }
 
     const scan_counts = {
       symbols_in_universe: symbolList.length,
-      symbols_returned: symbolsScanned,
+      symbols_returned: resultsByTicker.size,
       symbols_failed: symbolsFailed,
       symbols_with_chains: symbolsWithChains,
       puts_returned: totalPutsReturned,
@@ -2413,14 +2287,17 @@ serve(async (req) => {
       filtered_by_strike: totalFilteredByStrike,
       valid_quotes: totalValidQuotes,
       contracts_awaiting_quotes: totalAwaitingQuotes,
-      contracts_evaluated: totalEvaluated,
+      contracts_evaluated: candidates.length,
       qualified: totalQualified,
       rejected: totalRejected,
       pending: totalPending,
       pages_fetched: totalPagesFetched,
-      contracts_found: totalContractsFound,
+      contracts_found: totalPutsReturned,
       rejection_breakdown: rejectionBreakdown,
-      unique_qualified_tickers: qualifiedTickers.size,
+      pending_breakdown: pendingBreakdown,
+      unique_qualified_tickers: qualifiedTickerCount,
+      unique_pending_tickers: pendingTickerCount,
+      unique_rejected_tickers: rejectedTickerCount,
       technical_rejections: techRejTotals,
       order_strike_rejections: orderStrikeRejTotals,
       technical_cache: {
@@ -2431,88 +2308,19 @@ serve(async (req) => {
         still_pending_history: stillPendingHistory,
         massive_history_403: historyFetch403,
         massive_history_429: historyFetch429,
-        cache_save_failures: cacheSaveFailures,
+        history_rate_limited: ctx.historyRateLimited,
+        warming_time_budget_hit: warmingDeadlineHit,
+        grouped_bars_saved: groupedBarsSaved,
+        latest_trading_date: ctx.expectedLatestDate,
+        cache_save_failures: 0,
         warm_diagnostics: warmDiagnostics,
       },
       closest_matches: closestMatches,
       support_distance_debug: supportDistanceDebugTotals,
     };
 
-    // ── FULL REJECTION AUDIT: count every rejection reason across all candidates ──
-    {
-      const reasonCounts: Record<string, number> = {};
-      let totalQualified = 0, totalPending = 0, totalRejected = 0;
-      for (const c of candidates) {
-        if (c.qualified && !c.technical_pending) { totalQualified++; continue; }
-        if (c.technical_pending) { totalPending++; }
-        else { totalRejected++; }
-        for (const reason of (c.rejection_reasons || [])) {
-          reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
-        }
-        for (const reason of (c.pending_reasons || [])) {
-          reasonCounts[`PENDING: ${reason}`] = (reasonCounts[`PENDING: ${reason}`] || 0) + 1;
-        }
-      }
-      console.log(`[REJECTION AUDIT] Qualified=${totalQualified} Pending=${totalPending} Rejected=${totalRejected}`);
-      console.log(`[REJECTION AUDIT] Reasons: ${JSON.stringify(reasonCounts)}`);
-    }
-
-    // ── DIAGNOSTIC: classify why contracts are pending or fail RSI/support ──
-    {
-      let potentialBeforeTech = 0;
-      let failedRSI = 0, failedSupport = 0;
-      let pendingRSIOnly = 0, pendingSupportOnly = 0, pendingBoth = 0, pendingOther = 0;
-      let finalQualified = 0;
-      const techReasons = new Set(['RSI below minimum', 'RSI above maximum', 'Support distance too low', 'Support distance too high']);
-      for (const c of candidates) {
-        const nonTechReasons = (c.rejection_reasons || []).filter((r: string) => !techReasons.has(r));
-        const passedNonTech = nonTechReasons.length === 0;
-        if (!passedNonTech) continue;
-        potentialBeforeTech++;
-        const reasons = c.rejection_reasons || [];
-        const pending = c.pending_reasons || [];
-        if (c.qualified && !c.technical_pending) { finalQualified++; continue; }
-        if (reasons.includes('RSI below minimum') || reasons.includes('RSI above maximum')) failedRSI++;
-        if (reasons.includes('Support distance too low') || reasons.includes('Support distance too high')) failedSupport++;
-        // Classify pending contracts by specific missing data
-        if (c.technical_pending || pending.length > 0) {
-          const hasRSIPending = pending.includes('RSI unavailable') || pending.includes('Missing technical data') || pending.includes('Technical data missing');
-          const hasSupportPending = pending.includes('Primary support unavailable') || pending.includes('Support distance not evaluated — support unavailable') || pending.includes('Missing support data');
-          if (hasRSIPending && hasSupportPending) pendingBoth++;
-          else if (hasRSIPending) pendingRSIOnly++;
-          else if (hasSupportPending) pendingSupportOnly++;
-          else if (pending.length > 0) pendingOther++;
-        }
-      }
-      console.log(`[DIAGNOSTIC] Potential before tech: ${potentialBeforeTech} | Failed RSI: ${failedRSI} | Failed Support: ${failedSupport} | Pending RSI only: ${pendingRSIOnly} | Pending support only: ${pendingSupportOnly} | Pending both: ${pendingBoth} | Pending other: ${pendingOther} | Qualified: ${finalQualified}`);
-
-      // Log each qualified contract's details for verification
-      for (const c of candidates) {
-        if (c.qualified && !c.technical_pending) {
-          const supportDist = c.strike_distance_from_support != null ? Number(c.strike_distance_from_support.toFixed(1)) : null;
-          const rsiPass = c.pass_fail?.find((p: any) => p.rule.startsWith('RSI'));
-          console.log(`[QUALIFIED] ${c.ticker} | strike=${c.strike} | exp=${c.expiration} | RSI=${rsiPass?.rule || 'n/a'} | primarySupport=${c.primary_support} | supportDist=${supportDist}% | netCROI=${c.net_croi} | PC=${c.premium_capture} | OI=${c.open_interest} | vol=${c.volume} | reasons=${JSON.stringify(c.rejection_reasons)} | pending=${JSON.stringify(c.pending_reasons)}`);
-        }
-      }
-    }
-
-    // ── RSI AUDIT: log RSI values for specific tickers of interest ──
-    {
-      const rsiTickers = new Set(['XPEV', 'CLSK', 'SOFI', 'RUN', 'RIVN', 'RIOT', 'WULF', 'CIFR', 'PINS', 'RGTI', 'APLD']);
-      const seen = new Set<string>();
-      for (const c of candidates) {
-        const upper = (c.ticker || '').toUpperCase();
-        if (!rsiTickers.has(upper) || seen.has(upper)) continue;
-        seen.add(upper);
-        const rsiPass = c.pass_fail?.find((p: any) => p.rule.startsWith('RSI'));
-        const rsiVal = rsiPass?.rule.match(/\((\d+\.\d+)\)/)?.[1] ?? null;
-        const status = c.qualified ? 'Qualified' : c.technical_pending ? 'Pending' : 'Rejected';
-        const allReasons = [...(c.rejection_reasons || []), ...(c.pending_reasons || [])];
-        console.log(`[RSI AUDIT] ${upper} | RSI=${rsiVal} | status=${status} | bars=${c.pass_fail?.find((p: any) => p.rule.includes('history'))?.rule || 'unknown'} | reasons=${JSON.stringify(allReasons)}`);
-      }
-    }
-
-    console.log(`market-scan complete — mode=${scanMode}, ${capped.length} candidates`, JSON.stringify(scan_counts));
+    console.log(`[SCAN SUMMARY] mode=${scanMode} symbols=${resultsByTicker.size} contracts=${candidates.length} Q=${totalQualified} P=${totalPending} R=${totalRejected} | tickers Q=${qualifiedTickerCount} P=${pendingTickerCount} R=${rejectedTickerCount} | historyFetched=${historyFetchedThisScan} stillPendingHistory=${stillPendingHistory} rateLimited=${ctx.historyRateLimited} | ${Date.now() - requestStart}ms`);
+    console.log(`[SCAN SUMMARY] rejection reasons: ${JSON.stringify(rejectionBreakdown)} | pending reasons: ${JSON.stringify(pendingBreakdown)}`);
 
     return json({
       success: true, candidates: capped, source: 'massive',
