@@ -39,6 +39,9 @@ function StatusIcon({ status }: { status: StockStatus }) {
   return <XCircle className="h-3.5 w-3.5 text-red-400" aria-label="Rejected" />;
 }
 
+// Annualized values are capped at 1000% by the scanner.
+const annText = (v: number) => (v >= 1000 ? '>1,000%' : formatPct(v, 0));
+
 const pctColor = (v: number | null, good: number) =>
   v == null ? 'text-slate-500' : v >= good ? 'text-emerald-400' : 'text-slate-300';
 
@@ -250,11 +253,11 @@ export function StockCandidatesPage({ stock }: { stock: StockScannerState }) {
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.reward_risk != null ? formatNum(r.reward_risk, 2) : DASH}</td>
                       <td className={`px-3 py-2.5 text-right tabular-nums ${pctColor(r.prob_target_pct, rules?.min_prob_target ?? 50)}`}>{r.prob_target_pct != null ? formatPct(r.prob_target_pct, 0) : DASH}</td>
                       <td className={`px-3 py-2.5 text-right tabular-nums ${pctColor(r.pop_pct, rules?.min_pop ?? 60)}`}>{r.pop_pct != null ? formatPct(r.pop_pct, 0) : DASH}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.hist_hit_rate_pct != null ? formatPct(r.hist_hit_rate_pct, 0) : DASH}</td>
+                      <td className={`px-3 py-2.5 text-right tabular-nums ${pctColor(r.hist_hit_rate_pct, rules?.min_hist_hit_rate ?? 50)}`}>{r.hist_hit_rate_pct != null ? formatPct(r.hist_hit_rate_pct, 0) : DASH}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.est_days ?? DASH}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{r.annualized_if_hit_pct != null ? formatPct(r.annualized_if_hit_pct, 0) : DASH}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{r.annualized_if_hit_pct != null ? annText(r.annualized_if_hit_pct) : DASH}</td>
                       <td className={`px-3 py-2.5 text-right tabular-nums font-medium ${r.expected_annualized_pct == null ? '' : r.expected_annualized_pct > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {r.expected_annualized_pct != null ? formatPct(r.expected_annualized_pct, 0) : DASH}
+                        {r.expected_annualized_pct != null ? annText(r.expected_annualized_pct) : DASH}
                       </td>
                     </tr>
                     {isOpen && (

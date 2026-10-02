@@ -18,8 +18,10 @@ const SECTIONS: Section[] = [
       { kind: 'num', key: 'stop_buffer_pct', label: 'Stop buffer below support', unit: '%', required: true, step: 0.5 },
       { kind: 'num', key: 'position_size', label: 'Position size', unit: '$', required: true, step: 100, hint: 'Used to show shares and $ profit at target.' },
       { kind: 'num', key: 'min_reward_risk', label: 'Min reward : risk', step: 0.1, hint: 'Leave blank for no minimum.' },
-      { kind: 'num', key: 'min_prob_target', label: 'Min probability of target', unit: '%', step: 5 },
-      { kind: 'num', key: 'min_pop', label: 'Min POP (probability of profit)', unit: '%', step: 5 },
+      { kind: 'num', key: 'min_hist_hit_rate', label: 'Min hist. hit rate', unit: '%', step: 5, hint: 'Real history: how often this plan hit the target before the stop on this stock.' },
+      { kind: 'num', key: 'min_exp_annualized', label: 'Min exp. annualized', unit: '%', step: 5, hint: 'Real history: wins and losses compounded. Above 0% = the plan made money on this stock.' },
+      { kind: 'num', key: 'min_prob_target', label: 'Min probability of target (model)', unit: '%', step: 5, hint: 'Model estimate, no upward drift — keep this modest.' },
+      { kind: 'num', key: 'min_pop', label: 'Min POP (model)', unit: '%', step: 5, hint: 'Model estimate. Leave blank unless you know you want it.' },
     ],
   },
   {
