@@ -2,6 +2,11 @@ import { useState } from 'react';
 import { Layout, type Page, type ScannerKind } from '@/components/Layout';
 import { useAppState } from '@/lib/store';
 import { useStockScanner } from '@/lib/stockStore';
+import { useStockPortfolio } from '@/lib/stockPortfolio';
+import { StockUniversePage } from '@/pages/StockUniversePage';
+import { StockAnalyzePage } from '@/pages/StockAnalyzePage';
+import { StockPositionsPage } from '@/pages/StockPositionsPage';
+import { StockSummaryPage } from '@/pages/StockSummaryPage';
 import { StockCandidatesPage } from '@/pages/StockCandidatesPage';
 import { StockSettingsPage } from '@/pages/StockSettingsPage';
 import { CandidatesPage } from '@/pages/CandidatesPage';
@@ -20,7 +25,9 @@ function App() {
   const [selectedExpiration, setSelectedExpiration] = useState<string | null>(null);
   const [autoAnalyzeTicker, setAutoAnalyzeTicker] = useState<string | null>(null);
   const state = useAppState();
-  const stock = useStockScanner(state.scanUniverse);
+  const portfolio = useStockPortfolio();
+  // "My Scan Universe" on the Stocks side uses the STOCK watchlist.
+  const stock = useStockScanner(portfolio.enabledSymbols);
   // Options (CSP) vs Stocks. Remembered between visits.
   const [scanner, setScannerState] = useState<ScannerKind>(() => {
     try { return localStorage.getItem('scanner-kind') === 'stocks' ? 'stocks' : 'options'; } catch { return 'options'; }
@@ -65,13 +72,18 @@ function App() {
   }
 
   return (
-    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock}>
-      {isStocks && currentPage === 'candidates' && <StockCandidatesPage stock={stock} />}
+    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock} stockOpenCount={portfolio.openPositions.length}>
+      {isStocks && currentPage === 'candidates' && <StockCandidatesPage stock={stock} portfolio={portfolio} />}
       {isStocks && currentPage === 'settings' && <StockSettingsPage stock={stock} />}
+      {isStocks && currentPage === 'analyze' && <StockAnalyzePage stock={stock} portfolio={portfolio} />}
+      {isStocks && currentPage === 'universe' && <StockUniversePage stock={stock} portfolio={portfolio} optionsUniverse={state.scanUniverse} />}
+      {isStocks && currentPage === 'open' && <StockPositionsPage portfolio={portfolio} view="open" />}
+      {isStocks && currentPage === 'closed' && <StockPositionsPage portfolio={portfolio} view="closed" />}
+      {isStocks && currentPage === 'summary' && <StockSummaryPage stock={stock} portfolio={portfolio} />}
       {!isStocks && currentPage === 'candidates' && (
         <CandidatesPage state={state} onNavigate={handleNavigate} />
       )}
-      {currentPage === 'analyze' && (
+      {!isStocks && currentPage === 'analyze' && (
         <AnalyzeTickerPage state={state} autoAnalyzeTicker={autoAnalyzeTicker} onConsumeAutoAnalyze={() => setAutoAnalyzeTicker(null)} />
       )}
       {currentPage === 'detail' && selectedTicker && (
@@ -86,11 +98,11 @@ function App() {
       {currentPage === 'detail' && !selectedTicker && (
         <CandidatesPage state={state} onNavigate={handleNavigate} />
       )}
-      {currentPage === 'open' && <OpenPositionsPage state={state} />}
-      {currentPage === 'closed' && <ClosedPositionsPage state={state} />}
+      {!isStocks && currentPage === 'open' && <OpenPositionsPage state={state} />}
+      {!isStocks && currentPage === 'closed' && <ClosedPositionsPage state={state} />}
       {!isStocks && currentPage === 'settings' && <SettingsPage state={state} />}
-      {currentPage === 'summary' && <DailySummaryPage state={state} />}
-      {currentPage === 'universe' && <ScanUniversePage state={state} onNavigate={handleNavigate} />}
+      {!isStocks && currentPage === 'summary' && <DailySummaryPage state={state} />}
+      {!isStocks && currentPage === 'universe' && <ScanUniversePage state={state} onNavigate={handleNavigate} />}
     </Layout>
   );
 }
