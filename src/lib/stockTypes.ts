@@ -131,6 +131,8 @@ export interface StockScanCounts {
   history_rate_limited: boolean;
   warming_time_budget_hit: boolean;
   latest_trading_date: string;
+  daily_prices_refreshed?: boolean;
+  daily_prices_http_status?: number | null;
   spy_bars: number;
   rejection_breakdown: Record<string, number>;
   pending_breakdown: Record<string, number>;

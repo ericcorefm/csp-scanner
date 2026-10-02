@@ -107,12 +107,19 @@ export function useStockScanner(universeSymbols: string[]) {
       setCounts((prev) => ({ ...prev, [mode]: newCounts }));
       setLastScanAt((prev) => ({ ...prev, [mode]: scannedAt }));
 
+      const notes: string[] = [];
+      if (newCounts?.daily_prices_refreshed === false) {
+        notes.push(newCounts.daily_prices_http_status === 429
+          ? "Today's prices couldn't be refreshed (Massive rate limit) — using the last saved prices. Wait 1–2 minutes between Rescans."
+          : "Today's prices couldn't be refreshed — using the last saved prices.");
+      }
       if (newCounts?.still_pending_history > 0) {
         const why = newCounts.history_rate_limited
           ? 'Massive stock rate limit reached (Stocks Basic: 5 calls/min)'
           : newCounts.warming_time_budget_hit ? 'scan time budget reached' : 'history unavailable';
-        setNotice(`${newCounts.still_pending_history} stock(s) are Pending because price history is still loading (${why}). Rescan in 1–2 minutes to load more; once loaded, history stays current automatically.`);
+        notes.push(`${newCounts.still_pending_history} stock(s) are Pending because price history is still loading (${why}). Rescan in 1–2 minutes to load more; once loaded, history stays current automatically.`);
       }
+      if (notes.length) setNotice(notes.join(' '));
 
       // Persist; keep only the last week of scans.
       await supabase.from('stock_scans').insert({
