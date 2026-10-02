@@ -188,6 +188,48 @@ async function massiveFetch(
   }
 }
 
+// ── History-cache diagnostics (reset per request, returned to the app so
+// database errors are visible on screen instead of only in server logs) ──
+const cacheDiag = { readErrors: 0, writeErrors: 0, rowsWritten: 0, lastError: '' as string };
+function resetCacheDiag() { cacheDiag.readErrors = 0; cacheDiag.writeErrors = 0; cacheDiag.rowsWritten = 0; cacheDiag.lastError = ''; }
+function noteCacheError(kind: 'read' | 'write', msg: string) {
+  if (kind === 'read') cacheDiag.readErrors++; else cacheDiag.writeErrors++;
+  cacheDiag.lastError = `${kind}: ${msg}`.slice(0, 400);
+  console.log(`[CacheDiag] ${cacheDiag.lastError}`);
+}
+
+// Upsert rows into stock_history_cache in small batches, de-duplicated by
+// (ticker, trade_date) — a repeated key in one batch makes Postgres reject the
+// whole upsert ("ON CONFLICT DO UPDATE command cannot affect row a second time").
+async function upsertHistoryRows(rows: Record<string, unknown>[]): Promise<number> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey) { noteCacheError('write', 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing'); return 0; }
+  const unique = new Map<string, Record<string, unknown>>();
+  for (const r of rows) unique.set(`${r.ticker}|${r.trade_date}`, r);
+  const all = [...unique.values()];
+  let saved = 0;
+  for (let i = 0; i < all.length; i += 200) {
+    const chunk = all.slice(i, i + 200);
+    try {
+      const resp = await fetch(`${supabaseUrl}/rest/v1/stock_history_cache?on_conflict=ticker,trade_date`, {
+        method: 'POST',
+        headers: {
+          apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify(chunk),
+      });
+      if (resp.ok) saved += chunk.length;
+      else noteCacheError('write', `HTTP ${resp.status} ${(await resp.text().catch(() => '')).slice(0, 300)}`);
+    } catch (e) {
+      noteCacheError('write', e instanceof Error ? e.message : String(e));
+    }
+  }
+  cacheDiag.rowsWritten += saved;
+  return saved;
+}
+
 // ── Supabase REST helper ──
 async function supabaseSelect(table: string, columns: string, filter?: string): Promise<any[]> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
@@ -310,7 +352,7 @@ async function loadCachedHistory(ticker: string, maxBars = 250): Promise<History
   const url = `${supabaseUrl}/rest/v1/stock_history_cache?select=trade_date,open,high,low,close,volume&ticker=eq.${encodeURIComponent(ticker)}&order=trade_date.desc&limit=${maxBars}`;
   try {
     const resp = await fetch(url, { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' } });
-    if (!resp.ok) return [];
+    if (!resp.ok) { noteCacheError('read', `HTTP ${resp.status} ${(await resp.text().catch(() => '')).slice(0, 300)}`); return []; }
     const rows = await resp.json() as any[];
     if (!Array.isArray(rows) || rows.length === 0) return [];
     return rows.map((r) => ({
@@ -327,69 +369,24 @@ async function loadCachedHistory(ticker: string, maxBars = 250): Promise<History
 }
 
 async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<void> {
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!supabaseUrl || !serviceKey || bars.length === 0) return;
+  if (bars.length === 0) return;
   const now = new Date().toISOString();
-  const rows = bars.map((b) => ({
-    ticker,
-    trade_date: b.date,
-    open: b.open,
-    high: b.high,
-    low: b.low,
-    close: b.close,
-    volume: b.volume,
-    updated_at: now,
-  }));
-  // Upsert via POST with Prefer: resolution=merge-duplicates
-  try {
-    const resp = await fetch(`${supabaseUrl}/rest/v1/stock_history_cache`, {
-      method: 'POST',
-      headers: {
-        apikey: serviceKey,
-        Authorization: `Bearer ${serviceKey}`,
-        'Content-Type': 'application/json',
-        Prefer: 'resolution=merge-duplicates',
-      },
-      body: JSON.stringify(rows),
-    });
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => 'unreadable');
-      console.log(`[Cache SAVE FAIL] ${ticker} | HTTP ${resp.status} | body: ${body.slice(0, 300)}`);
-    }
-  } catch (e) {
-    console.log(`[Cache SAVE ERROR] ${ticker} | ${e instanceof Error ? e.message : String(e)}`);
-  }
+  await upsertHistoryRows(bars.map((b) => ({
+    ticker, trade_date: b.date, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume, updated_at: now,
+  })));
 }
 
 // Append the grouped-daily bar (one API call covers every ticker) to the
 // history cache for all scanned symbols. This keeps technical history current
 // every trading day without spending one rate-limited request per ticker.
 async function saveGroupedBarsToCache(barMap: Map<string, HistoryBar>, tickers: string[]): Promise<number> {
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!supabaseUrl || !serviceKey || barMap.size === 0) return 0;
+  if (barMap.size === 0) return 0;
   const now = new Date().toISOString();
   const rows = tickers
     .map((t) => ({ t, b: barMap.get(t) }))
     .filter((x) => x.b)
     .map(({ t, b }) => ({ ticker: t, trade_date: b!.date, open: b!.open, high: b!.high, low: b!.low, close: b!.close, volume: b!.volume, updated_at: now }));
-  let saved = 0;
-  for (let i = 0; i < rows.length; i += 500) {
-    const chunk = rows.slice(i, i + 500);
-    try {
-      const resp = await fetch(`${supabaseUrl}/rest/v1/stock_history_cache`, {
-        method: 'POST',
-        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
-        body: JSON.stringify(chunk),
-      });
-      if (resp.ok) saved += chunk.length;
-      else console.log(`[GroupedBars SAVE FAIL] HTTP ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`);
-    } catch (e) {
-      console.log(`[GroupedBars SAVE ERROR] ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  return saved;
+  return await upsertHistoryRows(rows);
 }
 
 // ── Weekly / Monthly aggregation from daily bars ──
@@ -1842,6 +1839,7 @@ serve(async (req) => {
   // All per-request caches live in a ScanContext created below, so warm
   // isolates and concurrent requests never share or clear each other's state.
   const requestStart = Date.now();
+  resetCacheDiag();
 
   try {
     const apiKey = Deno.env.get('MASSIVE_API_KEY');
@@ -2322,7 +2320,10 @@ serve(async (req) => {
         warming_time_budget_hit: warmingDeadlineHit,
         grouped_bars_saved: groupedBarsSaved,
         latest_trading_date: ctx.expectedLatestDate,
-        cache_save_failures: 0,
+        cache_save_failures: cacheDiag.writeErrors,
+        cache_read_failures: cacheDiag.readErrors,
+        cache_rows_written: cacheDiag.rowsWritten,
+        cache_last_error: cacheDiag.lastError || null,
         warm_diagnostics: warmDiagnostics,
       },
       closest_matches: closestMatches,
@@ -2788,6 +2789,10 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
     history_rate_limited: ctx.historyRateLimited,
     warming_time_budget_hit: deadlineHit,
     latest_trading_date: ctx.expectedLatestDate,
+    cache_rows_written: cacheDiag.rowsWritten,
+    cache_read_errors: cacheDiag.readErrors,
+    cache_write_errors: cacheDiag.writeErrors,
+    cache_last_error: cacheDiag.lastError || null,
     daily_prices_refreshed: !groupedFailed,
     daily_prices_http_status: groupedStatus,
     spy_bars: spySnap.historicalBars.length,
@@ -2798,5 +2803,3 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   console.log(`[STOCK SCAN] mode=${scanMode} screened=${tickers.length} Q=${counts.qualified} P=${counts.pending} R=${counts.rejected} needBars=${needBars} fetched=${historyFetched} rateLimited=${ctx.historyRateLimited}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), results, counts });
 }
-
-// redeploy 2026-10-02
