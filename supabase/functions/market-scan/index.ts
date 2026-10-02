@@ -784,10 +784,14 @@ type ScanContext = {
   // Once Massive returns 429 for stock history, stop asking in this request.
   historyRateLimited: boolean;
   historyFetchAttempts: number;
+  // How many cached daily bars to load, and how far back a live fetch goes.
+  // CSP keeps the original 300 bars / ~18 months; the stock scanner uses ~2 years.
+  historyLoadLimit: number;
+  historyFetchDays: number;
 };
 
 function newScanContext(expectedLatestDate: string): ScanContext {
-  return { stockCache: new Map(), chainCache: new Map(), expectedLatestDate, historyRateLimited: false, historyFetchAttempts: 0 };
+  return { stockCache: new Map(), chainCache: new Map(), expectedLatestDate, historyRateLimited: false, historyFetchAttempts: 0, historyLoadLimit: 300, historyFetchDays: 548 };
 }
 
 // Most recent weekday strictly before `today` (holidays are handled by the
@@ -951,7 +955,7 @@ async function getStockSnapshot(
 
   // 2. Load cached bars from Supabase; use only the trailing gap-free run
   const todayStr = fmt(today);
-  let bars = trailingContiguousBars((await loadCachedHistory(upper, 300)).filter((b) => b.date < todayStr));
+  let bars = trailingContiguousBars((await loadCachedHistory(upper, ctx.historyLoadLimit)).filter((b) => b.date < todayStr));
 
   const latestCachedDate = bars.length > 0 ? bars.at(-1)!.date : null;
   const isStale = latestCachedDate === null || latestCachedDate < ctx.expectedLatestDate;
@@ -960,7 +964,7 @@ async function getStockSnapshot(
 
   if (allowLiveHistory && wantsFetch && !ctx.historyRateLimited) {
     const start = new Date(today);
-    start.setDate(start.getDate() - 548); // ~18 months: enough for MA200 with holidays
+    start.setDate(start.getDate() - ctx.historyFetchDays); // CSP: ~18 months (MA200); stocks: ~2 years
     const histPath = `/v2/aggs/ticker/${encodeURIComponent(upper)}/range/1/day/${fmt(start)}/${fmt(today)}?adjusted=true&sort=asc&limit=50000`;
     ctx.historyFetchAttempts++;
     let histResult = await massiveFetch(histPath, apiKey, upper, 'stock_aggregates');
@@ -1917,6 +1921,12 @@ serve(async (req) => {
       return json({ success: true, ticker, resolution, bars: filtered });
     }
 
+    // ── STOCK-SCAN MODE: stock scanner (no options). Separate code path; the
+    // CSP evaluator below is untouched. ──
+    if (mode === 'stock-scan') {
+      return await runStockScan(body, apiKey, requestStart);
+    }
+
     if (!profile) return json({ success: false, error: 'Missing strategy profile' });
 
     const today = new Date();
@@ -2334,5 +2344,445 @@ serve(async (req) => {
     return json({ success: false, provider: 'Massive', error: msg });
   }
 });
-// redeploy trigger Sat Sep 26 14:47:12 UTC 2026
-// redeploy 1790434327
+
+// ════════════════════════════════════════════════════════════════════════════
+// STOCK SCANNER ("Pullback in an Uptrend" + 30-day recycling metrics)
+// Separate from the CSP evaluator. Shares only: history cache, grouped-daily
+// bars, indicators (Wilder RSI, SMA, swing-low support) and the status model:
+//   any enabled rule definitely fails            → Rejected
+//   no failures, data for an enabled rule missing → Pending
+//   every enabled rule has data and passes        → Qualified
+// Disabled sections / blank thresholds have zero effect.
+// No commission; fractional shares (returns are % of capital).
+// ════════════════════════════════════════════════════════════════════════════
+
+type StockRules = {
+  liquidity_enabled: boolean; min_price: number | null; max_price: number | null;
+  min_avg_volume: number | null; min_dollar_volume_m: number | null;
+  trend_enabled: boolean; require_price_above_ma200: boolean; require_ma200_rising: boolean;
+  ma200_slope_lookback: number; require_ma50_above_ma200: boolean;
+  momentum_enabled: boolean; rsi_min: number | null; rsi_max: number | null;
+  support_enabled: boolean; support_dist_min: number | null; support_dist_max: number | null;
+  extension_enabled: boolean; max_above_ma50: number | null; max_above_ma200: number | null;
+  strength_enabled: boolean; max_from_52w_high: number | null; require_outperform_spy: boolean;
+  volatility_enabled: boolean; hv_min: number | null; hv_max: number | null;
+  trade_enabled: boolean; target_return_pct: number; max_cycle_days: number; stop_buffer_pct: number;
+  min_reward_risk: number | null; min_prob_target: number | null; min_pop: number | null;
+  position_size: number;
+};
+
+const DEFAULT_STOCK_RULES: StockRules = {
+  liquidity_enabled: true, min_price: 5, max_price: null, min_avg_volume: 1_000_000, min_dollar_volume_m: 20,
+  trend_enabled: true, require_price_above_ma200: true, require_ma200_rising: true, ma200_slope_lookback: 20, require_ma50_above_ma200: true,
+  momentum_enabled: true, rsi_min: 40, rsi_max: 65,
+  support_enabled: true, support_dist_min: 0, support_dist_max: 5,
+  extension_enabled: true, max_above_ma50: 10, max_above_ma200: 30,
+  strength_enabled: true, max_from_52w_high: 25, require_outperform_spy: true,
+  volatility_enabled: true, hv_min: 25, hv_max: 60,
+  trade_enabled: true, target_return_pct: 4, max_cycle_days: 30, stop_buffer_pct: 2,
+  min_reward_risk: 1, min_prob_target: 50, min_pop: 60,
+  position_size: 1000,
+};
+
+function mergeStockRules(input: any): StockRules {
+  const r: any = { ...DEFAULT_STOCK_RULES };
+  if (input && typeof input === 'object') {
+    for (const k of Object.keys(DEFAULT_STOCK_RULES)) {
+      if (k in input) r[k] = input[k] === '' ? null : input[k];
+    }
+  }
+  return r as StockRules;
+}
+
+// Bars each active section needs (0 when nothing needs history).
+function stockRequiredBars(r: StockRules): number {
+  let n = 0;
+  if (r.liquidity_enabled && (r.min_avg_volume != null || r.min_dollar_volume_m != null)) n = Math.max(n, 20);
+  if (r.trend_enabled) {
+    if (r.require_price_above_ma200 || r.require_ma50_above_ma200) n = Math.max(n, 200);
+    if (r.require_ma200_rising) n = Math.max(n, 200 + Math.max(1, r.ma200_slope_lookback || 20));
+  }
+  if (r.momentum_enabled && (r.rsi_min != null || r.rsi_max != null)) n = Math.max(n, 20);
+  if (r.support_enabled && (r.support_dist_min != null || r.support_dist_max != null)) n = Math.max(n, 60);
+  if (r.extension_enabled) {
+    if (r.max_above_ma50 != null) n = Math.max(n, 50);
+    if (r.max_above_ma200 != null) n = Math.max(n, 200);
+  }
+  if (r.strength_enabled) {
+    if (r.max_from_52w_high != null) n = Math.max(n, 252);
+    if (r.require_outperform_spy) n = Math.max(n, 64);
+  }
+  if (r.volatility_enabled && (r.hv_min != null || r.hv_max != null)) n = Math.max(n, 61);
+  if (r.trade_enabled && (r.min_reward_risk != null || r.min_prob_target != null || r.min_pop != null)) n = Math.max(n, 61);
+  return n;
+}
+
+// Deterministic PRNG so the same data always gives the same probabilities
+// (repeat Rescans are identical).
+function hashString(str: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function historicalVolatility(closes: number[], window = 60): number | null {
+  if (closes.length < window + 1) return null;
+  const slice = closes.slice(-(window + 1));
+  const rets: number[] = [];
+  for (let i = 1; i < slice.length; i++) rets.push(Math.log(slice[i] / slice[i - 1]));
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length - 1);
+  return Math.sqrt(variance) * Math.sqrt(252) * 100; // annualized %
+}
+
+type TradeSim = {
+  probTarget: number; probStop: number; pop: number;
+  estDays: number | null; expectedReturnPct: number; expectedCycleDays: number;
+};
+
+// Monte Carlo: price paths with zero expected drift (conservative), daily
+// volatility from 60-day HV. Exit at target, at stop, or at the horizon.
+function simulateTrade(entry: number, target: number, stop: number, hvPct: number, tradingDays: number, seed: number, paths = 2000): TradeSim {
+  const rand = mulberry32(seed);
+  const sigma = (hvPct / 100) / Math.sqrt(252);
+  const drift = -0.5 * sigma * sigma; // makes the price a martingale (no upward bias)
+  let hits = 0, stops = 0, profitable = 0, sumReturn = 0, sumDays = 0;
+  const hitDays: number[] = [];
+  for (let p = 0; p < paths; p++) {
+    let price = entry;
+    let exitDay = tradingDays;
+    let outcome: 'target' | 'stop' | 'time' = 'time';
+    for (let d = 1; d <= tradingDays; d++) {
+      const u1 = Math.max(rand(), 1e-12), u2 = rand();
+      const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+      price *= Math.exp(drift + sigma * z);
+      if (price >= target) { outcome = 'target'; exitDay = d; break; }
+      if (price <= stop) { outcome = 'stop'; exitDay = d; break; }
+    }
+    let ret: number;
+    if (outcome === 'target') { hits++; hitDays.push(exitDay); ret = target / entry - 1; }
+    else if (outcome === 'stop') { stops++; ret = stop / entry - 1; }
+    else { ret = price / entry - 1; }
+    if (ret > 0) profitable++;
+    sumReturn += ret;
+    sumDays += exitDay;
+  }
+  hitDays.sort((a, b) => a - b);
+  return {
+    probTarget: (hits / paths) * 100,
+    probStop: (stops / paths) * 100,
+    pop: (profitable / paths) * 100,
+    estDays: hitDays.length ? Math.round(hitDays[Math.floor(hitDays.length / 2)] * 365 / 252) : null,
+    expectedReturnPct: (sumReturn / paths) * 100,
+    expectedCycleDays: Math.max(1, Math.round((sumDays / paths) * 365 / 252)),
+  };
+}
+
+// Replays this exact trade plan (target %, stop %, horizon) on THIS stock's
+// own last ~2 years of daily highs/lows: one simulated entry per day.
+// Gives the real win rate and the real average outcome, which carries the
+// stock's actual trend — unlike the zero-drift model, whose expected return is
+// ~0 by construction.
+type HistReplay = { hitRate: number; expectedReturnPct: number; avgDays: number; samples: number };
+function historicalReplay(bars: HistoryBar[], targetPct: number, riskPct: number, tradingDays: number): HistReplay | null {
+  const lastStart = bars.length - tradingDays - 1;
+  const first = Math.max(0, bars.length - 500);
+  if (lastStart - first < 60) return null;
+  let wins = 0, total = 0, sumRet = 0, sumDays = 0;
+  for (let i = first; i < lastStart; i++) {
+    const entry = bars[i].close;
+    const tgt = entry * (1 + targetPct / 100);
+    const stp = entry * (1 - riskPct / 100);
+    let ret = bars[i + tradingDays].close / entry - 1;
+    let days = tradingDays;
+    for (let j = i + 1; j <= i + tradingDays; j++) {
+      if (bars[j].low <= stp) { ret = -riskPct / 100; days = j - i; break; } // stop first when both touch (conservative)
+      if (bars[j].high >= tgt) { ret = targetPct / 100; days = j - i; wins++; break; }
+    }
+    total++; sumRet += ret; sumDays += days;
+  }
+  return { hitRate: (wins / total) * 100, expectedReturnPct: (sumRet / total) * 100, avgDays: Math.max(1, Math.round((sumDays / total) * 365 / 252)), samples: total };
+}
+
+const r2 = (x: number | null | undefined, d = 2) => (x == null || !Number.isFinite(x) ? null : Number(x.toFixed(d)));
+
+function evaluateStock(ticker: string, company: string, bars: HistoryBar[], groupedPrice: number | null, spyBars: HistoryBar[], rules: StockRules, needBars: number) {
+  const rejection: string[] = [];
+  const pending: string[] = [];
+  const passFail: { rule: string; pass: boolean; status: 'pass' | 'fail' | 'not_evaluated' }[] = [];
+  const check = (label: string, ok: boolean, reason: string) => {
+    passFail.push({ rule: label, pass: ok, status: ok ? 'pass' : 'fail' });
+    if (!ok) rejection.push(reason);
+  };
+  const missing = (label: string, reason: string) => {
+    passFail.push({ rule: label, pass: true, status: 'not_evaluated' });
+    if (!pending.includes(reason)) pending.push(reason);
+  };
+
+  const n = bars.length;
+  const closes = bars.map((b) => b.close);
+  const price = groupedPrice ?? (n ? closes[n - 1] : null);
+  const ma20 = n >= 20 ? sma(closes, 20) : null;
+  const ma50 = n >= 50 ? sma(closes, 50) : null;
+  const ma200 = n >= 200 ? sma(closes, 200) : null;
+  const lb = Math.max(1, rules.ma200_slope_lookback || 20);
+  const ma200Prev = n >= 200 + lb ? sma(closes.slice(0, n - lb), 200) : null;
+  const rsiVal = n >= 20 ? rsi(closes.slice(-250)) : null;
+  const avgVol = n >= 20 ? bars.slice(-20).reduce((a, b) => a + b.volume, 0) / 20 : null;
+  const dollarVolM = avgVol != null && price != null ? (avgVol * price) / 1e6 : null;
+  const support = n >= 60 && price != null ? calcPrimarySupport(bars, price) : null;
+  const distToSupport = support != null && price != null && price > 0 ? ((price - support) / price) * 100 : null;
+  const aboveMa50 = ma50 != null && price != null ? ((price - ma50) / ma50) * 100 : null;
+  const aboveMa200 = ma200 != null && price != null ? ((price - ma200) / ma200) * 100 : null;
+  const high52 = n >= 252 ? Math.max(...bars.slice(-252).map((b) => b.high)) : null;
+  const fromHigh = high52 != null && price != null ? ((high52 - price) / high52) * 100 : null;
+  const ret3m = n >= 64 ? (closes[n - 1] / closes[n - 64] - 1) * 100 : null;
+  const spyCloses = spyBars.map((b) => b.close);
+  const spyRet3m = spyCloses.length >= 64 ? (spyCloses[spyCloses.length - 1] / spyCloses[spyCloses.length - 64] - 1) * 100 : null;
+  const rsVsSpy = ret3m != null && spyRet3m != null ? ret3m - spyRet3m : null;
+  const hv = historicalVolatility(closes, 60);
+
+  // ── Trade plan (no commission, fractional shares) ──
+  const targetPct = Number(rules.target_return_pct) || 4;
+  const tradingDays = Math.max(1, Math.round((Number(rules.max_cycle_days) || 30) * 252 / 365));
+  const target = price != null ? price * (1 + targetPct / 100) : null;
+  const stop = support != null ? support * (1 - (Number(rules.stop_buffer_pct) || 0) / 100) : null;
+  const riskPct = stop != null && price != null && stop < price ? ((price - stop) / price) * 100 : null;
+  const rewardRisk = riskPct != null && riskPct > 0 ? targetPct / riskPct : null;
+  let sim: TradeSim | null = null;
+  if (price != null && target != null && stop != null && stop < price && hv != null && hv > 0) {
+    const seed = hashString(`${ticker}|${bars.at(-1)?.date}|${price}|${targetPct}|${tradingDays}|${stop.toFixed(4)}`);
+    sim = simulateTrade(price, target, stop, hv, tradingDays, seed);
+  }
+  const replay = riskPct != null ? historicalReplay(bars, targetPct, riskPct, tradingDays) : null;
+  const histHit = replay?.hitRate ?? null;
+  const annualizedIfHit = sim?.estDays ? (Math.pow(1 + targetPct / 100, 365 / sim.estDays) - 1) * 100 : null;
+  // Realistic, probability-weighted: wins, stops and time-exits as they
+  // actually played out on this stock, compounded over a year of cycles.
+  const expectedAnnualized = replay && replay.expectedReturnPct > -100
+    ? (Math.pow(1 + replay.expectedReturnPct / 100, 365 / replay.avgDays) - 1) * 100 : null;
+
+  if (price == null) missing('Stock price', 'Stock price unavailable');
+  const short = n < needBars ? `need ${needBars} bars, have ${n}` : '';
+
+  // ── Liquidity ──
+  if (rules.liquidity_enabled && price != null) {
+    if (rules.min_price != null) check(`Price ≥ $${rules.min_price}`, price >= rules.min_price, 'Price too low');
+    if (rules.max_price != null) check(`Price ≤ $${rules.max_price}`, price <= rules.max_price, 'Price too high');
+  }
+  if (rules.liquidity_enabled && rules.min_avg_volume != null) {
+    if (avgVol == null) missing('Avg volume', 'Insufficient history');
+    else check(`Avg volume ≥ ${rules.min_avg_volume.toLocaleString()}`, avgVol >= rules.min_avg_volume, 'Volume too low');
+  }
+  if (rules.liquidity_enabled && rules.min_dollar_volume_m != null) {
+    if (dollarVolM == null) missing('Dollar volume', 'Insufficient history');
+    else check(`Dollar volume ≥ $${rules.min_dollar_volume_m}M`, dollarVolM >= rules.min_dollar_volume_m, 'Dollar volume too low');
+  }
+  // ── Trend ──
+  if (rules.trend_enabled) {
+    if (rules.require_price_above_ma200) {
+      if (ma200 == null || price == null) missing('Price > MA200', 'Insufficient history');
+      else check('Price > MA200', price > ma200, 'Below MA200');
+    }
+    if (rules.require_ma200_rising) {
+      if (ma200 == null || ma200Prev == null) missing('MA200 rising', 'Insufficient history');
+      else check(`MA200 rising (vs ${lb} days ago)`, ma200 > ma200Prev, 'MA200 not rising');
+    }
+    if (rules.require_ma50_above_ma200) {
+      if (ma50 == null || ma200 == null) missing('MA50 > MA200', 'Insufficient history');
+      else check('MA50 > MA200', ma50 > ma200, 'MA50 below MA200');
+    }
+  }
+  // ── Momentum ──
+  if (rules.momentum_enabled && (rules.rsi_min != null || rules.rsi_max != null)) {
+    if (rsiVal == null) missing('RSI', 'Insufficient history');
+    else {
+      if (rules.rsi_min != null) check(`RSI ≥ ${rules.rsi_min}`, rsiVal >= rules.rsi_min, 'RSI too low');
+      if (rules.rsi_max != null) check(`RSI ≤ ${rules.rsi_max}`, rsiVal <= rules.rsi_max, 'RSI too high');
+    }
+  }
+  // ── Support ──
+  if (rules.support_enabled && (rules.support_dist_min != null || rules.support_dist_max != null)) {
+    if (distToSupport == null) missing('Distance to support', 'Primary support unavailable');
+    else {
+      if (rules.support_dist_min != null) check(`Above support ≥ ${rules.support_dist_min}%`, distToSupport >= rules.support_dist_min, 'Broke below support');
+      if (rules.support_dist_max != null) check(`Above support ≤ ${rules.support_dist_max}%`, distToSupport <= rules.support_dist_max, 'Too far above support');
+    }
+  }
+  // ── Extension ──
+  if (rules.extension_enabled) {
+    if (rules.max_above_ma50 != null) {
+      if (aboveMa50 == null) missing('Distance above MA50', 'Insufficient history');
+      else check(`≤ ${rules.max_above_ma50}% above MA50`, aboveMa50 <= rules.max_above_ma50, 'Overextended vs MA50');
+    }
+    if (rules.max_above_ma200 != null) {
+      if (aboveMa200 == null) missing('Distance above MA200', 'Insufficient history');
+      else check(`≤ ${rules.max_above_ma200}% above MA200`, aboveMa200 <= rules.max_above_ma200, 'Overextended vs MA200');
+    }
+  }
+  // ── Strength ──
+  if (rules.strength_enabled) {
+    if (rules.max_from_52w_high != null) {
+      if (fromHigh == null) missing('From 52-week high', 'Insufficient history');
+      else check(`Within ${rules.max_from_52w_high}% of 52w high`, fromHigh <= rules.max_from_52w_high, 'Too far from 52-week high');
+    }
+    if (rules.require_outperform_spy) {
+      if (rsVsSpy == null) missing('3-month return vs SPY', spyRet3m == null ? 'SPY history unavailable' : 'Insufficient history');
+      else check('Outperforming SPY (3 months)', rsVsSpy > 0, 'Lagging SPY');
+    }
+  }
+  // ── Volatility ──
+  if (rules.volatility_enabled && (rules.hv_min != null || rules.hv_max != null)) {
+    if (hv == null) missing('Volatility (60-day HV)', 'Insufficient history');
+    else {
+      if (rules.hv_min != null) check(`HV ≥ ${rules.hv_min}%`, hv >= rules.hv_min, 'Volatility too low');
+      if (rules.hv_max != null) check(`HV ≤ ${rules.hv_max}%`, hv <= rules.hv_max, 'Volatility too high');
+    }
+  }
+  // ── Trade & Probability ──
+  if (rules.trade_enabled) {
+    if (rules.min_reward_risk != null) {
+      if (rewardRisk == null) missing('Reward : Risk', stop != null && price != null && stop >= price ? 'Stop at or above price' : 'Primary support unavailable');
+      else check(`Reward:Risk ≥ ${rules.min_reward_risk}`, rewardRisk >= rules.min_reward_risk, 'Reward:Risk too low');
+    }
+    if (rules.min_prob_target != null) {
+      if (sim == null) missing('Prob. of target', 'Probability unavailable (needs support + volatility)');
+      else check(`Prob. of target ≥ ${rules.min_prob_target}%`, sim.probTarget >= rules.min_prob_target, 'Probability of target too low');
+    }
+    if (rules.min_pop != null) {
+      if (sim == null) missing('POP', 'Probability unavailable (needs support + volatility)');
+      else check(`POP ≥ ${rules.min_pop}%`, sim.pop >= rules.min_pop, 'POP too low');
+    }
+  }
+
+  const qualified = rejection.length === 0 && pending.length === 0;
+  const isPending = rejection.length === 0 && pending.length > 0;
+  return {
+    ticker, company_name: company,
+    status: qualified ? 'qualified' : isPending ? 'pending' : 'rejected',
+    qualified, technical_pending: isPending,
+    rejection_reasons: rejection, pending_reasons: pending, pass_fail: passFail,
+    history_bars: n, history_note: short || null,
+    price: r2(price), day_change_pct: n >= 2 && price != null ? r2((price / closes[n - 2] - 1) * 100) : null,
+    rsi: r2(rsiVal, 1), ma20: r2(ma20), ma50: r2(ma50), ma200: r2(ma200),
+    ma200_rising: ma200 != null && ma200Prev != null ? ma200 > ma200Prev : null,
+    above_ma50_pct: r2(aboveMa50, 1), above_ma200_pct: r2(aboveMa200, 1),
+    support: r2(support), dist_to_support_pct: r2(distToSupport, 1),
+    from_52w_high_pct: r2(fromHigh, 1), return_3m_pct: r2(ret3m, 1), rs_vs_spy_pct: r2(rsVsSpy, 1),
+    avg_volume: avgVol != null ? Math.round(avgVol) : null, dollar_volume_m: r2(dollarVolM, 1),
+    hv_pct: r2(hv, 1),
+    target_price: r2(target), stop_price: r2(stop), target_pct: targetPct, risk_pct: r2(riskPct, 1),
+    reward_risk: r2(rewardRisk, 2),
+    prob_target_pct: r2(sim?.probTarget, 1), prob_stop_pct: r2(sim?.probStop, 1), pop_pct: r2(sim?.pop, 1),
+    hist_hit_rate_pct: r2(histHit, 1), est_days: sim?.estDays ?? null,
+    expected_return_pct: r2(replay?.expectedReturnPct, 2), expected_cycle_days: replay?.avgDays ?? null,
+    replay_samples: replay?.samples ?? null,
+    annualized_if_hit_pct: r2(annualizedIfHit, 1), expected_annualized_pct: r2(expectedAnnualized, 1),
+    position_size: rules.position_size, profit_at_target: target != null ? r2(rules.position_size * targetPct / 100) : null,
+    shares: price != null && price > 0 ? Number((rules.position_size / price).toFixed(4)) : null,
+  };
+}
+
+function compareStocks(a: any, b: any): number {
+  const rank = (x: any) => (x.status === 'qualified' ? 0 : x.status === 'pending' ? 1 : 2);
+  if (rank(a) !== rank(b)) return rank(a) - rank(b);
+  const ea = a.expected_annualized_pct ?? -Infinity, eb = b.expected_annualized_pct ?? -Infinity;
+  if (ea !== eb) return eb - ea;
+  const pa = a.pop_pct ?? -Infinity, pb = b.pop_pct ?? -Infinity;
+  if (pa !== pb) return pb - pa;
+  const ha = a.hist_hit_rate_pct ?? -Infinity, hb = b.hist_hit_rate_pct ?? -Infinity;
+  if (ha !== hb) return hb - ha;
+  return a.ticker.localeCompare(b.ticker);
+}
+
+async function runStockScan(body: any, apiKey: string, requestStart: number): Promise<Response> {
+  const rules = mergeStockRules(body.rules);
+  const scanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
+  const singleTicker = body.ticker ? String(body.ticker).toUpperCase().trim() : '';
+  const today = new Date();
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const ctx = newScanContext(lastCompletedBusinessDay(today, fmt));
+  ctx.historyLoadLimit = 520;
+  ctx.historyFetchDays = 730;
+  const needBars = stockRequiredBars(rules);
+  // Prob./hit-rate display wants a year of data even if no rule needs it.
+  const wantBars = Math.max(needBars, 61);
+
+  let symbolList: { ticker: string; company_name: string | null }[];
+  if (singleTicker) symbolList = [{ ticker: singleTicker, company_name: null }];
+  else if (scanMode === 'universe') {
+    const clientSymbols: string[] = Array.isArray(body.symbols) ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean) : [];
+    symbolList = clientSymbols.length ? clientSymbols.map((t) => ({ ticker: t, company_name: null })) : await fetchScanUniverse();
+  } else {
+    symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
+  }
+  const tickers = [...new Set(symbolList.map((s) => s.ticker.toUpperCase()))];
+  const companyOf = new Map(symbolList.map((s) => [s.ticker.toUpperCase(), s.company_name || '']));
+
+  // One grouped-daily call: today's price for every ticker + appended to cache.
+  const { priceMap, barMap, tradingDate } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+  if (tradingDate) ctx.expectedLatestDate = tradingDate;
+  if (barMap.size) await saveGroupedBarsToCache(barMap, [...tickers, 'SPY']);
+
+  const spySnap = await getStockSnapshot('SPY', apiKey, today, fmt, priceMap.get('SPY') ?? null, true, rules.strength_enabled && rules.require_outperform_spy ? 64 : 0, ctx);
+
+  // Stage 1: everything from cache (no per-ticker API calls).
+  const snaps = new Map<string, StockSnapshot>();
+  for (let i = 0; i < tickers.length; i += 10) {
+    const batch = tickers.slice(i, i + 10);
+    const res = await Promise.all(batch.map((t) => getStockSnapshot(t, apiKey, today, fmt, priceMap.get(t) ?? null, false, wantBars, ctx)));
+    batch.forEach((t, k) => snaps.set(t, res[k]));
+  }
+
+  // Stage 2: backfill history for tickers short of the active rules' needs,
+  // sequentially, stopping at the first 429 or the time budget.
+  const WARM_DEADLINE_MS = 110_000;
+  let historyFetched = 0, stillPendingHistory = 0, deadlineHit = false;
+  const short = tickers.filter((t) => (snaps.get(t)?.historicalBars.length ?? 0) < needBars && needBars > 0);
+  for (const t of short) {
+    if (ctx.historyRateLimited) { stillPendingHistory++; continue; }
+    if (Date.now() - requestStart > WARM_DEADLINE_MS) { deadlineHit = true; stillPendingHistory++; continue; }
+    const before = snaps.get(t)?.historicalBars.length ?? 0;
+    ctx.stockCache.delete(t);
+    const snap = await getStockSnapshot(t, apiKey, today, fmt, priceMap.get(t) ?? null, true, needBars, ctx);
+    snaps.set(t, snap);
+    if (snap.historicalBars.length > before) historyFetched++;
+    if (snap.historicalBars.length < needBars) stillPendingHistory++;
+  }
+
+  const results = tickers
+    .map((t) => {
+      const snap = snaps.get(t)!;
+      return evaluateStock(t, companyOf.get(t) || '', snap.historicalBars, snap.currentPrice, spySnap.historicalBars, rules, needBars);
+    })
+    .sort(compareStocks);
+
+  const counts = {
+    stocks_screened: tickers.length,
+    qualified: results.filter((r) => r.status === 'qualified').length,
+    pending: results.filter((r) => r.status === 'pending').length,
+    rejected: results.filter((r) => r.status === 'rejected').length,
+    required_bars: needBars,
+    history_fetched_this_scan: historyFetched,
+    still_pending_history: stillPendingHistory,
+    history_rate_limited: ctx.historyRateLimited,
+    warming_time_budget_hit: deadlineHit,
+    latest_trading_date: ctx.expectedLatestDate,
+    spy_bars: spySnap.historicalBars.length,
+    rejection_breakdown: results.flatMap((r) => r.rejection_reasons).reduce((m: Record<string, number>, k) => { m[k] = (m[k] || 0) + 1; return m; }, {}),
+    pending_breakdown: results.flatMap((r) => r.pending_reasons).reduce((m: Record<string, number>, k) => { m[k] = (m[k] || 0) + 1; return m; }, {}),
+    elapsed_ms: Date.now() - requestStart,
+  };
+  console.log(`[STOCK SCAN] mode=${scanMode} screened=${tickers.length} Q=${counts.qualified} P=${counts.pending} R=${counts.rejected} needBars=${needBars} fetched=${historyFetched} rateLimited=${ctx.historyRateLimited}`);
+  return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), results, counts });
+}
