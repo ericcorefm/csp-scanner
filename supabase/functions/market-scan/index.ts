@@ -1927,6 +1927,28 @@ serve(async (req) => {
       return await runStockScan(body, apiKey, requestStart);
     }
 
+    // ── STOCK-QUOTES: latest saved close for open stock positions. Reads the
+    // history cache only (kept current by every scan) — no Massive calls. ──
+    if (mode === 'stock-quotes') {
+      const list: string[] = Array.isArray(body.tickers)
+        ? [...new Set<string>(body.tickers.map((t: string) => String(t).toUpperCase().trim()).filter(Boolean))].slice(0, 200)
+        : [];
+      const quotes = await Promise.all(list.map(async (t) => {
+        const bars = await loadCachedHistory(t, 2);
+        const last = bars.at(-1);
+        const prev = bars.length > 1 ? bars.at(-2) : null;
+        return {
+          ticker: t,
+          price: last?.close ?? null,
+          date: last?.date ?? null,
+          day_change_pct: last && prev ? Number(((last.close / prev.close - 1) * 100).toFixed(2)) : null,
+          high: last?.high ?? null,
+          low: last?.low ?? null,
+        };
+      }));
+      return json({ success: true, quotes });
+    }
+
     if (!profile) return json({ success: false, error: 'Missing strategy profile' });
 
     const today = new Date();
@@ -2553,6 +2575,10 @@ function evaluateStock(ticker: string, company: string, bars: HistoryBar[], grou
   const dollarVolM = avgVol != null && price != null ? (avgVol * price) / 1e6 : null;
   const support = n >= 60 && price != null ? calcPrimarySupport(bars, price) : null;
   const distToSupport = support != null && price != null && price > 0 ? ((price - support) / price) * 100 : null;
+  // Same trend classification and chart levels as the CSP side.
+  const trendClass = n >= 60 ? trend(bars) : 'Pending';
+  const secondarySupport = support != null ? calcSecondarySupport(bars, support) : null;
+  const resistanceLevel = n >= 60 && price != null ? findResistance(bars, price) : null;
   const aboveMa50 = ma50 != null && price != null ? ((price - ma50) / ma50) * 100 : null;
   const aboveMa200 = ma200 != null && price != null ? ((price - ma200) / ma200) * 100 : null;
   const high52 = n >= 252 ? Math.max(...bars.slice(-252).map((b) => b.high)) : null;
@@ -2702,6 +2728,8 @@ function evaluateStock(ticker: string, company: string, bars: HistoryBar[], grou
     ma200_rising: ma200 != null && ma200Prev != null ? ma200 > ma200Prev : null,
     above_ma50_pct: r2(aboveMa50, 1), above_ma200_pct: r2(aboveMa200, 1),
     support: r2(support), dist_to_support_pct: r2(distToSupport, 1),
+    trend_classification: trendClass,
+    secondary_support: r2(secondarySupport), resistance: r2(resistanceLevel),
     from_52w_high_pct: r2(fromHigh, 1), return_3m_pct: r2(ret3m, 1), rs_vs_spy_pct: r2(rsVsSpy, 1),
     avg_volume: avgVol != null ? Math.round(avgVol) : null, dollar_volume_m: r2(dollarVolM, 1),
     hv_pct: r2(hv, 1),
@@ -2768,7 +2796,7 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
     if (groupedStatus === 429) ctx.historyRateLimited = true;
   }
 
-  const spySnap = await getStockSnapshot('SPY', apiKey, today, fmt, priceMap.get('SPY') ?? null, true, rules.strength_enabled && rules.require_outperform_spy ? 64 : 0, ctx);
+  const spySnap = await getStockSnapshot('SPY', apiKey, today, fmt, priceMap.get('SPY') ?? null, true, 64, ctx);
 
   // Stage 1: everything from cache (no per-ticker API calls).
   const snaps = new Map<string, StockSnapshot>();
@@ -2826,5 +2854,3 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   console.log(`[STOCK SCAN] mode=${scanMode} screened=${tickers.length} Q=${counts.qualified} P=${counts.pending} R=${counts.rejected} needBars=${needBars} fetched=${historyFetched} rateLimited=${ctx.historyRateLimited}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), results, counts });
 }
-
-// redeploy 2026-10-02b
