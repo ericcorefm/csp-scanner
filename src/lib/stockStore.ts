@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import {
   DEFAULT_STOCK_RULES,
@@ -7,6 +7,10 @@ import {
 
 const DEFAULT_PROFILE_NAME = 'My Stock Default';
 const KEEP_SCANS_DAYS = 7;
+// "Keep loading history": wait between automatic Rescans so Massive's
+// Stocks Basic limit (5 calls/min) has reset.
+const AUTO_LOAD_INTERVAL_MS = 70_000;
+const AUTO_LOAD_MAX_ERRORS = 3;
 
 function withDefaults(rules: Partial<StockRules> | null | undefined): StockRules {
   return { ...DEFAULT_STOCK_RULES, ...(rules || {}) };
@@ -26,6 +30,11 @@ export function useStockScanner(universeSymbols: string[]) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [autoLoad, setAutoLoadState] = useState(false);
+  const [nextAutoScanAt, setNextAutoScanAt] = useState<number | null>(null);
+  const [secondsToNextScan, setSecondsToNextScan] = useState<number | null>(null);
+  const autoLoadRef = useRef(false);
+  const autoErrorsRef = useRef(0);
 
   // Load (or create) the default stock profile, then the latest saved scans.
   useEffect(() => {
@@ -121,6 +130,18 @@ export function useStockScanner(universeSymbols: string[]) {
       }
       if (notes.length) setNotice(notes.join(' '));
 
+      if (autoLoadRef.current) {
+        autoErrorsRef.current = 0;
+        if ((newCounts?.still_pending_history ?? 0) > 0) {
+          setNextAutoScanAt(Date.now() + AUTO_LOAD_INTERVAL_MS);
+        } else {
+          autoLoadRef.current = false;
+          setAutoLoadState(false);
+          setNextAutoScanAt(null);
+          setNotice('All price history is loaded. Daily Rescans now stay fast and current automatically.');
+        }
+      }
+
       // Persist; keep only the last week of scans.
       await supabase.from('stock_scans').insert({
         scan_mode: mode, profile_id: profile.id, scanned_at: scannedAt, results: newResults, counts: newCounts,
@@ -129,17 +150,68 @@ export function useStockScanner(universeSymbols: string[]) {
       await supabase.from('stock_scans').delete().eq('scan_mode', mode).lt('scanned_at', cutoff);
     } catch (err) {
       setError(`Stock scan failed — showing previous results. (${err instanceof Error ? err.message : String(err)})`);
+      if (autoLoadRef.current) {
+        autoErrorsRef.current += 1;
+        if (autoErrorsRef.current >= AUTO_LOAD_MAX_ERRORS) {
+          autoLoadRef.current = false;
+          setAutoLoadState(false);
+          setNextAutoScanAt(null);
+        } else {
+          setNextAutoScanAt(Date.now() + AUTO_LOAD_INTERVAL_MS);
+        }
+      }
     } finally {
       setScanning(false);
     }
   }, [profile, scanning, scanMode, universeSymbols]);
 
+  // Always call the latest runScan from the timer.
+  const runScanRef = useRef(runScan);
+  useEffect(() => { runScanRef.current = runScan; }, [runScan]);
+
+  // Countdown → automatic Rescan.
+  useEffect(() => {
+    if (nextAutoScanAt == null) { setSecondsToNextScan(null); return; }
+    const tick = () => {
+      const remaining = Math.ceil((nextAutoScanAt - Date.now()) / 1000);
+      if (remaining <= 0) {
+        setNextAutoScanAt(null);
+        setSecondsToNextScan(null);
+        if (autoLoadRef.current) void runScanRef.current();
+      } else {
+        setSecondsToNextScan(remaining);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [nextAutoScanAt]);
+
+  const setAutoLoad = useCallback((on: boolean) => {
+    autoLoadRef.current = on;
+    autoErrorsRef.current = 0;
+    setAutoLoadState(on);
+    setNextAutoScanAt(null);
+    if (on && !scanning) void runScanRef.current();
+  }, [scanning]);
+
+  // Switching Discovery / Universe stops auto-loading.
+  const changeScanMode = useCallback((mode: StockScanMode) => {
+    autoLoadRef.current = false;
+    setAutoLoadState(false);
+    setNextAutoScanAt(null);
+    setScanMode(mode);
+  }, []);
+
   return {
     loaded,
+    autoLoad,
+    setAutoLoad,
+    secondsToNextScan,
     profile,
     saveProfile,
     scanMode,
-    setScanMode,
+    setScanMode: changeScanMode,
     results: results[scanMode],
     counts: counts[scanMode],
     lastScanAt: lastScanAt[scanMode],
