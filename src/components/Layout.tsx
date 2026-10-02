@@ -31,6 +31,7 @@ interface LayoutProps {
   scanner: ScannerKind;
   onScannerChange: (k: ScannerKind) => void;
   stock: StockScannerState;
+  stockOpenCount?: number;
 }
 
 const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
@@ -43,7 +44,7 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
-export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock }: LayoutProps) {
+export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock, stockOpenCount = 0 }: LayoutProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const isStocks = scanner === 'stocks';
 
@@ -54,10 +55,11 @@ export function Layout({ children, currentPage, onNavigate, state, scanner, onSc
   const rejectedCount = isStocks
     ? stock.results.filter((r) => r.status === 'rejected').length
     : new Set(bestPerTicker.filter(isRejected).map((c) => c.ticker)).size;
-  const labelFor = (id: Page, fallback: string) =>
-    isStocks && id === 'candidates' ? 'Stock Candidates'
-    : isStocks && id === 'settings' ? 'Stock Settings'
-    : fallback;
+  const STOCK_LABELS: Partial<Record<Page, string>> = {
+    candidates: 'Stock Candidates', settings: 'Stock Settings', analyze: 'Analyze Stock',
+    universe: 'Stock Universe', open: 'Open Stock Positions', closed: 'Closed Stock Positions', summary: 'Stock Summary',
+  };
+  const labelFor = (id: Page, fallback: string) => (isStocks ? STOCK_LABELS[id] ?? fallback : fallback);
   const lastScanAt = isStocks ? stock.lastScanAt : state.lastScanAt;
   const scanning = isStocks ? stock.scanning : state.scanning;
   const profileName = isStocks ? stock.profile?.name : state.activeProfile?.name;
@@ -120,7 +122,7 @@ export function Layout({ children, currentPage, onNavigate, state, scanner, onSc
               const active = currentPage === item.id;
               const badge =
                 item.id === 'candidates' ? qualifiedCount :
-                item.id === 'open' ? state.openPositions.length :
+                item.id === 'open' ? (isStocks ? stockOpenCount : state.openPositions.length) :
                 item.id === 'closed' ? state.closedPositions.length :
                 undefined;
               return (
