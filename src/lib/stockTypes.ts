@@ -97,6 +97,9 @@ export interface StockResult {
   above_ma200_pct: number | null;
   support: number | null;
   dist_to_support_pct: number | null;
+  trend_classification?: string;
+  secondary_support?: number | null;
+  resistance?: number | null;
   from_52w_high_pct: number | null;
   return_3m_pct: number | null;
   rs_vs_spy_pct: number | null;
@@ -144,4 +147,67 @@ export interface StockScanCounts {
   rejection_breakdown: Record<string, number>;
   pending_breakdown: Record<string, number>;
   elapsed_ms: number;
+}
+
+export interface StockUniverseEntry {
+  id: string;
+  symbol: string;
+  company_name: string | null;
+  enabled: boolean;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface StockPosition {
+  id: string;
+  ticker: string;
+  company_name: string | null;
+  status: 'open' | 'closed';
+  entry_date: string;
+  entry_price: number;
+  shares: number;
+  target_price: number | null;
+  stop_price: number | null;
+  max_cycle_days: number;
+  exit_date: string | null;
+  exit_price: number | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface StockQuote {
+  ticker: string;
+  price: number | null;
+  date: string | null;
+  day_change_pct: number | null;
+  high: number | null;
+  low: number | null;
+}
+
+export type NewStockPosition = Pick<StockPosition, 'ticker' | 'entry_date' | 'entry_price' | 'shares' | 'target_price' | 'stop_price' | 'max_cycle_days'> & {
+  company_name?: string | null;
+  notes?: string | null;
+};
+
+/** Days between two YYYY-MM-DD dates (calendar days). */
+export function daysBetween(from: string, to: string): number {
+  return Math.round((new Date(to + 'T00:00:00Z').getTime() - new Date(from + 'T00:00:00Z').getTime()) / 86400000);
+}
+
+export function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export type PositionHealth = 'Target hit' | 'Stop hit' | 'Cycle ended' | 'Near target' | 'Near stop' | 'Active' | 'No price';
+
+/** Status of an open position vs its saved target, stop and cycle. */
+export function positionHealth(p: StockPosition, price: number | null): PositionHealth {
+  if (price == null) return 'No price';
+  if (p.target_price != null && price >= p.target_price) return 'Target hit';
+  if (p.stop_price != null && price <= p.stop_price) return 'Stop hit';
+  if (daysBetween(p.entry_date, todayISO()) > p.max_cycle_days) return 'Cycle ended';
+  if (p.target_price != null && p.target_price > p.entry_price && (price - p.entry_price) / (p.target_price - p.entry_price) >= 0.75) return 'Near target';
+  if (p.stop_price != null && p.stop_price < p.entry_price && (p.entry_price - price) / (p.entry_price - p.stop_price) >= 0.75) return 'Near stop';
+  return 'Active';
 }

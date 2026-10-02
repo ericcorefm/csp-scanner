@@ -222,8 +222,31 @@ export function useStockScanner(universeSymbols: string[]) {
     setScanMode(mode);
   }, []);
 
+  // Analyze one ticker with the saved stock rules (not persisted).
+  const [analyzing, setAnalyzing] = useState(false);
+  const analyze = useCallback(async (ticker: string): Promise<{ result: StockResult | null; error: string | null; counts: StockScanCounts | null }> => {
+    if (!profile) return { result: null, error: 'Stock settings not loaded yet', counts: null };
+    setAnalyzing(true);
+    try {
+      const { data, error: e } = await supabase.functions.invoke('market-scan', {
+        body: { mode: 'stock-scan', ticker: ticker.toUpperCase().trim(), rules: profile.rules },
+      });
+      if (e) throw e;
+      if (!data?.success) throw new Error(data?.error || 'Analyze failed');
+      return { result: (data.results?.[0] as StockResult) ?? null, error: null, counts: data.counts as StockScanCounts };
+    } catch (err) {
+      return { result: null, error: err instanceof Error ? err.message : String(err), counts: null };
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [profile]);
+
   return {
     loaded,
+    analyze,
+    analyzing,
+    resultsByMode: results,
+    lastScanAtByMode: lastScanAt,
     autoLoad,
     setAutoLoad,
     secondsToNextScan,
