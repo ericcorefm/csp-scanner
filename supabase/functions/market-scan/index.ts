@@ -2371,6 +2371,7 @@ type StockRules = {
   volatility_enabled: boolean; hv_min: number | null; hv_max: number | null;
   trade_enabled: boolean; target_return_pct: number; max_cycle_days: number; stop_buffer_pct: number;
   min_reward_risk: number | null; min_prob_target: number | null; min_pop: number | null;
+  min_hist_hit_rate: number | null; min_exp_annualized: number | null;
   position_size: number;
 };
 
@@ -2378,12 +2379,15 @@ const DEFAULT_STOCK_RULES: StockRules = {
   liquidity_enabled: true, min_price: 5, max_price: null, min_avg_volume: 1_000_000, min_dollar_volume_m: 20,
   trend_enabled: true, require_price_above_ma200: true, require_ma200_rising: true, ma200_slope_lookback: 20, require_ma50_above_ma200: true,
   momentum_enabled: true, rsi_min: 40, rsi_max: 65,
-  support_enabled: true, support_dist_min: 0, support_dist_max: 5,
+  support_enabled: true, support_dist_min: 0, support_dist_max: 8,
   extension_enabled: true, max_above_ma50: 10, max_above_ma200: 30,
   strength_enabled: true, max_from_52w_high: 25, require_outperform_spy: true,
-  volatility_enabled: true, hv_min: 25, hv_max: 60,
-  trade_enabled: true, target_return_pct: 4, max_cycle_days: 30, stop_buffer_pct: 2,
-  min_reward_risk: 1, min_prob_target: 50, min_pop: 60,
+  volatility_enabled: true, hv_min: 25, hv_max: 70,
+  trade_enabled: true, target_return_pct: 4, max_cycle_days: 30, stop_buffer_pct: 1,
+  // Model odds (zero drift) depend mostly on stop/target geometry, so they are
+  // kept as soft minimums; the REAL-history rules below do the heavy lifting.
+  min_reward_risk: 0.5, min_prob_target: 40, min_pop: null,
+  min_hist_hit_rate: 50, min_exp_annualized: 10,
   position_size: 1000,
 };
 
@@ -2417,6 +2421,10 @@ function stockRequiredBars(r: StockRules): number {
   }
   if (r.volatility_enabled && (r.hv_min != null || r.hv_max != null)) n = Math.max(n, 61);
   if (r.trade_enabled && (r.min_reward_risk != null || r.min_prob_target != null || r.min_pop != null)) n = Math.max(n, 61);
+  // Historical replay needs a cycle of forward bars plus 60 entry samples.
+  if (r.trade_enabled && (r.min_hist_hit_rate != null || r.min_exp_annualized != null)) {
+    n = Math.max(n, Math.round((Number(r.max_cycle_days) || 30) * 252 / 365) + 62);
+  }
   return n;
 }
 
@@ -2569,11 +2577,15 @@ function evaluateStock(ticker: string, company: string, bars: HistoryBar[], grou
   }
   const replay = riskPct != null ? historicalReplay(bars, targetPct, riskPct, tradingDays) : null;
   const histHit = replay?.hitRate ?? null;
-  const annualizedIfHit = sim?.estDays ? (Math.pow(1 + targetPct / 100, 365 / sim.estDays) - 1) * 100 : null;
+  // Annualized figures are capped at 1000%: compounding a 1-day cycle 365 times
+  // produced meaningless numbers (e.g. 164,880,229%). Cycles count as ≥ 5 days.
+  const ANN_CAP = 1000;
+  const annualize = (retPct: number, days: number) => Math.min(ANN_CAP, (Math.pow(1 + retPct / 100, 365 / Math.max(5, days)) - 1) * 100);
+  const annualizedIfHit = sim?.estDays ? annualize(targetPct, sim.estDays) : null;
   // Realistic, probability-weighted: wins, stops and time-exits as they
   // actually played out on this stock, compounded over a year of cycles.
   const expectedAnnualized = replay && replay.expectedReturnPct > -100
-    ? (Math.pow(1 + replay.expectedReturnPct / 100, 365 / replay.avgDays) - 1) * 100 : null;
+    ? annualize(replay.expectedReturnPct, replay.avgDays) : null;
 
   if (price == null) missing('Stock price', 'Stock price unavailable');
   const short = n < needBars ? `need ${needBars} bars, have ${n}` : '';
@@ -2665,6 +2677,15 @@ function evaluateStock(ticker: string, company: string, bars: HistoryBar[], grou
     if (rules.min_pop != null) {
       if (sim == null) missing('POP', 'Probability unavailable (needs support + volatility)');
       else check(`POP ≥ ${rules.min_pop}%`, sim.pop >= rules.min_pop, 'POP too low');
+    }
+    // Real-history rules: how this exact plan actually played out on this stock.
+    if (rules.min_hist_hit_rate != null) {
+      if (replay == null) missing('Hist. hit rate', 'Historical replay unavailable (needs support + history)');
+      else check(`Hist. hit rate ≥ ${rules.min_hist_hit_rate}%`, replay.hitRate >= rules.min_hist_hit_rate, 'Hist. hit rate too low');
+    }
+    if (rules.min_exp_annualized != null) {
+      if (expectedAnnualized == null) missing('Exp. annualized', 'Historical replay unavailable (needs support + history)');
+      else check(`Exp. annualized ≥ ${rules.min_exp_annualized}%`, expectedAnnualized >= rules.min_exp_annualized, 'Exp. annualized too low');
     }
   }
 
@@ -2805,5 +2826,3 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   console.log(`[STOCK SCAN] mode=${scanMode} screened=${tickers.length} Q=${counts.qualified} P=${counts.pending} R=${counts.rejected} needBars=${needBars} fetched=${historyFetched} rateLimited=${ctx.historyRateLimited}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), results, counts });
 }
-
-// redeploy volume fix
