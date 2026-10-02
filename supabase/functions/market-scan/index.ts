@@ -2730,9 +2730,19 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   const companyOf = new Map(symbolList.map((s) => [s.ticker.toUpperCase(), s.company_name || '']));
 
   // One grouped-daily call: today's price for every ticker + appended to cache.
-  const { priceMap, barMap, tradingDate } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+  const { priceMap, barMap, tradingDate, httpStatus: groupedStatus } = await fetchGroupedDailyPrices(apiKey, today, fmt);
   if (tradingDate) ctx.expectedLatestDate = tradingDate;
   if (barMap.size) await saveGroupedBarsToCache(barMap, [...tickers, 'SPY']);
+  // If the daily-price call failed (e.g. rate-limited on Stocks Basic), fall back
+  // to the last saved prices — the same fallback the CSP scan uses. Without this,
+  // stocks with little cached history had no price at all and stayed Pending
+  // even with every rule OFF.
+  const groupedFailed = priceMap.size === 0;
+  if (groupedFailed) {
+    const cached = await bulkLoadCachedStockPrices([...tickers, 'SPY']);
+    for (const [t, v] of cached) if (v?.price > 0) priceMap.set(t, v.price);
+    if (groupedStatus === 429) ctx.historyRateLimited = true;
+  }
 
   const spySnap = await getStockSnapshot('SPY', apiKey, today, fmt, priceMap.get('SPY') ?? null, true, rules.strength_enabled && rules.require_outperform_spy ? 64 : 0, ctx);
 
@@ -2778,6 +2788,8 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
     history_rate_limited: ctx.historyRateLimited,
     warming_time_budget_hit: deadlineHit,
     latest_trading_date: ctx.expectedLatestDate,
+    daily_prices_refreshed: !groupedFailed,
+    daily_prices_http_status: groupedStatus,
     spy_bars: spySnap.historicalBars.length,
     rejection_breakdown: results.flatMap((r) => r.rejection_reasons).reduce((m: Record<string, number>, k) => { m[k] = (m[k] || 0) + 1; return m; }, {}),
     pending_breakdown: results.flatMap((r) => r.pending_reasons).reduce((m: Record<string, number>, k) => { m[k] = (m[k] || 0) + 1; return m; }, {}),
