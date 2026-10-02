@@ -1,6 +1,9 @@
 import { useState } from 'react';
-import { Layout, type Page } from '@/components/Layout';
+import { Layout, type Page, type ScannerKind } from '@/components/Layout';
 import { useAppState } from '@/lib/store';
+import { useStockScanner } from '@/lib/stockStore';
+import { StockCandidatesPage } from '@/pages/StockCandidatesPage';
+import { StockSettingsPage } from '@/pages/StockSettingsPage';
 import { CandidatesPage } from '@/pages/CandidatesPage';
 import { DetailPage } from '@/pages/DetailPage';
 import { OpenPositionsPage } from '@/pages/OpenPositionsPage';
@@ -17,6 +20,17 @@ function App() {
   const [selectedExpiration, setSelectedExpiration] = useState<string | null>(null);
   const [autoAnalyzeTicker, setAutoAnalyzeTicker] = useState<string | null>(null);
   const state = useAppState();
+  const stock = useStockScanner(state.scanUniverse);
+  // Options (CSP) vs Stocks. Remembered between visits.
+  const [scanner, setScannerState] = useState<ScannerKind>(() => {
+    try { return localStorage.getItem('scanner-kind') === 'stocks' ? 'stocks' : 'options'; } catch { return 'options'; }
+  });
+  const setScanner = (k: ScannerKind) => {
+    setScannerState(k);
+    try { localStorage.setItem('scanner-kind', k); } catch { /* storage unavailable */ }
+    if (currentPage === 'detail') setCurrentPage('candidates');
+  };
+  const isStocks = scanner === 'stocks';
 
   const handleNavigate = (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => {
     if (ticker) setSelectedTicker(ticker);
@@ -51,8 +65,10 @@ function App() {
   }
 
   return (
-    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state}>
-      {currentPage === 'candidates' && (
+    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock}>
+      {isStocks && currentPage === 'candidates' && <StockCandidatesPage stock={stock} />}
+      {isStocks && currentPage === 'settings' && <StockSettingsPage stock={stock} />}
+      {!isStocks && currentPage === 'candidates' && (
         <CandidatesPage state={state} onNavigate={handleNavigate} />
       )}
       {currentPage === 'analyze' && (
@@ -72,7 +88,7 @@ function App() {
       )}
       {currentPage === 'open' && <OpenPositionsPage state={state} />}
       {currentPage === 'closed' && <ClosedPositionsPage state={state} />}
-      {currentPage === 'settings' && <SettingsPage state={state} />}
+      {!isStocks && currentPage === 'settings' && <SettingsPage state={state} />}
       {currentPage === 'summary' && <DailySummaryPage state={state} />}
       {currentPage === 'universe' && <ScanUniversePage state={state} onNavigate={handleNavigate} />}
     </Layout>
