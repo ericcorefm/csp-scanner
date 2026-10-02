@@ -144,6 +144,13 @@ export function useStockScanner(universeSymbols: string[]) {
           autoLoadRef.current = false;
           setAutoLoadState(false);
           setNextAutoScanAt(null);
+        } else if ((newCounts?.still_pending_history ?? 0) > 0 && !newCounts.history_rate_limited && (newCounts.history_fetched_this_scan ?? 0) === 0) {
+          // No progress and not rate-limited: the remaining stocks simply don't
+          // have enough history at Massive (e.g. recent IPOs). Stop retrying.
+          autoLoadRef.current = false;
+          setAutoLoadState(false);
+          setNextAutoScanAt(null);
+          setNotice(`History loading is complete. ${newCounts.still_pending_history} stock(s) don't have enough price history available (e.g. recent listings) and will stay Pending.`);
         } else if ((newCounts?.still_pending_history ?? 0) > 0) {
           setNextAutoScanAt(Date.now() + AUTO_LOAD_INTERVAL_MS);
         } else {
