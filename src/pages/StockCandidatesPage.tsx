@@ -98,6 +98,26 @@ export function StockCandidatesPage({ stock }: { stock: StockScannerState }) {
 
   return (
     <div className="space-y-5">
+      {(stock.autoLoad || (counts?.still_pending_history ?? 0) > 0) && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-2.5 text-sm">
+          <div className="flex items-center gap-3">
+            <Toggle on={stock.autoLoad} onClick={() => stock.setAutoLoad(!stock.autoLoad)} label="Keep loading history" />
+            <span className="text-sky-300">
+              {stock.autoLoad
+                ? stock.scanning
+                  ? 'Scanning… loading the next batch of price history.'
+                  : stock.secondsToNextScan != null
+                    ? `Next automatic Rescan in ${stock.secondsToNextScan}s · ${counts?.still_pending_history ?? 0} stock(s) still loading.`
+                    : 'Starting…'
+                : `${counts?.still_pending_history ?? 0} stock(s) still need price history. Turn this on to Rescan automatically every ~70 seconds until done.`}
+            </span>
+          </div>
+          {stock.autoLoad && (
+            <span className="text-xs text-slate-500">Keep this tab open. It stops by itself when all history is loaded.</span>
+          )}
+        </div>
+      )}
+
       {stock.notice && !stock.scanning && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-sm text-amber-300">{stock.notice}</div>
       )}
