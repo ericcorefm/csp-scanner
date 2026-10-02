@@ -121,6 +121,21 @@ export function StockCandidatesPage({ stock }: { stock: StockScannerState }) {
         </div>
       )}
 
+      {counts && counts.qualified === 0 && (counts.pending > 0 || counts.rejected > 0) && (
+        <div className="rounded-xl border border-slate-800 bg-slate-900/50 px-5 py-3 text-xs">
+          <div className="mb-2 text-sm font-medium text-slate-300">Why nothing qualified</div>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(counts.pending_breakdown || {}).sort((a, b) => b[1] - a[1]).map(([reason, n]) => (
+              <Badge key={'p' + reason} variant="warning">Pending: {reason} · {n}</Badge>
+            ))}
+            {Object.entries(counts.rejection_breakdown || {}).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([reason, n]) => (
+              <Badge key={'r' + reason} variant="error">{reason} · {n}</Badge>
+            ))}
+          </div>
+          <div className="mt-2 text-slate-500">Counts are stocks per reason. Rules use your last SAVED Stock Settings.</div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold text-slate-100">Stock Candidates</h1>
