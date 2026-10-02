@@ -132,6 +132,10 @@ export interface StockScanCounts {
   warming_time_budget_hit: boolean;
   latest_trading_date: string;
   daily_prices_refreshed?: boolean;
+  cache_rows_written?: number;
+  cache_read_errors?: number;
+  cache_write_errors?: number;
+  cache_last_error?: string | null;
   daily_prices_http_status?: number | null;
   spy_bars: number;
   rejection_breakdown: Record<string, number>;

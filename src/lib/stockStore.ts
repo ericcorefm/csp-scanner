@@ -117,6 +117,13 @@ export function useStockScanner(universeSymbols: string[]) {
       setLastScanAt((prev) => ({ ...prev, [mode]: scannedAt }));
 
       const notes: string[] = [];
+      const cacheBroken = (newCounts?.cache_write_errors ?? 0) > 0 && (newCounts?.cache_rows_written ?? 0) === 0;
+      if ((newCounts?.cache_write_errors ?? 0) > 0 || (newCounts?.cache_read_errors ?? 0) > 0) {
+        setError(
+          `Price history could not be ${cacheBroken ? 'saved' : 'fully saved/read'} to the database, so it is re-downloaded every scan. ` +
+          `Database said: ${newCounts?.cache_last_error ?? 'unknown error'}`,
+        );
+      }
       if (newCounts?.daily_prices_refreshed === false) {
         notes.push(newCounts.daily_prices_http_status === 429
           ? "Today's prices couldn't be refreshed (Massive rate limit) — using the last saved prices. Wait 1–2 minutes between Rescans."
@@ -132,7 +139,12 @@ export function useStockScanner(universeSymbols: string[]) {
 
       if (autoLoadRef.current) {
         autoErrorsRef.current = 0;
-        if ((newCounts?.still_pending_history ?? 0) > 0) {
+        if (cacheBroken) {
+          // Saving history is failing — more automatic Rescans can't make progress.
+          autoLoadRef.current = false;
+          setAutoLoadState(false);
+          setNextAutoScanAt(null);
+        } else if ((newCounts?.still_pending_history ?? 0) > 0) {
           setNextAutoScanAt(Date.now() + AUTO_LOAD_INTERVAL_MS);
         } else {
           autoLoadRef.current = false;
