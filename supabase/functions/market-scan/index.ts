@@ -206,7 +206,9 @@ async function upsertHistoryRows(rows: Record<string, unknown>[]): Promise<numbe
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
   if (!supabaseUrl || !serviceKey) { noteCacheError('write', 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing'); return 0; }
   const unique = new Map<string, Record<string, unknown>>();
-  for (const r of rows) unique.set(`${r.ticker}|${r.trade_date}`, r);
+  // volume is a bigint column; Massive can return split-adjusted fractional
+  // volume (e.g. 10913482.034813), which made Postgres reject the WHOLE batch.
+  for (const r of rows) unique.set(`${r.ticker}|${r.trade_date}`, { ...r, volume: Math.round(Number(r.volume) || 0) });
   const all = [...unique.values()];
   let saved = 0;
   for (let i = 0; i < all.length; i += 200) {
@@ -2803,5 +2805,3 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   console.log(`[STOCK SCAN] mode=${scanMode} screened=${tickers.length} Q=${counts.qualified} P=${counts.pending} R=${counts.rejected} needBars=${needBars} fetched=${historyFetched} rateLimited=${ctx.historyRateLimited}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), results, counts });
 }
-
-// redeploy 2026-10-02
