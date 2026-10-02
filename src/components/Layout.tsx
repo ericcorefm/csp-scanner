@@ -15,17 +15,22 @@ import {
   Globe,
 } from 'lucide-react';
 import type { AppState } from '@/lib/store';
+import type { StockScannerState } from '@/lib/stockStore';
 import { Badge } from '@/components/ui';
 import { selectBestContractPerTicker } from '@/lib/bestContract';
 import { isQualified, isRejected } from '@/lib/status';
 
 export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
+export type ScannerKind = 'options' | 'stocks';
 
 interface LayoutProps {
   children: React.ReactNode;
   currentPage: Page;
   onNavigate: (page: Page, ticker?: string, contract?: { strike: number; expiration: string }) => void;
   state: AppState;
+  scanner: ScannerKind;
+  onScannerChange: (k: ScannerKind) => void;
+  stock: StockScannerState;
 }
 
 const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
@@ -38,12 +43,25 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
-export function Layout({ children, currentPage, onNavigate, state }: LayoutProps) {
+export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock }: LayoutProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const isStocks = scanner === 'stocks';
 
   const bestPerTicker = selectBestContractPerTicker(state.candidates);
-  const qualifiedCount = new Set(bestPerTicker.filter(isQualified).map((c) => c.ticker)).size;
-  const rejectedCount = new Set(bestPerTicker.filter(isRejected).map((c) => c.ticker)).size;
+  const qualifiedCount = isStocks
+    ? stock.results.filter((r) => r.status === 'qualified').length
+    : new Set(bestPerTicker.filter(isQualified).map((c) => c.ticker)).size;
+  const rejectedCount = isStocks
+    ? stock.results.filter((r) => r.status === 'rejected').length
+    : new Set(bestPerTicker.filter(isRejected).map((c) => c.ticker)).size;
+  const labelFor = (id: Page, fallback: string) =>
+    isStocks && id === 'candidates' ? 'Stock Candidates'
+    : isStocks && id === 'settings' ? 'Stock Settings'
+    : fallback;
+  const lastScanAt = isStocks ? stock.lastScanAt : state.lastScanAt;
+  const scanning = isStocks ? stock.scanning : state.scanning;
+  const profileName = isStocks ? stock.profile?.name : state.activeProfile?.name;
+  const onRescan = () => { void (isStocks ? stock.runScan() : state.runScan()); };
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
 
   const handleNav = (page: Page) => {
@@ -77,7 +95,22 @@ export function Layout({ children, currentPage, onNavigate, state }: LayoutProps
             </div>
             <div>
               <div className="font-semibold text-sm text-slate-100">CSP Scanner</div>
-              <div className="text-[11px] text-slate-500">Cash-Secured Puts</div>
+              <div className="text-[11px] text-slate-500">{isStocks ? 'Stocks · 30-day swings' : 'Cash-Secured Puts'}</div>
+            </div>
+          </div>
+
+          {/* Scanner switch: Options (CSP) | Stocks */}
+          <div className="px-3 pt-3">
+            <div className="grid grid-cols-2 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1 text-sm font-medium">
+              {(['options', 'stocks'] as ScannerKind[]).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => onScannerChange(k)}
+                  className={`rounded-md px-3 py-1.5 transition-colors ${scanner === k ? 'bg-sky-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                >
+                  {k === 'options' ? 'Options' : 'Stocks'}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -101,7 +134,7 @@ export function Layout({ children, currentPage, onNavigate, state }: LayoutProps
                   }`}
                 >
                   <Icon className="h-4 w-4 shrink-0" />
-                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="flex-1 text-left">{labelFor(item.id, item.label)}</span>
                   {badge !== undefined && badge > 0 && (
                     <span className={`rounded-md px-1.5 py-0.5 text-xs font-semibold tabular-nums ${
                       active ? 'bg-sky-500/20 text-sky-300' : 'bg-slate-800 text-slate-400'
@@ -131,12 +164,12 @@ export function Layout({ children, currentPage, onNavigate, state }: LayoutProps
             <div className="flex items-center gap-4">
               <div className="hidden md:flex items-center gap-3">
                 <span className="text-sm font-medium text-slate-300">
-                  {navItems.find((n) => n.id === currentPage)?.label}
+                  {labelFor(currentPage, navItems.find((n) => n.id === currentPage)?.label ?? '')}
                 </span>
               </div>
-              {state.activeProfile && (
+              {profileName && (
                 <Badge variant="info">
-                  {state.activeProfile.name}
+                  {profileName}
                 </Badge>
               )}
             </div>
@@ -159,21 +192,21 @@ export function Layout({ children, currentPage, onNavigate, state }: LayoutProps
                 )}
               </div>
               <div className="hidden lg:flex flex-col items-end leading-tight">
-                {state.lastScanAt && (
+                {lastScanAt && (
                   <span className="text-[11px] text-slate-500">
-                    Last scan {new Date(state.lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                    {state.scanSource === 'live' ? ' · LIVE' : state.scanSource === 'demo' ? ' · DEMO' : ''}
+                    Last scan {new Date(lastScanAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                    {!isStocks && (state.scanSource === 'live' ? ' · LIVE' : state.scanSource === 'demo' ? ' · DEMO' : '')}
                   </span>
                 )}
-                {state.scanError && <span className="max-w-[360px] truncate text-[10px] text-amber-400" title={state.scanError}>{state.scanError}</span>}
+                {!isStocks && state.scanError && <span className="max-w-[360px] truncate text-[10px] text-amber-400" title={state.scanError}>{state.scanError}</span>}
               </div>
               <button
-                onClick={() => void state.runScan()}
-                disabled={state.scanning}
+                onClick={onRescan}
+                disabled={scanning}
                 className="flex items-center gap-2 rounded-lg bg-sky-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60 transition-colors"
               >
-                <ScanLine className={`h-4 w-4 ${state.scanning ? 'animate-spin' : ''}`} />
-                <span className="hidden sm:inline">{state.scanning ? 'Scanning...' : 'Rescan'}</span>
+                <ScanLine className={`h-4 w-4 ${scanning ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">{scanning ? 'Scanning...' : 'Rescan'}</span>
               </button>
             </div>
           </header>
