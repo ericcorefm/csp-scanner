@@ -2803,3 +2803,5 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   console.log(`[STOCK SCAN] mode=${scanMode} screened=${tickers.length} Q=${counts.qualified} P=${counts.pending} R=${counts.rejected} needBars=${needBars} fetched=${historyFetched} rateLimited=${ctx.historyRateLimited}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), results, counts });
 }
+
+// redeploy 2026-10-02
