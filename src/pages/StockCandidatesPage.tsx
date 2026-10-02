@@ -1,12 +1,36 @@
 import { Fragment, useMemo, useState } from 'react';
-import { CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, ArrowUp, ArrowDown, Info } from 'lucide-react';
+import { CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, ArrowUp, ArrowDown, Info, TrendingUp, TrendingDown, Minus, ArrowUpRight } from 'lucide-react';
+import { TradingViewChart } from '@/components/TradingViewChart';
 import type { StockScannerState } from '@/lib/stockStore';
+import type { StockPortfolioState } from '@/lib/stockPortfolio';
+import { StockPositionModal } from '@/components/StockPositionModal';
+import { Plus, Check } from 'lucide-react';
 import type { StockResult, StockStatus } from '@/lib/stockTypes';
 import { Badge, formatNum, formatPct } from '@/components/ui';
 
 type SortKey = keyof StockResult;
 
 const DASH = <span className="text-slate-600">--</span>;
+
+// Same trend labels, icons and colors as the Options (CSP) side.
+const TREND_ICONS: Record<string, typeof TrendingUp> = {
+  Bullish: TrendingUp, Improving: TrendingUp, Rebound: ArrowUpRight,
+  Sideways: Minus, Stabilizing: Minus, Downtrend: TrendingDown,
+};
+const TREND_COLORS: Record<string, 'success' | 'warning' | 'error' | 'neutral'> = {
+  Bullish: 'success', Improving: 'success', Rebound: 'success',
+  Sideways: 'neutral', Stabilizing: 'neutral', Downtrend: 'error', Pending: 'warning',
+};
+export function TrendBadge({ trend }: { trend?: string }) {
+  const t = trend || 'Pending';
+  const Icon = TREND_ICONS[t] || Minus;
+  return (
+    <Badge variant={TREND_COLORS[t] || 'neutral'}>
+      <Icon className="mr-0.5 inline h-3 w-3" />
+      {t}
+    </Badge>
+  );
+}
 const STATUS_RANK: Record<StockStatus, number> = { qualified: 0, pending: 1, rejected: 2 };
 
 function Toggle({ on, onClick, label }: { on: boolean; onClick: () => void; label: string }) {
@@ -48,6 +72,7 @@ const pctColor = (v: number | null, good: number) =>
 const COLUMNS: { key: SortKey; label: string; title: string; align?: 'left' | 'right' }[] = [
   { key: 'ticker', label: 'Ticker', title: 'Ticker', align: 'left' },
   { key: 'price', label: 'Entry', title: 'Latest close (entry price)' },
+  { key: 'trend_classification', label: 'Trend', title: 'Trend status (same as Options): Bullish = price > MA20 > MA50 > MA200; Improving, Rebound, Stabilizing, Sideways, Downtrend', align: 'left' },
   { key: 'day_change_pct', label: 'Day %', title: 'Change vs previous close' },
   { key: 'rsi', label: 'RSI', title: 'RSI(14), Wilder — same as TradingView' },
   { key: 'above_ma200_pct', label: 'vs MA200', title: '% above the 200-day moving average (arrow = MA200 rising/falling)' },
@@ -64,7 +89,43 @@ const COLUMNS: { key: SortKey; label: string; title: string; align?: 'left' | 'r
   { key: 'expected_annualized_pct', label: 'Exp. Ann.', title: 'Realistic: wins, stops and time-exits as they actually played out on this stock, compounded over a year' },
 ];
 
-export function StockCandidatesPage({ stock }: { stock: StockScannerState }) {
+/** Add Position / Add to Universe buttons for one stock result. */
+export function StockActions({ r, stock, portfolio }: { r: StockResult; stock: StockScannerState; portfolio: StockPortfolioState }) {
+  const [adding, setAdding] = useState(false);
+  const inUniverse = portfolio.universe.some((u) => u.symbol === r.ticker);
+  const isOpen = portfolio.openPositions.some((p) => p.ticker === r.ticker);
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button
+        onClick={(e) => { e.stopPropagation(); setAdding(true); }}
+        className="flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-600"
+      >
+        <Plus className="h-3.5 w-3.5" /> Add Position{isOpen ? ' (already open)' : ''}
+      </button>
+      {inUniverse ? (
+        <span className="flex items-center gap-1 text-xs text-emerald-400"><Check className="h-3.5 w-3.5" /> In Stock Universe</span>
+      ) : (
+        <button
+          onClick={(e) => { e.stopPropagation(); void portfolio.addToUniverse(r.ticker, r.company_name); }}
+          className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+        >
+          <Plus className="h-3.5 w-3.5" /> Add to Stock Universe
+        </button>
+      )}
+      {adding && (
+        <StockPositionModal
+          result={r}
+          defaultSize={stock.profile?.rules.position_size ?? 1000}
+          defaultCycleDays={stock.profile?.rules.max_cycle_days ?? 30}
+          onSave={portfolio.addPosition}
+          onClose={() => setAdding(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+export function StockCandidatesPage({ stock, portfolio }: { stock: StockScannerState; portfolio: StockPortfolioState }) {
   const [showPending, setShowPending] = useState(false);
   const [showRejected, setShowRejected] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
@@ -233,6 +294,7 @@ export function StockCandidatesPage({ stock }: { stock: StockScannerState }) {
                         </span>
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-200">{r.price != null ? formatNum(r.price) : DASH}</td>
+                      <td className="px-3 py-2.5 text-left"><TrendBadge trend={r.trend_classification} /></td>
                       <td className={`px-3 py-2.5 text-right tabular-nums ${r.day_change_pct == null ? '' : r.day_change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {r.day_change_pct != null ? formatPct(r.day_change_pct, 2) : DASH}
                       </td>
@@ -263,7 +325,7 @@ export function StockCandidatesPage({ stock }: { stock: StockScannerState }) {
                     {isOpen && (
                       <tr className="border-b border-slate-800/60 bg-slate-900/80">
                         <td colSpan={colCount} className="px-4 py-4">
-                          <StockDetail r={r} />
+                          <StockDetail r={r} actions={<StockActions r={r} stock={stock} portfolio={portfolio} />} />
                         </td>
                       </tr>
                     )}
@@ -295,8 +357,26 @@ function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function StockDetail({ r }: { r: StockResult }) {
+export function StockDetail({ r, actions }: { r: StockResult; actions?: React.ReactNode }) {
   return (
+    <div className="space-y-4">
+      {actions}
+      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+        <TrendBadge trend={r.trend_classification} />
+        <span>Chart lines:</span>
+        <span className="text-sky-400">— Target</span>
+        <span className="text-red-400">— Stop</span>
+        <span className="text-emerald-400">— Primary / secondary support</span>
+        <span className="text-amber-400">— Resistance</span>
+      </div>
+      <TradingViewChart
+        ticker={r.ticker}
+        primarySupport={r.support}
+        secondarySupport={r.secondary_support ?? null}
+        resistance={r.resistance ?? null}
+        targetPrice={r.target_price}
+        stopPrice={r.stop_price}
+      />
     <div className="grid gap-6 text-xs md:grid-cols-3">
       <div>
         <div className="mb-2 text-sm font-semibold text-slate-200">Trade plan {r.company_name ? `· ${r.company_name}` : ''}</div>
@@ -314,7 +394,10 @@ function StockDetail({ r }: { r: StockResult }) {
         <div className="mb-2 text-sm font-semibold text-slate-200">Technicals</div>
         <Stat label="MA20 / MA50 / MA200" value={`${formatNum(r.ma20)} / ${formatNum(r.ma50)} / ${formatNum(r.ma200)}`} />
         <Stat label="vs MA50" value={formatPct(r.above_ma50_pct)} />
+        <Stat label="Trend status" value={r.trend_classification || 'Pending'} />
         <Stat label="MA200 trend" value={r.ma200_rising == null ? '--' : r.ma200_rising ? 'Rising ↑' : 'Falling ↓'} />
+        <Stat label="Secondary support" value={formatNum(r.secondary_support)} />
+        <Stat label="Resistance" value={formatNum(r.resistance)} />
         <Stat label="Primary support" value={formatNum(r.support)} />
         <Stat label="From 52-week high" value={r.from_52w_high_pct != null ? `−${formatPct(r.from_52w_high_pct)}` : '--'} />
         <Stat label="3-month return" value={formatPct(r.return_3m_pct)} />
@@ -344,6 +427,7 @@ function StockDetail({ r }: { r: StockResult }) {
         )}
         {r.history_note && <div className="mt-2 text-amber-300">History: {r.history_note}</div>}
       </div>
+    </div>
     </div>
   );
 }
