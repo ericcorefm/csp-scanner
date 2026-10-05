@@ -32,6 +32,15 @@ export interface StockRules {
   strength_enabled: boolean;
   max_from_52w_high: number | null;
   require_outperform_spy: boolean;
+  min_rs_vs_spy_pct: number | null;
+
+  pullback_enabled: boolean;
+  min_pullback_pct: number | null;
+  max_pullback_pct: number | null;
+  min_rebound_pct: number | null;
+  require_rsi_rising: boolean;
+  min_support_touches: number | null;
+  support_held_days: number | null;
 
   volatility_enabled: boolean;
   hv_min: number | null;
@@ -52,10 +61,12 @@ export interface StockRules {
 export const DEFAULT_STOCK_RULES: StockRules = {
   liquidity_enabled: true, min_price: 5, max_price: null, min_avg_volume: 1_000_000, min_dollar_volume_m: 20,
   trend_enabled: true, require_price_above_ma200: true, require_ma200_rising: true, ma200_slope_lookback: 20, require_ma50_above_ma200: true,
-  momentum_enabled: true, rsi_min: 40, rsi_max: 65,
+  momentum_enabled: true, rsi_min: 35, rsi_max: 60,
   support_enabled: true, support_dist_min: 0, support_dist_max: 8,
   extension_enabled: true, max_above_ma50: 10, max_above_ma200: 30,
-  strength_enabled: true, max_from_52w_high: 25, require_outperform_spy: true,
+  strength_enabled: true, max_from_52w_high: 25, require_outperform_spy: true, min_rs_vs_spy_pct: 0,
+  pullback_enabled: true, min_pullback_pct: 3, max_pullback_pct: 15,
+  min_rebound_pct: 1, require_rsi_rising: true, min_support_touches: 2, support_held_days: 10,
   volatility_enabled: true, hv_min: 25, hv_max: 70,
   trade_enabled: true, target_return_pct: 4, max_cycle_days: 30, stop_buffer_pct: 1,
   min_reward_risk: 0.5, min_prob_target: 40, min_pop: null,
@@ -98,6 +109,12 @@ export interface StockResult {
   support: number | null;
   dist_to_support_pct: number | null;
   trend_classification?: string;
+  pullback_pct?: number | null;
+  rebound_pct?: number | null;
+  rsi_3d_ago?: number | null;
+  rsi_rising?: boolean | null;
+  support_touches?: number | null;
+  support_held?: boolean | null;
   secondary_support?: number | null;
   resistance?: number | null;
   from_52w_high_pct: number | null;
