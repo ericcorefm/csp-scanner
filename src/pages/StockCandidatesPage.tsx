@@ -75,6 +75,8 @@ const COLUMNS: { key: SortKey; label: string; title: string; align?: 'left' | 'r
   { key: 'trend_classification', label: 'Trend', title: 'Trend status (same as Options): Bullish = price > MA20 > MA50 > MA200; Improving, Rebound, Stabilizing, Sideways, Downtrend', align: 'left' },
   { key: 'day_change_pct', label: 'Day %', title: 'Change vs previous close' },
   { key: 'rsi', label: 'RSI', title: 'RSI(14), Wilder — same as TradingView' },
+  { key: 'pullback_pct', label: 'Pullback', title: '% below the 20-day high (how far it has retraced)' },
+  { key: 'rebound_pct', label: 'Rebound', title: '% above the 5-day low (how far it has bounced)' },
   { key: 'above_ma200_pct', label: 'vs MA200', title: '% above the 200-day moving average (arrow = MA200 rising/falling)' },
   { key: 'dist_to_support_pct', label: 'Above Sup.', title: '% the price sits above primary support' },
   { key: 'hv_pct', label: 'HV', title: '60-day historical volatility (annualized)' },
@@ -299,6 +301,8 @@ export function StockCandidatesPage({ stock, portfolio }: { stock: StockScannerS
                         {r.day_change_pct != null ? formatPct(r.day_change_pct, 2) : DASH}
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.rsi != null ? formatNum(r.rsi, 1) : DASH}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.pullback_pct != null ? `−${formatPct(r.pullback_pct)}` : DASH}</td>
+                      <td className={`px-3 py-2.5 text-right tabular-nums ${r.rebound_pct == null ? '' : r.rebound_pct > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{r.rebound_pct != null ? `+${formatPct(r.rebound_pct)}` : DASH}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
                         {r.above_ma200_pct != null ? (
                           <span className="inline-flex items-center gap-1">
@@ -376,6 +380,8 @@ export function StockDetail({ r, actions }: { r: StockResult; actions?: React.Re
         resistance={r.resistance ?? null}
         targetPrice={r.target_price}
         stopPrice={r.stop_price}
+        defaultStyle="line"
+        defaultRange="1Y"
       />
     <div className="grid gap-6 text-xs md:grid-cols-3">
       <div>
@@ -397,6 +403,9 @@ export function StockDetail({ r, actions }: { r: StockResult; actions?: React.Re
         <Stat label="Trend status" value={r.trend_classification || 'Pending'} />
         <Stat label="MA200 trend" value={r.ma200_rising == null ? '--' : r.ma200_rising ? 'Rising ↑' : 'Falling ↓'} />
         <Stat label="Secondary support" value={formatNum(r.secondary_support)} />
+        <Stat label="Support tests (120d)" value={r.support_touches != null ? `${r.support_touches}×${r.support_held === false ? ' · broken recently' : r.support_held ? ' · holding' : ''}` : '--'} />
+        <Stat label="Pullback / rebound" value={r.pullback_pct != null && r.rebound_pct != null ? `−${formatPct(r.pullback_pct)} / +${formatPct(r.rebound_pct)}` : '--'} />
+        <Stat label="RSI now / 3 days ago" value={r.rsi != null && r.rsi_3d_ago != null ? `${formatNum(r.rsi, 1)} / ${formatNum(r.rsi_3d_ago, 1)} ${r.rsi_rising ? '↑' : '↓'}` : '--'} />
         <Stat label="Resistance" value={formatNum(r.resistance)} />
         <Stat label="Primary support" value={formatNum(r.support)} />
         <Stat label="From 52-week high" value={r.from_52w_high_pct != null ? `−${formatPct(r.from_52w_high_pct)}` : '--'} />

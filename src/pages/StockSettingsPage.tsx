@@ -25,6 +25,18 @@ const SECTIONS: Section[] = [
     ],
   },
   {
+    title: 'Pullback & Rebound', toggle: 'pullback_enabled',
+    description: 'Buy the bounce, not the fall: the stock has retraced from its recent high, is turning back up, and is sitting on a support level that has been tested and is holding.',
+    fields: [
+      { kind: 'num', key: 'min_pullback_pct', label: 'Min pullback from 20-day high', unit: '%', step: 1, hint: 'Has actually retraced (not buying at the top).' },
+      { kind: 'num', key: 'max_pullback_pct', label: 'Max pullback from 20-day high', unit: '%', step: 1, hint: 'Not a breakdown.' },
+      { kind: 'num', key: 'min_rebound_pct', label: 'Min rebound off 5-day low', unit: '%', step: 0.5, hint: 'Bounce has started.' },
+      { kind: 'bool', key: 'require_rsi_rising', label: 'Require RSI turning up (vs 3 days ago)' },
+      { kind: 'num', key: 'min_support_touches', label: 'Min support tests (120 days)', unit: 'times', step: 1, hint: 'Support proven by repeated bounces.' },
+      { kind: 'num', key: 'support_held_days', label: 'Support held for', unit: 'days', step: 1, hint: 'No close below support in this many days.' },
+    ],
+  },
+  {
     title: 'Long-term Trend', toggle: 'trend_enabled',
     description: 'Only stocks in a long-term uptrend that is still trending higher.',
     fields: [
@@ -63,7 +75,8 @@ const SECTIONS: Section[] = [
     description: 'Leaders trade near their highs and beat the market.',
     fields: [
       { kind: 'num', key: 'max_from_52w_high', label: 'Within % of 52-week high', unit: '%', step: 1 },
-      { kind: 'bool', key: 'require_outperform_spy', label: 'Require 3-month return > SPY' },
+      { kind: 'bool', key: 'require_outperform_spy', label: 'Require beating SPY (3-month return)' },
+      { kind: 'num', key: 'min_rs_vs_spy_pct', label: 'Beat SPY by more than', unit: '%', step: 1, hint: '0 = any outperformance; 5 = clear leader.' },
     ],
   },
   {
