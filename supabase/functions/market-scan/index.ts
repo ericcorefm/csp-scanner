@@ -2390,6 +2390,10 @@ type StockRules = {
   support_enabled: boolean; support_dist_min: number | null; support_dist_max: number | null;
   extension_enabled: boolean; max_above_ma50: number | null; max_above_ma200: number | null;
   strength_enabled: boolean; max_from_52w_high: number | null; require_outperform_spy: boolean;
+  min_rs_vs_spy_pct: number | null;
+  pullback_enabled: boolean; min_pullback_pct: number | null; max_pullback_pct: number | null;
+  min_rebound_pct: number | null; require_rsi_rising: boolean;
+  min_support_touches: number | null; support_held_days: number | null;
   volatility_enabled: boolean; hv_min: number | null; hv_max: number | null;
   trade_enabled: boolean; target_return_pct: number; max_cycle_days: number; stop_buffer_pct: number;
   min_reward_risk: number | null; min_prob_target: number | null; min_pop: number | null;
@@ -2400,10 +2404,15 @@ type StockRules = {
 const DEFAULT_STOCK_RULES: StockRules = {
   liquidity_enabled: true, min_price: 5, max_price: null, min_avg_volume: 1_000_000, min_dollar_volume_m: 20,
   trend_enabled: true, require_price_above_ma200: true, require_ma200_rising: true, ma200_slope_lookback: 20, require_ma50_above_ma200: true,
-  momentum_enabled: true, rsi_min: 40, rsi_max: 65,
+  momentum_enabled: true, rsi_min: 35, rsi_max: 60,
   support_enabled: true, support_dist_min: 0, support_dist_max: 8,
   extension_enabled: true, max_above_ma50: 10, max_above_ma200: 30,
   strength_enabled: true, max_from_52w_high: 25, require_outperform_spy: true,
+  min_rs_vs_spy_pct: 0,
+  // Retracement + rebound off a healthy (tested, holding) support.
+  pullback_enabled: true, min_pullback_pct: 3, max_pullback_pct: 15,
+  min_rebound_pct: 1, require_rsi_rising: true,
+  min_support_touches: 2, support_held_days: 10,
   volatility_enabled: true, hv_min: 25, hv_max: 70,
   trade_enabled: true, target_return_pct: 4, max_cycle_days: 30, stop_buffer_pct: 1,
   // Model odds (zero drift) depend mostly on stop/target geometry, so they are
@@ -2442,6 +2451,10 @@ function stockRequiredBars(r: StockRules): number {
     if (r.require_outperform_spy) n = Math.max(n, 64);
   }
   if (r.volatility_enabled && (r.hv_min != null || r.hv_max != null)) n = Math.max(n, 61);
+  if (r.pullback_enabled) {
+    if (r.min_pullback_pct != null || r.max_pullback_pct != null || r.min_rebound_pct != null || r.require_rsi_rising) n = Math.max(n, 25);
+    if (r.min_support_touches != null || r.support_held_days != null) n = Math.max(n, 120);
+  }
   if (r.trade_enabled && (r.min_reward_risk != null || r.min_prob_target != null || r.min_pop != null)) n = Math.max(n, 61);
   // Historical replay needs a cycle of forward bars plus 60 entry samples.
   if (r.trade_enabled && (r.min_hist_hit_rate != null || r.min_exp_annualized != null)) {
@@ -2589,6 +2602,28 @@ function evaluateStock(ticker: string, company: string, bars: HistoryBar[], grou
   const rsVsSpy = ret3m != null && spyRet3m != null ? ret3m - spyRet3m : null;
   const hv = historicalVolatility(closes, 60);
 
+  // ── Pullback & rebound metrics ──
+  const high20 = n >= 20 ? Math.max(...bars.slice(-20).map((b) => b.high)) : null;
+  const pullbackPct = high20 != null && price != null && high20 > 0 ? ((high20 - price) / high20) * 100 : null;
+  const low5 = n >= 5 ? Math.min(...bars.slice(-5).map((b) => b.low)) : null;
+  const reboundPct = low5 != null && price != null && low5 > 0 ? (price / low5 - 1) * 100 : null;
+  const rsi3ago = n >= 23 ? rsi(closes.slice(0, n - 3).slice(-250)) : null;
+  const rsiRising = rsiVal != null && rsi3ago != null ? rsiVal > rsi3ago : null;
+  // Healthy support: tested several separate times (lows within 2% of it, at
+  // least 5 sessions apart, last 120 days) and no close below it recently.
+  let supportTouches: number | null = null;
+  let supportHeld: boolean | null = null;
+  if (support != null && n >= 60) {
+    const recent = bars.slice(-120);
+    let touches = 0, lastIdx = -100;
+    recent.forEach((b, i) => {
+      if (Math.abs(b.low - support) / support <= 0.02 && i - lastIdx >= 5) { touches++; lastIdx = i; }
+    });
+    supportTouches = touches;
+    const heldDays = Math.max(1, Number(rules.support_held_days) || 10);
+    supportHeld = bars.slice(-heldDays).every((b) => b.close >= support * 0.995);
+  }
+
   // ── Trade plan (no commission, fractional shares) ──
   const targetPct = Number(rules.target_return_pct) || 4;
   const tradingDays = Math.max(1, Math.round((Number(rules.max_cycle_days) || 30) * 252 / 365));
@@ -2678,8 +2713,35 @@ function evaluateStock(ticker: string, company: string, bars: HistoryBar[], grou
       else check(`Within ${rules.max_from_52w_high}% of 52w high`, fromHigh <= rules.max_from_52w_high, 'Too far from 52-week high');
     }
     if (rules.require_outperform_spy) {
+      const minRs = Number(rules.min_rs_vs_spy_pct ?? 0) || 0;
       if (rsVsSpy == null) missing('3-month return vs SPY', spyRet3m == null ? 'SPY history unavailable' : 'Insufficient history');
-      else check('Outperforming SPY (3 months)', rsVsSpy > 0, 'Lagging SPY');
+      else check(`Beats SPY by > ${minRs}% (3 months)`, rsVsSpy > minRs, 'Lagging SPY');
+    }
+  }
+  // ── Pullback & Rebound (retracing, then bouncing off a healthy support) ──
+  if (rules.pullback_enabled) {
+    if (rules.min_pullback_pct != null || rules.max_pullback_pct != null) {
+      if (pullbackPct == null) missing('Pullback from 20-day high', 'Insufficient history');
+      else {
+        if (rules.min_pullback_pct != null) check(`Pulled back ≥ ${rules.min_pullback_pct}% from 20-day high`, pullbackPct >= rules.min_pullback_pct, 'No pullback yet');
+        if (rules.max_pullback_pct != null) check(`Pulled back ≤ ${rules.max_pullback_pct}% from 20-day high`, pullbackPct <= rules.max_pullback_pct, 'Pullback too deep');
+      }
+    }
+    if (rules.min_rebound_pct != null) {
+      if (reboundPct == null) missing('Rebound off 5-day low', 'Insufficient history');
+      else check(`Rebounded ≥ ${rules.min_rebound_pct}% off 5-day low`, reboundPct >= rules.min_rebound_pct, 'No rebound yet');
+    }
+    if (rules.require_rsi_rising) {
+      if (rsiRising == null) missing('RSI turning up', 'Insufficient history');
+      else check('RSI turning up (vs 3 days ago)', rsiRising, 'RSI still falling');
+    }
+    if (rules.min_support_touches != null) {
+      if (supportTouches == null) missing('Support tests', 'Primary support unavailable');
+      else check(`Support tested ≥ ${rules.min_support_touches}× (120 days)`, supportTouches >= rules.min_support_touches, 'Support not proven');
+    }
+    if (rules.support_held_days != null) {
+      if (supportHeld == null) missing('Support holding', 'Primary support unavailable');
+      else check(`No close below support (${rules.support_held_days} days)`, supportHeld, 'Support broken recently');
     }
   }
   // ── Volatility ──
@@ -2729,6 +2791,9 @@ function evaluateStock(ticker: string, company: string, bars: HistoryBar[], grou
     above_ma50_pct: r2(aboveMa50, 1), above_ma200_pct: r2(aboveMa200, 1),
     support: r2(support), dist_to_support_pct: r2(distToSupport, 1),
     trend_classification: trendClass,
+    pullback_pct: r2(pullbackPct, 1), rebound_pct: r2(reboundPct, 1),
+    rsi_3d_ago: r2(rsi3ago, 1), rsi_rising: rsiRising,
+    support_touches: supportTouches, support_held: supportHeld,
     secondary_support: r2(secondarySupport), resistance: r2(resistanceLevel),
     from_52w_high_pct: r2(fromHigh, 1), return_3m_pct: r2(ret3m, 1), rs_vs_spy_pct: r2(rsVsSpy, 1),
     avg_volume: avgVol != null ? Math.round(avgVol) : null, dollar_volume_m: r2(dollarVolM, 1),
@@ -2854,5 +2919,3 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   console.log(`[STOCK SCAN] mode=${scanMode} screened=${tickers.length} Q=${counts.qualified} P=${counts.pending} R=${counts.rejected} needBars=${needBars} fetched=${historyFetched} rateLimited=${ctx.historyRateLimited}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), results, counts });
 }
-
-// redeploy 2026-10-02c
