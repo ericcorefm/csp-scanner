@@ -17,7 +17,17 @@ interface Props {
   primarySupport?: number | null;
   secondarySupport?: number | null;
   resistance?: number | null;
+  /** Optional trade-plan levels (stock scanner). */
+  targetPrice?: number | null;
+  stopPrice?: number | null;
+  /** Initial chart style (user can switch). Options keeps 'candle'. */
+  defaultStyle?: ChartStyle;
+  /** Initial visible range for daily bars (user can switch). */
+  defaultRange?: ChartRange;
 }
+
+type ChartStyle = 'line' | 'candle';
+type ChartRange = '1Y' | '2Y';
 
 const RESOLUTIONS = ['1D', '1W', '1M'] as const;
 type Resolution = (typeof RESOLUTIONS)[number];
@@ -52,7 +62,10 @@ function aggregateBars(bars: OhlcBar[], resolution: Resolution): OhlcBar[] {
   })).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export function TradingViewChart({ ticker, primarySupport, secondarySupport, resistance }: Props) {
+export function TradingViewChart({ ticker, primarySupport, secondarySupport, resistance, targetPrice, stopPrice, defaultStyle = 'candle', defaultRange = '2Y' }: Props) {
+  const [chartStyle, setChartStyle] = useState<ChartStyle>(defaultStyle);
+  const [range, setRange] = useState<ChartRange>(defaultRange);
+  const lineRef = useRef<ISeriesApi<'Line'> | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -104,6 +117,14 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
       wickDownColor: '#ef4444',
     });
 
+    const lineSeries = chart.addLineSeries({
+      color: '#38bdf8',
+      lineWidth: 2,
+      priceLineVisible: true,
+      lastValueVisible: true,
+      visible: false,
+    });
+
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: 'volume' },
       priceScaleId: 'vol',
@@ -115,6 +136,7 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
 
     chartRef.current = chart;
     candleRef.current = candleSeries;
+    lineRef.current = lineSeries;
     volumeRef.current = volumeSeries;
 
     const resizeObserver = new ResizeObserver((entries) => {
@@ -131,6 +153,7 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
       chart.remove();
       chartRef.current = null;
       candleRef.current = null;
+      lineRef.current = null;
       volumeRef.current = null;
       supportLinesRef.current = [];
     };
@@ -158,6 +181,10 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
 
     candleRef.current.setData(candleData);
     volumeRef.current.setData(volumeData);
+    // Line view = closing prices. Only one of the two series is shown.
+    lineRef.current?.setData(candleData.map((c) => ({ time: c.time, value: c.close })));
+    candleRef.current.applyOptions({ visible: chartStyle === 'candle' });
+    lineRef.current?.applyOptions({ visible: chartStyle === 'line' });
 
     // Clear old support/resistance lines
     for (const line of supportLinesRef.current) {
@@ -195,11 +222,25 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
     if (resistance != null && resistance > 0) {
       addPriceLine(resistance, '#f59e0b', 'Resistance');
     }
+    if (targetPrice != null && targetPrice > 0) {
+      addPriceLine(targetPrice, '#38bdf8', 'Target');
+    }
+    if (stopPrice != null && stopPrice > 0) {
+      addPriceLine(stopPrice, '#ef4444', 'Stop');
+    }
 
-    chartRef.current?.timeScale().fitContent();
+    // 1Y shows the last 12 months of daily bars (older data stays scrollable).
+    const lastTime = candleData[candleData.length - 1].time as number;
+    const firstTime = candleData[0].time as number;
+    const yearAgo = lastTime - 365 * 86400;
+    if (res === '1D' && range === '1Y' && yearAgo > firstTime) {
+      chartRef.current?.timeScale().setVisibleRange({ from: yearAgo as Time, to: lastTime as Time });
+    } else {
+      chartRef.current?.timeScale().fitContent();
+    }
     console.log(`[PERF] ${ticker} chart rendered ${Date.now() - chartStart}ms (${aggregated.length} ${res} bars)`);
     return true;
-  }, [ticker, primarySupport, secondarySupport, resistance]);
+  }, [ticker, primarySupport, secondarySupport, resistance, targetPrice, stopPrice, chartStyle, range]);
 
   // Fetch bars when ticker or resolution changes — cache first, then fetch
   useEffect(() => {
@@ -247,7 +288,7 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
     if (cached && cached.length > 0) {
       renderBars(cached, resolution);
     }
-  }, [primarySupport, secondarySupport, resistance, loading, ticker, resolution, renderBars]);
+  }, [primarySupport, secondarySupport, resistance, targetPrice, stopPrice, loading, ticker, resolution, renderBars]);
 
   const handleRetry = () => {
     setError(null);
@@ -270,6 +311,30 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
           <span className="text-xs text-slate-500">{ticker}</span>
         </div>
         <div className="flex items-center gap-1">
+          {(['line', 'candle'] as ChartStyle[]).map((st) => (
+            <button
+              key={st}
+              onClick={() => setChartStyle(st)}
+              className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                chartStyle === st ? 'bg-sky-500 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
+              }`}
+            >
+              {st === 'line' ? 'Line' : 'Candles'}
+            </button>
+          ))}
+          <span className="mx-1 h-4 w-px bg-slate-700" />
+          {resolution === '1D' && (['1Y', '2Y'] as ChartRange[]).map((rg) => (
+            <button
+              key={rg}
+              onClick={() => setRange(rg)}
+              className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                range === rg ? 'bg-sky-500 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
+              }`}
+            >
+              {rg}
+            </button>
+          ))}
+          {resolution === '1D' && <span className="mx-1 h-4 w-px bg-slate-700" />}
           {RESOLUTIONS.map((r) => (
             <button
               key={r}
