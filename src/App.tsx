@@ -49,6 +49,9 @@ function App() {
     setCurrentPage(page);
   };
 
+  // Clicking a ticker on a Stocks page opens Analyze Stock and runs it.
+  const analyzeStock = (ticker: string) => handleNavigate('analyze', ticker);
+
   if (state.loading) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center">
@@ -75,11 +78,13 @@ function App() {
     <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock} stockOpenCount={portfolio.openPositions.length}>
       {isStocks && currentPage === 'candidates' && <StockCandidatesPage stock={stock} portfolio={portfolio} />}
       {isStocks && currentPage === 'settings' && <StockSettingsPage stock={stock} />}
-      {isStocks && currentPage === 'analyze' && <StockAnalyzePage stock={stock} portfolio={portfolio} />}
-      {isStocks && currentPage === 'universe' && <StockUniversePage stock={stock} portfolio={portfolio} optionsUniverse={state.scanUniverse} />}
-      {isStocks && currentPage === 'open' && <StockPositionsPage portfolio={portfolio} view="open" />}
-      {isStocks && currentPage === 'closed' && <StockPositionsPage portfolio={portfolio} view="closed" />}
-      {isStocks && currentPage === 'summary' && <StockSummaryPage stock={stock} portfolio={portfolio} />}
+      {isStocks && currentPage === 'analyze' && (
+        <StockAnalyzePage stock={stock} portfolio={portfolio} autoTicker={autoAnalyzeTicker} onConsumeAutoTicker={() => setAutoAnalyzeTicker(null)} />
+      )}
+      {isStocks && currentPage === 'universe' && <StockUniversePage stock={stock} portfolio={portfolio} optionsUniverse={state.scanUniverse} onAnalyze={analyzeStock} />}
+      {isStocks && currentPage === 'open' && <StockPositionsPage portfolio={portfolio} view="open" onAnalyze={analyzeStock} />}
+      {isStocks && currentPage === 'closed' && <StockPositionsPage portfolio={portfolio} view="closed" onAnalyze={analyzeStock} />}
+      {isStocks && currentPage === 'summary' && <StockSummaryPage stock={stock} portfolio={portfolio} onAnalyze={analyzeStock} />}
       {!isStocks && currentPage === 'candidates' && (
         <CandidatesPage state={state} onNavigate={handleNavigate} />
       )}
