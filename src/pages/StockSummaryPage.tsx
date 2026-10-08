@@ -5,6 +5,7 @@ import type { StockPortfolioState } from '@/lib/stockPortfolio';
 import { daysBetween, positionHealth, todayISO } from '@/lib/stockTypes';
 import { Badge, formatNum, formatPct } from '@/components/ui';
 import { TrendBadge } from '@/pages/StockCandidatesPage';
+import { TickerLink } from '@/components/TickerLink';
 
 const money = (v: number) => `${v < 0 ? '−' : ''}$${formatNum(Math.abs(v))}`;
 const tone = (v: number | null) => (v == null ? 'text-slate-300' : v >= 0 ? 'text-emerald-400' : 'text-red-400');
@@ -22,7 +23,7 @@ function KV({ k, v, t }: { k: string; v: string; t?: string }) {
   return <div className="flex justify-between py-1 text-sm"><span className="text-slate-500">{k}</span><span className={`tabular-nums ${t ?? 'text-slate-200'}`}>{v}</span></div>;
 }
 
-export function StockSummaryPage({ stock, portfolio }: { stock: StockScannerState; portfolio: StockPortfolioState }) {
+export function StockSummaryPage({ stock, portfolio, onAnalyze }: { stock: StockScannerState; portfolio: StockPortfolioState; onAnalyze?: (ticker: string) => void }) {
   const today = todayISO();
   const qualified = stock.results.filter((r) => r.status === 'qualified');
 
@@ -71,7 +72,7 @@ export function StockSummaryPage({ stock, portfolio }: { stock: StockScannerStat
               <tbody>
                 {qualified.slice(0, 10).map((r) => (
                   <tr key={r.ticker} className="border-t border-slate-800/60">
-                    <td className="py-1.5 font-semibold text-slate-100">{r.ticker}</td>
+                    <td className="py-1.5 font-semibold text-slate-100"><TickerLink ticker={r.ticker} onAnalyze={onAnalyze} /></td>
                     <td><TrendBadge trend={r.trend_classification} /></td>
                     <td className="text-right tabular-nums text-slate-300">{formatNum(r.price)}</td>
                     <td className="text-right tabular-nums text-slate-300">{formatPct(r.hist_hit_rate_pct, 0)}</td>
@@ -99,7 +100,7 @@ export function StockSummaryPage({ stock, portfolio }: { stock: StockScannerStat
             <ul className="space-y-2 text-sm">
               {attention.map(({ p, price, health, held }) => (
                 <li key={p.id} className="flex items-center justify-between gap-3">
-                  <span className="font-semibold text-slate-100">{p.ticker}</span>
+                  <TickerLink ticker={p.ticker} onAnalyze={onAnalyze} className="font-semibold text-slate-100" />
                   <Badge variant={health === 'Target hit' || health === 'Near target' ? 'success' : health === 'Stop hit' ? 'error' : 'warning'}>{health}</Badge>
                   <span className="text-xs text-slate-500 tabular-nums">now {price != null ? formatNum(price) : '--'} · target {p.target_price != null ? formatNum(p.target_price) : '--'} · stop {p.stop_price != null ? formatNum(p.stop_price) : '--'} · day {held}/{p.max_cycle_days}</span>
                 </li>

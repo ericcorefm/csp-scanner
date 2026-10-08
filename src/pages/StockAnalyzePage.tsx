@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Search, CheckCircle2, XCircle, AlertTriangle, Loader2 } from 'lucide-react';
 import type { StockScannerState } from '@/lib/stockStore';
 import type { StockPortfolioState } from '@/lib/stockPortfolio';
@@ -16,15 +16,24 @@ function Metric({ label, value, tone = 'text-slate-100' }: { label: string; valu
 }
 
 /** Analyze any ticker against your saved Stock Settings (same engine as the scan). */
-export function StockAnalyzePage({ stock, portfolio }: { stock: StockScannerState; portfolio: StockPortfolioState }) {
+export function StockAnalyzePage({
+  stock, portfolio, autoTicker, onConsumeAutoTicker,
+}: {
+  stock: StockScannerState;
+  portfolio: StockPortfolioState;
+  /** Ticker clicked elsewhere in the app; analyzed automatically on arrival. */
+  autoTicker?: string | null;
+  onConsumeAutoTicker?: () => void;
+}) {
   const [ticker, setTicker] = useState('');
   const [result, setResult] = useState<StockResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
-  const run = async () => {
-    const t = ticker.trim().toUpperCase();
+  const run = async (override?: string) => {
+    const t = (override ?? ticker).trim().toUpperCase();
     if (!t) return;
+    setTicker(t);
     setError(null); setNote(null);
     const res = await stock.analyze(t);
     if (res.error) { setError(res.error); setResult(null); return; }
@@ -33,6 +42,15 @@ export function StockAnalyzePage({ stock, portfolio }: { stock: StockScannerStat
       setNote('Massive rate limit reached while loading this stock’s history — wait 1–2 minutes and Analyze again.');
     }
   };
+
+  // Run once for a ticker clicked on another page (waits for stock settings to load).
+  useEffect(() => {
+    if (!autoTicker || !stock.profile) return;
+    const t = autoTicker;
+    onConsumeAutoTicker?.();
+    void run(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoTicker, stock.profile]);
 
   const ann = (v: number | null) => (v == null ? '--' : v >= 1000 ? '>1,000%' : formatPct(v, 0));
 

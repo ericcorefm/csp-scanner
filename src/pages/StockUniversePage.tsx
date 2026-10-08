@@ -5,14 +5,15 @@ import type { StockPortfolioState } from '@/lib/stockPortfolio';
 import type { StockStatus } from '@/lib/stockTypes';
 import { Badge, formatNum } from '@/components/ui';
 import { TrendBadge } from '@/pages/StockCandidatesPage';
+import { TickerLink } from '@/components/TickerLink';
 
 /**
  * Stocks watchlist used by "My Scan Universe" on Stock Candidates.
  * Separate from the Options (CSP) Scan Universe.
  */
 export function StockUniversePage({
-  stock, portfolio, optionsUniverse,
-}: { stock: StockScannerState; portfolio: StockPortfolioState; optionsUniverse: string[] }) {
+  stock, portfolio, optionsUniverse, onAnalyze,
+}: { stock: StockScannerState; portfolio: StockPortfolioState; optionsUniverse: string[]; onAnalyze?: (ticker: string) => void }) {
   const [input, setInput] = useState('');
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -122,7 +123,7 @@ export function StockUniversePage({
                         setSelected(next);
                       }} />
                     </td>
-                    <td className="px-3 py-2 font-semibold text-slate-100">{u.symbol}<span className="ml-2 text-xs font-normal text-slate-500">{u.company_name ?? ''}</span></td>
+                    <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={u.symbol} onAnalyze={onAnalyze} /><span className="ml-2 text-xs font-normal text-slate-500">{u.company_name ?? ''}</span></td>
                     <td className="px-3 py-2">
                       <button
                         onClick={() => void portfolio.setUniverseEnabled([u.id], !u.enabled)}

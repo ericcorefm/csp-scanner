@@ -4,6 +4,7 @@ import type { StockPortfolioState } from '@/lib/stockPortfolio';
 import type { StockPosition, PositionHealth } from '@/lib/stockTypes';
 import { daysBetween, positionHealth, todayISO } from '@/lib/stockTypes';
 import { Badge, formatNum, formatPct } from '@/components/ui';
+import { TickerLink } from '@/components/TickerLink';
 
 const HEALTH_VARIANT: Record<PositionHealth, 'success' | 'warning' | 'error' | 'neutral' | 'info'> = {
   'Target hit': 'success', 'Near target': 'success', Active: 'info',
@@ -66,7 +67,7 @@ function CloseModal({ p, price, onClose, onConfirm }: {
   );
 }
 
-export function StockPositionsPage({ portfolio, view }: { portfolio: StockPortfolioState; view: 'open' | 'closed' }) {
+export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: StockPortfolioState; view: 'open' | 'closed'; onAnalyze?: (ticker: string) => void }) {
   const [closing, setClosing] = useState<StockPosition | null>(null);
   const today = todayISO();
 
@@ -126,7 +127,7 @@ export function StockPositionsPage({ portfolio, view }: { portfolio: StockPortfo
               <tbody>
                 {openRows.map(({ p, q, price, cost, pl, plPct, held, health }) => (
                   <tr key={p.id} className="border-b border-slate-800/60">
-                    <td className="px-3 py-2 font-semibold text-slate-100">{p.ticker}</td>
+                    <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
                     <td className="px-3 py-2"><Badge variant={HEALTH_VARIANT[health]}>{health}</Badge></td>
                     <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
                     <td className={`px-3 py-2 text-right tabular-nums ${held > p.max_cycle_days ? 'text-amber-400' : 'text-slate-300'}`}>{held}/{p.max_cycle_days}d</td>
@@ -198,7 +199,7 @@ export function StockPositionsPage({ portfolio, view }: { portfolio: StockPortfo
             <tbody>
               {closedRows.map(({ p, pl, plPct, held, ann }) => (
                 <tr key={p.id} className="border-b border-slate-800/60">
-                  <td className="px-3 py-2 font-semibold text-slate-100">{p.ticker}</td>
+                  <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
                   <td className="px-3 py-2"><Badge variant={(pl ?? 0) > 0 ? 'success' : 'error'}>{(pl ?? 0) > 0 ? 'Win' : 'Loss'}</Badge></td>
                   <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
                   <td className="px-3 py-2 text-slate-400">{p.exit_date ?? '--'}</td>
