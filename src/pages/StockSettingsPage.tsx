@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Save, RotateCcw, AlertCircle, CheckCircle2 } from 'lucide-react';
 import type { StockScannerState } from '@/lib/stockStore';
-import { DEFAULT_STOCK_RULES, type StockRules } from '@/lib/stockTypes';
+import { DEFAULT_STOCK_RULES, BALANCED_STOCK_RULES, STRICT_STOCK_RULES, type StockRules } from '@/lib/stockTypes';
 
 type NumField = { kind: 'num'; key: keyof StockRules; label: string; hint?: string; unit?: string; required?: boolean; step?: number };
 type BoolField = { kind: 'bool'; key: keyof StockRules; label: string; hint?: string };
@@ -163,6 +163,18 @@ export function StockSettingsPage({ stock }: { stock: StockScannerState }) {
               {message.ok ? <CheckCircle2 className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />} {message.text}
             </span>
           )}
+          <span className="text-xs text-slate-500">Preset:</span>
+          {([['Balanced', BALANCED_STOCK_RULES, '3–8 stocks/day typical'], ['Strict', STRICT_STOCK_RULES, '1–2 stocks/day, every confirmation']] as const).map(([label, preset, hint]) => (
+            <button
+              key={label}
+              title={hint}
+              // Presets change the rules; your position size stays as you set it.
+              onClick={() => setRules({ ...preset, position_size: rules.position_size })}
+              className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800"
+            >
+              {label}
+            </button>
+          ))}
           <button
             onClick={() => setRules(DEFAULT_STOCK_RULES)}
             className="flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800"
