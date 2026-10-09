@@ -58,7 +58,10 @@ export interface StockRules {
   position_size: number;
 }
 
-export const DEFAULT_STOCK_RULES: StockRules = {
+/**
+ * Strict preset: every confirmation required. Typically 1–2 stocks a day.
+ */
+export const STRICT_STOCK_RULES: StockRules = {
   liquidity_enabled: true, min_price: 5, max_price: null, min_avg_volume: 1_000_000, min_dollar_volume_m: 20,
   trend_enabled: true, require_price_above_ma200: true, require_ma200_rising: true, ma200_slope_lookback: 20, require_ma50_above_ma200: true,
   momentum_enabled: true, rsi_min: 35, rsi_max: 60,
@@ -73,6 +76,35 @@ export const DEFAULT_STOCK_RULES: StockRules = {
   min_hist_hit_rate: 50, min_exp_annualized: 10,
   position_size: 1000,
 };
+
+/**
+ * Balanced preset (default): same strategy — uptrend above a rising MA200,
+ * pullback that has started to bounce near support, 4% target in ≤30 days —
+ * but drops checks that duplicate each other and widens tight ranges.
+ * Kept as quality guards: the trend rules, Hist. hit rate, Exp. annualized
+ * and Reward:Risk.
+ */
+export const BALANCED_STOCK_RULES: StockRules = {
+  ...STRICT_STOCK_RULES,
+  // Liquidity: still liquid, includes more mid caps
+  min_avg_volume: 500_000, min_dollar_volume_m: 10,
+  // Momentum: allow slightly deeper dips and stronger bounces
+  rsi_min: 30, rsi_max: 65,
+  // Don't Chase: OFF — the pullback rule already prevents buying at the top
+  extension_enabled: false,
+  // Relative strength: leaders near highs, without requiring a beat of SPY
+  max_from_52w_high: 30, require_outperform_spy: false,
+  // Pullback & rebound: one support test, rebound itself confirms the turn
+  min_pullback_pct: 2, min_rebound_pct: 0.5, require_rsi_rising: false,
+  min_support_touches: 1, support_held_days: 5,
+  // Volatility: a little wider
+  hv_min: 18, hv_max: 75,
+  // Trade: model odds off (they duplicate Hist. hit rate); real-history guards kept
+  min_prob_target: null, min_pop: null,
+  min_hist_hit_rate: 45, min_exp_annualized: 5,
+};
+
+export const DEFAULT_STOCK_RULES: StockRules = BALANCED_STOCK_RULES;
 
 export interface StockProfile {
   id: string;
