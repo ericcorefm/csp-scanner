@@ -59,6 +59,14 @@ export function useStockPortfolio() {
     if (e) { setError(e.message); await loadUniverse(); }
   }, [loadUniverse]);
 
+  const removeAllFromUniverse = useCallback(async () => {
+    const ids = universe.map((u) => u.id);
+    if (!ids.length) return;
+    setUniverse([]);
+    const { error: e } = await supabase.from('stock_universe').delete().in('id', ids);
+    if (e) { setError(e.message); await loadUniverse(); }
+  }, [universe, loadUniverse]);
+
   const removeFromUniverse = useCallback(async (ids: string[]) => {
     if (!ids.length) return;
     setUniverse((prev) => prev.filter((u) => !ids.includes(u.id)));
@@ -82,6 +90,43 @@ export function useStockPortfolio() {
     await loadPositions();
     return { ok: true, error: null as string | null };
   }, [loadPositions]);
+
+  /** Edit any saved fields of a position. */
+  const updatePosition = useCallback(async (id: string, patch: Partial<StockPosition>) => {
+    const { id: _ignore, created_at: _c, ...rest } = patch as StockPosition; // eslint-disable-line @typescript-eslint/no-unused-vars
+    const clean: Record<string, unknown> = { ...rest, updated_at: new Date().toISOString() };
+    if (typeof clean.ticker === 'string') clean.ticker = (clean.ticker as string).toUpperCase().trim();
+    const { error: e } = await supabase.from('stock_positions').update(clean).eq('id', id);
+    if (e) return { ok: false, error: e.message };
+    await loadPositions();
+    return { ok: true, error: null as string | null };
+  }, [loadPositions]);
+
+  /**
+   * Import rows from Excel. Rows whose ID matches an existing position are
+   * updated; all others are added. Returns counts for the confirmation message.
+   */
+  const importPositions = useCallback(async (rows: Partial<StockPosition>[]) => {
+    const existing = new Set(positions.map((p) => p.id));
+    const updates = rows.filter((r) => r.id && existing.has(r.id));
+    const inserts = rows.filter((r) => !r.id || !existing.has(r.id)).map((r) => {
+      const { id: _i, ...rest } = r; // eslint-disable-line @typescript-eslint/no-unused-vars
+      return rest;
+    });
+    let updated = 0, added = 0;
+    const errors: string[] = [];
+    for (const r of updates) {
+      const { id, ...patch } = r;
+      const { error: e } = await supabase.from('stock_positions').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', id!);
+      if (e) errors.push(`${r.ticker}: ${e.message}`); else updated++;
+    }
+    if (inserts.length) {
+      const { error: e } = await supabase.from('stock_positions').insert(inserts);
+      if (e) errors.push(e.message); else added = inserts.length;
+    }
+    await loadPositions();
+    return { added, updated, errors };
+  }, [positions, loadPositions]);
 
   const reopenPosition = useCallback(async (id: string) => {
     const { error: e } = await supabase.from('stock_positions')
@@ -122,11 +167,11 @@ export function useStockPortfolio() {
   return {
     universe,
     enabledSymbols: universe.filter((u) => u.enabled).map((u) => u.symbol),
-    addToUniverse, setUniverseEnabled, removeFromUniverse,
+    addToUniverse, setUniverseEnabled, removeFromUniverse, removeAllFromUniverse,
     positions,
     openPositions: positions.filter((p) => p.status === 'open'),
     closedPositions: positions.filter((p) => p.status === 'closed'),
-    addPosition, closePosition, reopenPosition, deletePosition,
+    addPosition, closePosition, reopenPosition, deletePosition, updatePosition, importPositions,
     quotes, quotesLoading, refreshQuotes,
     error,
   };
