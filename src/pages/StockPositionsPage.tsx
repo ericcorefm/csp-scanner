@@ -1,5 +1,9 @@
-import { useMemo, useState } from 'react';
-import { RefreshCw, Trash2, CheckSquare, RotateCcw, X } from 'lucide-react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { RefreshCw, Trash2, CheckSquare, RotateCcw, X, Pencil, Download, Upload } from 'lucide-react';
+import { useSort } from '@/lib/useSort';
+import { SortTh } from '@/components/SortTh';
+import { EditStockPositionModal } from '@/components/EditStockPositionModal';
+import { exportPositionsToExcel, readPositionsFromExcel } from '@/lib/positionsExcel';
 import type { StockPortfolioState } from '@/lib/stockPortfolio';
 import type { StockPosition, PositionHealth } from '@/lib/stockTypes';
 import { daysBetween, positionHealth, todayISO } from '@/lib/stockTypes';
@@ -67,8 +71,63 @@ function CloseModal({ p, price, onClose, onConfirm }: {
   );
 }
 
+type OpenKey = 'ticker' | 'status' | 'entry_date' | 'held' | 'entry' | 'shares' | 'cost' | 'current' | 'pl' | 'plPct' | 'target';
+type ClosedKey = 'ticker' | 'result' | 'entry_date' | 'exit_date' | 'held' | 'entry' | 'exit' | 'shares' | 'pl' | 'plPct' | 'ann';
+
+/** Export / Import buttons shared by the Open and Closed pages. */
+function ExcelButtons({ portfolio, view }: { portfolio: StockPortfolioState; view: 'open' | 'closed' }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const positions = view === 'open' ? portfolio.openPositions : portfolio.closedPositions;
+
+  const onFile = async (file: File) => {
+    setBusy(true); setMsg(null);
+    try {
+      const { rows, skipped } = await readPositionsFromExcel(file, view);
+      if (!rows.length) { setMsg({ ok: false, text: skipped[0] ?? 'No rows to import.' }); return; }
+      const res = await portfolio.importPositions(rows);
+      const parts = [`Added ${res.added}`, `updated ${res.updated}`];
+      if (skipped.length) parts.push(`skipped ${skipped.length}`);
+      setMsg({
+        ok: res.errors.length === 0,
+        text: `${parts.join(', ')}.` + (res.errors.length ? ` Errors: ${res.errors.slice(0, 2).join('; ')}` : '') + (skipped.length ? ` (${skipped.slice(0, 2).join('; ')}${skipped.length > 2 ? '…' : ''})` : ''),
+      });
+    } catch (e) {
+      setMsg({ ok: false, text: `Could not read the file: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button
+        onClick={() => void exportPositionsToExcel(positions, view, portfolio.quotes)}
+        disabled={!positions.length}
+        className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+        title="Download these positions as an Excel file"
+      >
+        <Download className="h-4 w-4" /> Export Excel
+      </button>
+      <button
+        onClick={() => fileRef.current?.click()}
+        disabled={busy}
+        className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+        title="Rows with a matching ID update that position; rows without an ID are added"
+      >
+        <Upload className="h-4 w-4" /> {busy ? 'Importing…' : 'Import Excel'}
+      </button>
+      <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }} />
+      {msg && <span className={`w-full text-right text-xs ${msg.ok ? 'text-emerald-400' : 'text-amber-400'}`}>{msg.text}</span>}
+    </div>
+  );
+}
+
 export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: StockPortfolioState; view: 'open' | 'closed'; onAnalyze?: (ticker: string) => void }) {
   const [closing, setClosing] = useState<StockPosition | null>(null);
+  const [editing, setEditing] = useState<StockPosition | null>(null);
   const today = todayISO();
 
   const openRows = useMemo(() => portfolio.openPositions.map((p) => {
@@ -77,7 +136,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     const cost = p.entry_price * p.shares;
     const value = price != null ? price * p.shares : null;
     const pl = value != null ? value - cost : null;
-    return { p, q, price, cost, value, pl, plPct: pl != null ? (pl / cost) * 100 : null, held: daysBetween(p.entry_date, today), health: positionHealth(p, price) };
+    return { p, price, cost, value, pl, plPct: pl != null ? (pl / cost) * 100 : null, held: daysBetween(p.entry_date, today), health: positionHealth(p, price) };
   }), [portfolio.openPositions, portfolio.quotes, today]);
 
   const closedRows = useMemo(() => portfolio.closedPositions.map((p) => {
@@ -89,20 +148,44 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     return { p, cost, pl, plPct, held, ann };
   }), [portfolio.closedPositions]);
 
+  const openValue = useCallback((r: typeof openRows[number], k: OpenKey) => ({
+    ticker: r.p.ticker, status: r.health, entry_date: r.p.entry_date, held: r.held, entry: r.p.entry_price,
+    shares: r.p.shares, cost: r.cost, current: r.price, pl: r.pl, plPct: r.plPct, target: r.p.target_price,
+  })[k], []);
+  const closedValue = useCallback((r: typeof closedRows[number], k: ClosedKey) => ({
+    ticker: r.p.ticker, result: (r.pl ?? 0) > 0 ? 'Win' : 'Loss', entry_date: r.p.entry_date, exit_date: r.p.exit_date,
+    held: r.held, entry: r.p.entry_price, exit: r.p.exit_price, shares: r.p.shares, pl: r.pl, plPct: r.plPct, ann: r.ann,
+  })[k], []);
+  const openSort = useSort<typeof openRows[number], OpenKey>(openRows, openValue);
+  const closedSort = useSort<typeof closedRows[number], ClosedKey>(closedRows, closedValue);
+
+  const editModal = editing && (
+    <EditStockPositionModal position={editing} onClose={() => setEditing(null)} onSave={(patch) => portfolio.updatePosition(editing.id, patch)} />
+  );
+  const editBtn = (p: StockPosition) => (
+    <button onClick={() => setEditing(p)} className="mr-2 text-slate-500 hover:text-sky-400" title="Edit"><Pencil className="inline h-4 w-4" /></button>
+  );
+
   if (view === 'open') {
     const invested = openRows.reduce((a, r) => a + r.cost, 0);
     const value = openRows.reduce((a, r) => a + (r.value ?? r.cost), 0);
     const pl = value - invested;
+    const th = (label: string, k: OpenKey, align: 'left' | 'right' = 'right') => (
+      <SortTh label={label} k={k} sortKey={openSort.sortKey} sortDir={openSort.sortDir} onSort={openSort.toggle} align={align} />
+    );
     return (
       <div className="space-y-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-slate-100">Open Stock Positions</h1>
-            <p className="text-sm text-slate-500">Prices are the latest saved daily closes (updated by every stock scan). Add positions from Stock Candidates or Analyze.</p>
+            <p className="text-sm text-slate-500">Prices are the latest saved daily closes (updated by every stock scan). Click a header to sort; ✎ to edit.</p>
           </div>
-          <button onClick={() => void portfolio.refreshQuotes()} className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
-            <RefreshCw className={`h-4 w-4 ${portfolio.quotesLoading ? 'animate-spin' : ''}`} /> Refresh prices
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <ExcelButtons portfolio={portfolio} view="open" />
+            <button onClick={() => void portfolio.refreshQuotes()} className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
+              <RefreshCw className={`h-4 w-4 ${portfolio.quotesLoading ? 'animate-spin' : ''}`} /> Refresh prices
+            </button>
+          </div>
         </div>
         <Summary items={[
           { label: 'Open positions', value: String(openRows.length) },
@@ -113,34 +196,34 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           { label: 'Need attention', value: String(openRows.filter((r) => ['Target hit', 'Stop hit', 'Cycle ended'].includes(r.health)).length), tone: 'text-amber-400' },
         ]} />
         {openRows.length === 0 ? (
-          <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-sky-300">No open stock positions. Open a row on Stock Candidates and click "Add Position".</div>
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-sky-300">No open stock positions. Add one from Stock Candidates or Analyze, or use Import Excel.</div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-slate-800">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
-                  {['Ticker', 'Status', 'Entry date', 'Held', 'Entry', 'Shares', 'Cost', 'Current', 'Day %', 'P/L', 'P/L %', 'Target', 'Stop', ''].map((h, i) => (
-                    <th key={h + i} className={`whitespace-nowrap px-3 py-2.5 ${i <= 2 ? 'text-left' : 'text-right'}`}>{h}</th>
-                  ))}
+                  {th('Ticker', 'ticker', 'left')}{th('Status', 'status', 'left')}{th('Entry date', 'entry_date', 'left')}
+                  {th('Held', 'held')}{th('Entry', 'entry')}{th('Shares', 'shares')}{th('Cost', 'cost')}
+                  {th('Current', 'current')}{th('P/L', 'pl')}{th('P/L %', 'plPct')}{th('Target', 'target')}
+                  <th className="px-3 py-2.5" />
                 </tr>
               </thead>
               <tbody>
-                {openRows.map(({ p, q, price, cost, pl, plPct, held, health }) => (
+                {openSort.sorted.map(({ p, price, cost, pl, plPct, held, health }) => (
                   <tr key={p.id} className="border-b border-slate-800/60">
                     <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
                     <td className="px-3 py-2"><Badge variant={HEALTH_VARIANT[health]}>{health}</Badge></td>
                     <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${held > p.max_cycle_days ? 'text-amber-400' : 'text-slate-300'}`}>{held}/{p.max_cycle_days}d</td>
+                    <td className={`px-3 py-2 text-right tabular-nums ${held > p.max_cycle_days ? 'text-amber-400' : 'text-slate-300'}`} title={`Max cycle: ${p.max_cycle_days} days`}>{held}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.entry_price)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.shares, 4)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-300">{money(cost)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-100">{price != null ? formatNum(price) : '--'}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${plColor(q?.day_change_pct)}`}>{q?.day_change_pct != null ? formatPct(q.day_change_pct, 2) : '--'}</td>
                     <td className={`px-3 py-2 text-right tabular-nums font-medium ${plColor(pl)}`}>{money(pl)}</td>
                     <td className={`px-3 py-2 text-right tabular-nums ${plColor(plPct)}`}>{plPct != null ? formatPct(plPct, 2) : '--'}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-sky-300">{p.target_price != null ? formatNum(p.target_price) : '--'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-red-300">{p.stop_price != null ? formatNum(p.stop_price) : '--'}</td>
                     <td className="whitespace-nowrap px-3 py-2 text-right">
+                      {editBtn(p)}
                       <button onClick={() => setClosing(p)} className="mr-2 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800">
                         <CheckSquare className="h-3.5 w-3.5" /> Close
                       </button>
@@ -162,6 +245,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
             onConfirm={(exit, date) => portfolio.closePosition(closing.id, exit, date)}
           />
         )}
+        {editModal}
       </div>
     );
   }
@@ -170,11 +254,17 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
   const wins = closedRows.filter((r) => (r.pl ?? 0) > 0).length;
   const avgPct = closedRows.length ? closedRows.reduce((a, r) => a + (r.plPct ?? 0), 0) / closedRows.length : null;
   const avgDays = closedRows.length ? closedRows.reduce((a, r) => a + (r.held ?? 0), 0) / closedRows.length : null;
+  const th = (label: string, k: ClosedKey, align: 'left' | 'right' = 'right') => (
+    <SortTh label={label} k={k} sortKey={closedSort.sortKey} sortDir={closedSort.sortDir} onSort={closedSort.toggle} align={align} />
+  );
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-100">Closed Stock Positions</h1>
-        <p className="text-sm text-slate-500">Realized results. Annualized = the trade's return compounded over a year of similar cycles (capped at 1,000%).</p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-slate-100">Closed Stock Positions</h1>
+          <p className="text-sm text-slate-500">Realized results. Click a header to sort; ✎ to edit. Annualized is capped at 1,000%.</p>
+        </div>
+        <ExcelButtons portfolio={portfolio} view="closed" />
       </div>
       <Summary items={[
         { label: 'Closed trades', value: String(closedRows.length) },
@@ -185,19 +275,20 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         { label: 'Wins / Losses', value: `${wins} / ${closedRows.length - wins}` },
       ]} />
       {closedRows.length === 0 ? (
-        <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet.</div>
+        <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet. You can also use Import Excel.</div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-slate-800">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
-                {['Ticker', 'Result', 'Entry date', 'Exit date', 'Days', 'Entry', 'Exit', 'Shares', 'P/L', 'P/L %', 'Annualized', ''].map((h, i) => (
-                  <th key={h + i} className={`whitespace-nowrap px-3 py-2.5 ${i <= 3 ? 'text-left' : 'text-right'}`}>{h}</th>
-                ))}
+                {th('Ticker', 'ticker', 'left')}{th('Result', 'result', 'left')}{th('Entry date', 'entry_date', 'left')}{th('Exit date', 'exit_date', 'left')}
+                {th('Held', 'held')}{th('Entry', 'entry')}{th('Exit', 'exit')}{th('Shares', 'shares')}
+                {th('P/L', 'pl')}{th('P/L %', 'plPct')}{th('Annualized', 'ann')}
+                <th className="px-3 py-2.5" />
               </tr>
             </thead>
             <tbody>
-              {closedRows.map(({ p, pl, plPct, held, ann }) => (
+              {closedSort.sorted.map(({ p, pl, plPct, held, ann }) => (
                 <tr key={p.id} className="border-b border-slate-800/60">
                   <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
                   <td className="px-3 py-2"><Badge variant={(pl ?? 0) > 0 ? 'success' : 'error'}>{(pl ?? 0) > 0 ? 'Win' : 'Loss'}</Badge></td>
@@ -211,6 +302,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                   <td className={`px-3 py-2 text-right tabular-nums ${plColor(plPct)}`}>{plPct != null ? formatPct(plPct, 2) : '--'}</td>
                   <td className={`px-3 py-2 text-right tabular-nums ${plColor(ann)}`}>{ann == null ? '--' : ann >= 1000 ? '>1,000%' : formatPct(ann, 0)}</td>
                   <td className="whitespace-nowrap px-3 py-2 text-right">
+                    {editBtn(p)}
                     <button onClick={() => void portfolio.reopenPosition(p.id)} className="mr-2 text-slate-500 hover:text-sky-400" title="Reopen"><RotateCcw className="inline h-4 w-4" /></button>
                     <button onClick={() => { if (confirm(`Delete ${p.ticker} trade?`)) void portfolio.deletePosition(p.id); }} className="text-slate-500 hover:text-red-400" title="Delete"><Trash2 className="inline h-4 w-4" /></button>
                   </td>
@@ -220,6 +312,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           </table>
         </div>
       )}
+      {editModal}
     </div>
   );
 }

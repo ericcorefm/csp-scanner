@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from 'react';
-import { CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, ArrowUp, ArrowDown, Info, TrendingUp, TrendingDown, Minus, ArrowUpRight } from 'lucide-react';
+import { CheckCircle2, XCircle, AlertTriangle, Telescope, Globe, Info, TrendingUp, TrendingDown, Minus, ArrowUpRight } from 'lucide-react';
 import { TradingViewChart } from '@/components/TradingViewChart';
 import type { StockScannerState } from '@/lib/stockStore';
 import type { StockPortfolioState } from '@/lib/stockPortfolio';
@@ -73,16 +73,10 @@ const COLUMNS: { key: SortKey; label: string; title: string; align?: 'left' | 'r
   { key: 'ticker', label: 'Ticker', title: 'Ticker', align: 'left' },
   { key: 'price', label: 'Entry', title: 'Latest close (entry price)' },
   { key: 'trend_classification', label: 'Trend', title: 'Trend status (same as Options): Bullish = price > MA20 > MA50 > MA200; Improving, Rebound, Stabilizing, Sideways, Downtrend', align: 'left' },
-  { key: 'day_change_pct', label: 'Day %', title: 'Change vs previous close' },
-  { key: 'rsi', label: 'RSI', title: 'RSI(14), Wilder — same as TradingView' },
   { key: 'pullback_pct', label: 'Pullback', title: '% below the 20-day high (how far it has retraced)' },
   { key: 'rebound_pct', label: 'Rebound', title: '% above the 5-day low (how far it has bounced)' },
-  { key: 'above_ma200_pct', label: 'vs MA200', title: '% above the 200-day moving average (arrow = MA200 rising/falling)' },
   { key: 'dist_to_support_pct', label: 'Above Sup.', title: '% the price sits above primary support' },
-  { key: 'hv_pct', label: 'HV', title: '60-day historical volatility (annualized)' },
   { key: 'target_price', label: 'Target', title: 'Entry × (1 + target return). No commission.' },
-  { key: 'stop_price', label: 'Stop', title: 'Primary support minus the stop buffer' },
-  { key: 'reward_risk', label: 'R:R', title: 'Target % ÷ % distance to stop' },
   { key: 'prob_target_pct', label: 'Prob. Target', title: 'Model: chance the price touches the target within the cycle (2,000 simulated paths, no upward drift)' },
   { key: 'pop_pct', label: 'POP', title: 'Model: probability of profit — target hit first, or above entry at the end of the cycle' },
   { key: 'hist_hit_rate_pct', label: 'Hist. Hit', title: 'This stock, last ~2 years: how often this exact trade plan hit the target before the stop' },
@@ -297,26 +291,10 @@ export function StockCandidatesPage({ stock, portfolio }: { stock: StockScannerS
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-200">{r.price != null ? formatNum(r.price) : DASH}</td>
                       <td className="px-3 py-2.5 text-left"><TrendBadge trend={r.trend_classification} /></td>
-                      <td className={`px-3 py-2.5 text-right tabular-nums ${r.day_change_pct == null ? '' : r.day_change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {r.day_change_pct != null ? formatPct(r.day_change_pct, 2) : DASH}
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.rsi != null ? formatNum(r.rsi, 1) : DASH}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.pullback_pct != null ? `−${formatPct(r.pullback_pct)}` : DASH}</td>
                       <td className={`px-3 py-2.5 text-right tabular-nums ${r.rebound_pct == null ? '' : r.rebound_pct > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{r.rebound_pct != null ? `+${formatPct(r.rebound_pct)}` : DASH}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">
-                        {r.above_ma200_pct != null ? (
-                          <span className="inline-flex items-center gap-1">
-                            {r.ma200_rising === true && <ArrowUp className="h-3 w-3 text-emerald-400" />}
-                            {r.ma200_rising === false && <ArrowDown className="h-3 w-3 text-red-400" />}
-                            {formatPct(r.above_ma200_pct)}
-                          </span>
-                        ) : DASH}
-                      </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.dist_to_support_pct != null ? formatPct(r.dist_to_support_pct) : DASH}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.hv_pct != null ? formatPct(r.hv_pct, 0) : DASH}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-sky-300">{r.target_price != null ? formatNum(r.target_price) : DASH}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.stop_price != null ? formatNum(r.stop_price) : DASH}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.reward_risk != null ? formatNum(r.reward_risk, 2) : DASH}</td>
                       <td className={`px-3 py-2.5 text-right tabular-nums ${pctColor(r.prob_target_pct, rules?.min_prob_target ?? 50)}`}>{r.prob_target_pct != null ? formatPct(r.prob_target_pct, 0) : DASH}</td>
                       <td className={`px-3 py-2.5 text-right tabular-nums ${pctColor(r.pop_pct, rules?.min_pop ?? 60)}`}>{r.pop_pct != null ? formatPct(r.pop_pct, 0) : DASH}</td>
                       <td className={`px-3 py-2.5 text-right tabular-nums ${pctColor(r.hist_hit_rate_pct, rules?.min_hist_hit_rate ?? 50)}`}>{r.hist_hit_rate_pct != null ? formatPct(r.hist_hit_rate_pct, 0) : DASH}</td>
