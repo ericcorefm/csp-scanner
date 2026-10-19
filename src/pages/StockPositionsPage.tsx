@@ -73,6 +73,92 @@ function CloseModal({ p, price, onClose, onConfirm }: {
 
 type OpenKey = 'ticker' | 'status' | 'entry_date' | 'held' | 'entry' | 'shares' | 'cost' | 'current' | 'pl' | 'plPct' | 'target';
 type ClosedKey = 'ticker' | 'result' | 'entry_date' | 'exit_date' | 'held' | 'entry' | 'exit' | 'shares' | 'pl' | 'plPct' | 'ann';
+type TickerKey = 'ticker' | 'trades' | 'avgInv' | 'avgDays' | 'totalGain' | 'avgCroi' | 'recycled';
+
+type TickerRow = { ticker: string; trades: number; avgInv: number; avgDays: number; totalGain: number; avgCroi: number; recycled: number; wins: number };
+
+/**
+ * Per-ticker results from closed trades.
+ * - Avg Investment: average capital per trade (entry price × shares)
+ * - Avg DIM: average days in market (exit date − entry date; same-day = 0)
+ * - Avg CROI / Trade: average return of the individual trades
+ * - Recycled CROI: total gain ÷ average investment — what recycling roughly the
+ *   same capital through repeated trades returned on that capital
+ */
+function TickerSummary({ positions, onAnalyze }: { positions: StockPosition[]; onAnalyze?: (ticker: string) => void }) {
+  const rows = useMemo<TickerRow[]>(() => {
+    const by = new Map<string, StockPosition[]>();
+    for (const p of positions) {
+      if (p.exit_price == null) continue;
+      const arr = by.get(p.ticker);
+      if (arr) arr.push(p); else by.set(p.ticker, [p]);
+    }
+    return [...by.entries()].map(([ticker, list]) => {
+      const inv = list.map((p) => p.entry_price * p.shares);
+      const gains = list.map((p) => (p.exit_price! - p.entry_price) * p.shares);
+      const days = list.map((p) => (p.exit_date ? Math.max(0, daysBetween(p.entry_date, p.exit_date)) : 0));
+      const avgInv = inv.reduce((a, b) => a + b, 0) / list.length;
+      const totalGain = gains.reduce((a, b) => a + b, 0);
+      return {
+        ticker,
+        trades: list.length,
+        avgInv,
+        avgDays: days.reduce((a, b) => a + b, 0) / list.length,
+        totalGain,
+        avgCroi: (gains.reduce((a, g, i) => a + g / inv[i], 0) / list.length) * 100,
+        recycled: avgInv > 0 ? (totalGain / avgInv) * 100 : 0,
+        wins: gains.filter((g) => g > 0).length,
+      };
+    });
+  }, [positions]);
+
+  const value = useCallback((r: TickerRow, k: TickerKey) => r[k], []);
+  const { sorted, sortKey, sortDir, toggle } = useSort<TickerRow, TickerKey>(rows, value, { key: 'recycled', dir: 'desc' });
+  const th = (label: string, k: TickerKey, align: 'left' | 'right' = 'right', title?: string) => (
+    <SortTh label={label} k={k} sortKey={sortKey} sortDir={sortDir} onSort={toggle} align={align} title={title} />
+  );
+  const days = (d: number) => `${formatNum(d, d % 1 === 0 ? 0 : 1)} ${d === 1 ? 'day' : 'days'}`;
+
+  if (!rows.length) return <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed trades with an exit price yet.</div>;
+  return (
+    <div className="space-y-2">
+      <div className="overflow-x-auto rounded-xl border border-slate-800">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
+              <th className="px-3 py-2.5 text-right font-medium">Rank</th>
+              {th('Ticker', 'ticker', 'left')}
+              {th('Closed Trades', 'trades')}
+              {th('Avg Investment', 'avgInv', 'right', 'Average capital per trade (entry price × shares)')}
+              {th('Avg DIM', 'avgDays', 'right', 'Average days in market (same-day trades = 0)')}
+              {th('Total Gain', 'totalGain')}
+              {th('Avg CROI / Trade', 'avgCroi', 'right', 'Average return of the individual trades')}
+              {th('Recycled CROI', 'recycled', 'right', 'Total gain ÷ average investment: the return from recycling roughly the same capital')}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((r, i) => (
+              <tr key={r.ticker} className="border-b border-slate-800/60">
+                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{i + 1}</td>
+                <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={r.ticker} onAnalyze={onAnalyze} /></td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-300" title={`${r.wins} win(s), ${r.trades - r.wins} loss(es)`}>{r.trades}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-300">{money(r.avgInv)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-300">{days(r.avgDays)}</td>
+                <td className={`px-3 py-2 text-right tabular-nums font-medium ${plColor(r.totalGain)}`}>{r.totalGain >= 0 ? '+' : ''}{money(r.totalGain)}</td>
+                <td className={`px-3 py-2 text-right tabular-nums ${plColor(r.avgCroi)}`}>{formatPct(r.avgCroi, 2)}</td>
+                <td className={`px-3 py-2 text-right tabular-nums font-semibold ${plColor(r.recycled)}`}>{formatPct(r.recycled, 2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-xs text-slate-500">
+        Recycled CROI = total gain ÷ average investment. It shows what repeatedly recycling roughly the same capital in that ticker returned,
+        so it grows with each winning trade. Avg CROI / Trade is the typical single-trade return.
+      </p>
+    </div>
+  );
+}
 
 /** Export / Import buttons shared by the Open and Closed pages. */
 function ExcelButtons({ portfolio, view }: { portfolio: StockPortfolioState; view: 'open' | 'closed' }) {
@@ -128,6 +214,13 @@ function ExcelButtons({ portfolio, view }: { portfolio: StockPortfolioState; vie
 export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: StockPortfolioState; view: 'open' | 'closed'; onAnalyze?: (ticker: string) => void }) {
   const [closing, setClosing] = useState<StockPosition | null>(null);
   const [editing, setEditing] = useState<StockPosition | null>(null);
+  const [closedView, setClosedView] = useState<'trades' | 'tickers'>(() => {
+    try { return localStorage.getItem('closed-stock-view') === 'tickers' ? 'tickers' : 'trades'; } catch { return 'trades'; }
+  });
+  const switchClosedView = (v: 'trades' | 'tickers') => {
+    setClosedView(v);
+    try { localStorage.setItem('closed-stock-view', v); } catch { /* storage unavailable */ }
+  };
   const today = todayISO();
 
   const openRows = useMemo(() => portfolio.openPositions.map((p) => {
@@ -274,7 +367,20 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         { label: 'Avg days held', value: avgDays != null ? formatNum(avgDays, 1) : '--' },
         { label: 'Wins / Losses', value: `${wins} / ${closedRows.length - wins}` },
       ]} />
-      {closedRows.length === 0 ? (
+      <div className="inline-flex rounded-lg border border-slate-800 bg-slate-900 p-1 text-sm">
+        {([['trades', 'All Trades'], ['tickers', 'By Ticker']] as const).map(([v, label]) => (
+          <button
+            key={v}
+            onClick={() => switchClosedView(v)}
+            className={`rounded-md px-3 py-1.5 font-medium transition-colors ${closedView === v ? 'bg-sky-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {closedView === 'tickers' ? (
+        <TickerSummary positions={portfolio.closedPositions} onAnalyze={onAnalyze} />
+      ) : closedRows.length === 0 ? (
         <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet. You can also use Import Excel.</div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-slate-800">
