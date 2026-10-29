@@ -172,8 +172,8 @@ function ExcelButtons({ portfolio, view }: { portfolio: StockPortfolioState; vie
     try {
       const { rows, skipped } = await readPositionsFromExcel(file, view);
       if (!rows.length) { setMsg({ ok: false, text: skipped[0] ?? 'No rows to import.' }); return; }
-      const res = await portfolio.importPositions(rows);
-      const parts = [`Added ${res.added}`, `updated ${res.updated}`];
+      const res = await portfolio.importPositions(rows, view);
+      const parts = [`Added ${res.added} new`, `overwrote ${res.updated} existing`];
       if (skipped.length) parts.push(`skipped ${skipped.length}`);
       setMsg({
         ok: res.errors.length === 0,
@@ -201,7 +201,7 @@ function ExcelButtons({ portfolio, view }: { portfolio: StockPortfolioState; vie
         onClick={() => fileRef.current?.click()}
         disabled={busy}
         className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-        title="Rows with a matching ID update that position; rows without an ID are added"
+        title="Rows matching an existing position (same ID, or same ticker + entry date) overwrite it; other rows are added as new"
       >
         <Upload className="h-4 w-4" /> {busy ? 'Importing…' : 'Import Excel'}
       </button>
