@@ -20,7 +20,7 @@ const plColor = (v: number | null | undefined) => (v == null ? 'text-slate-400' 
 
 function Summary({ items }: { items: { label: string; value: string; tone?: string }[] }) {
   return (
-    <div className="grid grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-slate-900/50 px-5 py-3 md:grid-cols-4 lg:grid-cols-6">
+    <div className={`grid grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-slate-900/50 px-5 py-3 md:grid-cols-4 ${items.length > 6 ? 'lg:grid-cols-7' : 'lg:grid-cols-6'}`}>
       {items.map((i) => (
         <div key={i.label} className="text-center">
           <div className="text-xs text-slate-500">{i.label}</div>
@@ -72,7 +72,7 @@ function CloseModal({ p, price, onClose, onConfirm }: {
 }
 
 type OpenKey = 'ticker' | 'status' | 'entry_date' | 'held' | 'entry' | 'shares' | 'cost' | 'current' | 'pl' | 'plPct' | 'target';
-type ClosedKey = 'ticker' | 'result' | 'entry_date' | 'exit_date' | 'held' | 'entry' | 'exit' | 'shares' | 'pl' | 'plPct' | 'ann';
+type ClosedKey = 'ticker' | 'result' | 'entry_date' | 'exit_date' | 'held' | 'entry' | 'exit' | 'shares' | 'invested' | 'pl' | 'plPct' | 'ann';
 type TickerKey = 'ticker' | 'trades' | 'avgInv' | 'avgDays' | 'totalGain' | 'avgCroi' | 'recycled';
 
 type TickerRow = { ticker: string; trades: number; avgInv: number; avgDays: number; totalGain: number; avgCroi: number; recycled: number; wins: number };
@@ -247,7 +247,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
   })[k], []);
   const closedValue = useCallback((r: typeof closedRows[number], k: ClosedKey) => ({
     ticker: r.p.ticker, result: (r.pl ?? 0) > 0 ? 'Win' : 'Loss', entry_date: r.p.entry_date, exit_date: r.p.exit_date,
-    held: r.held, entry: r.p.entry_price, exit: r.p.exit_price, shares: r.p.shares, pl: r.pl, plPct: r.plPct, ann: r.ann,
+    held: r.held, entry: r.p.entry_price, exit: r.p.exit_price, shares: r.p.shares, invested: r.cost, pl: r.pl, plPct: r.plPct, ann: r.ann,
   })[k], []);
   const openSort = useSort<typeof openRows[number], OpenKey>(openRows, openValue);
   const closedSort = useSort<typeof closedRows[number], ClosedKey>(closedRows, closedValue);
@@ -361,6 +361,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
       </div>
       <Summary items={[
         { label: 'Closed trades', value: String(closedRows.length) },
+        { label: 'Avg investment', value: closedRows.length ? money(closedRows.reduce((a, r) => a + r.cost, 0) / closedRows.length) : '--' },
         { label: 'Realized P/L', value: money(realized), tone: plColor(realized) },
         { label: 'Win rate', value: closedRows.length ? formatPct((wins / closedRows.length) * 100, 0) : '--' },
         { label: 'Avg return / trade', value: avgPct != null ? formatPct(avgPct, 2) : '--', tone: plColor(avgPct) },
@@ -388,13 +389,13 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
             <thead>
               <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
                 {th('Ticker', 'ticker', 'left')}{th('Result', 'result', 'left')}{th('Entry date', 'entry_date', 'left')}{th('Exit date', 'exit_date', 'left')}
-                {th('Held', 'held')}{th('Entry', 'entry')}{th('Exit', 'exit')}{th('Shares', 'shares')}
+                {th('Held', 'held')}{th('Entry', 'entry')}{th('Exit', 'exit')}{th('Shares', 'shares')}{th('Investment', 'invested')}
                 {th('P/L', 'pl')}{th('P/L %', 'plPct')}{th('Annualized', 'ann')}
                 <th className="px-3 py-2.5" />
               </tr>
             </thead>
             <tbody>
-              {closedSort.sorted.map(({ p, pl, plPct, held, ann }) => (
+              {closedSort.sorted.map(({ p, cost, pl, plPct, held, ann }) => (
                 <tr key={p.id} className="border-b border-slate-800/60">
                   <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
                   <td className="px-3 py-2"><Badge variant={(pl ?? 0) > 0 ? 'success' : 'error'}>{(pl ?? 0) > 0 ? 'Win' : 'Loss'}</Badge></td>
@@ -404,6 +405,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                   <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.entry_price)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-300">{p.exit_price != null ? formatNum(p.exit_price) : '--'}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.shares, 4)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-300">{money(cost)}</td>
                   <td className={`px-3 py-2 text-right tabular-nums font-medium ${plColor(pl)}`}>{money(pl)}</td>
                   <td className={`px-3 py-2 text-right tabular-nums ${plColor(plPct)}`}>{plPct != null ? formatPct(plPct, 2) : '--'}</td>
                   <td className={`px-3 py-2 text-right tabular-nums ${plColor(ann)}`}>{ann == null ? '--' : ann >= 1000 ? '>1,000%' : formatPct(ann, 0)}</td>
