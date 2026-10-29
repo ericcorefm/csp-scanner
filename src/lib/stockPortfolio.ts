@@ -103,22 +103,48 @@ export function useStockPortfolio() {
   }, [loadPositions]);
 
   /**
-   * Import rows from Excel. Rows whose ID matches an existing position are
-   * updated; all others are added. Returns counts for the confirmation message.
+   * Import rows from Excel into the Open or Closed list.
+   * Each row OVERWRITES the existing position it matches; rows with no match
+   * are added as new. Positions not in the file are left untouched.
+   * Matching, in order:
+   *   1. ID column equals an existing position's ID
+   *   2. Same ticker + same entry date (within the same Open/Closed list).
+   *      If several positions match, the one with the same entry price
+   *      (and, for closed trades, the same exit date) is used first.
+   * Each existing position is matched at most once, so two lots of the same
+   * ticker bought the same day stay separate.
    */
-  const importPositions = useCallback(async (rows: Partial<StockPosition>[]) => {
-    const existing = new Set(positions.map((p) => p.id));
-    const updates = rows.filter((r) => r.id && existing.has(r.id));
-    const inserts = rows.filter((r) => !r.id || !existing.has(r.id)).map((r) => {
-      const { id: _i, ...rest } = r; // eslint-disable-line @typescript-eslint/no-unused-vars
-      return rest;
-    });
+  const importPositions = useCallback(async (rows: Partial<StockPosition>[], view: 'open' | 'closed') => {
+    const pool = positions.filter((p) => p.status === view);
+    const byId = new Map(positions.map((p) => [p.id, p]));
+    const used = new Set<string>();
+    const near = (a: number | null | undefined, b: number | null | undefined) =>
+      a != null && b != null && Math.abs(Number(a) - Number(b)) < 0.005;
+
+    const findMatch = (r: Partial<StockPosition>): StockPosition | null => {
+      if (r.id && byId.has(r.id) && !used.has(r.id)) return byId.get(r.id)!;
+      const ticker = (r.ticker ?? '').toUpperCase();
+      const candidates = pool.filter((p) => !used.has(p.id) && p.ticker.toUpperCase() === ticker && p.entry_date === r.entry_date);
+      if (!candidates.length) return null;
+      const score = (p: StockPosition) =>
+        (near(p.entry_price, r.entry_price) ? 2 : 0) + (view === 'closed' && p.exit_date === r.exit_date ? 1 : 0);
+      return [...candidates].sort((a, b) => score(b) - score(a))[0];
+    };
+
+    const updates: { id: string; row: Partial<StockPosition> }[] = [];
+    const inserts: Partial<StockPosition>[] = [];
+    for (const r of rows) {
+      const { id: _ignore, ...data } = r; // eslint-disable-line @typescript-eslint/no-unused-vars
+      const match = findMatch(r);
+      if (match) { used.add(match.id); updates.push({ id: match.id, row: data }); }
+      else inserts.push(data);
+    }
+
     let updated = 0, added = 0;
     const errors: string[] = [];
-    for (const r of updates) {
-      const { id, ...patch } = r;
-      const { error: e } = await supabase.from('stock_positions').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', id!);
-      if (e) errors.push(`${r.ticker}: ${e.message}`); else updated++;
+    for (const u of updates) {
+      const { error: e } = await supabase.from('stock_positions').update({ ...u.row, updated_at: new Date().toISOString() }).eq('id', u.id);
+      if (e) errors.push(`${u.row.ticker}: ${e.message}`); else updated++;
     }
     if (inserts.length) {
       const { error: e } = await supabase.from('stock_positions').insert(inserts);
