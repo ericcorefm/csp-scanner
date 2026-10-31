@@ -56,6 +56,8 @@ export interface StockRules {
   min_hist_hit_rate: number | null;
   min_exp_annualized: number | null;
   position_size: number;
+  /** 1% / 5-Day Swing settings (stored in the same profile). */
+  swing5?: Partial<Swing5Rules>;
 }
 
 /**
@@ -259,4 +261,107 @@ export function positionHealth(p: StockPosition, price: number | null): Position
   if (p.target_price != null && p.target_price > p.entry_price && (price - p.entry_price) / (p.target_price - p.entry_price) >= 0.75) return 'Near target';
   if (p.stop_price != null && p.stop_price < p.entry_price && (p.entry_price - price) / (p.entry_price - p.stop_price) >= 0.75) return 'Near stop';
   return 'Active';
+}
+
+// ─── 1% / 5-Day Swing (4-indicator strategy) ────────────────────────────────
+// Keep DEFAULT_SWING5_RULES in sync with the edge function.
+
+export type StockStrategy = 'swing30' | 'swing5';
+
+export interface Swing5Rules {
+  allocation: number;
+  tp_pct: number;
+  sl_pct: number;
+  max_hold_sessions: number;
+  min_price: number | null;
+  max_price: number | null;
+  min_avg_volume: number | null;
+  spy_filter: boolean;
+  rsi_min: number;
+  rsi_max: number;
+  bb_lookback: number;
+  slippage_pct: number;
+}
+
+export const DEFAULT_SWING5_RULES: Swing5Rules = {
+  allocation: 1000, tp_pct: 1, sl_pct: 1, max_hold_sessions: 5,
+  min_price: 5, max_price: 100, min_avg_volume: 1_000_000, spy_filter: true,
+  rsi_min: 45, rsi_max: 60, bb_lookback: 5, slippage_pct: 0.05,
+};
+
+export type Swing5Signal = 'BUY' | 'WATCH' | 'WAIT' | 'PENDING';
+
+export interface Swing5Check { key: string; label: string; pass: boolean | null; detail: string }
+
+export interface Swing5Trade {
+  signal_date: string;
+  entry_date: string;
+  entry_price: number;
+  exit_date: string | null;
+  exit_price: number | null;
+  exit_reason: 'TP' | 'SL' | 'TIME' | 'OPEN';
+  sessions: number;
+  return_pct: number | null;
+  pnl: number | null;
+}
+
+export interface Swing5Stats {
+  trades: number;
+  wins: number;
+  win_rate_pct: number | null;
+  avg_return_pct: number | null;
+  profit_factor: number | null;
+  avg_sessions: number | null;
+  tp_count: number;
+  sl_count: number;
+  time_count: number;
+  total_pnl: number | null;
+  net_croi_pct: number | null;
+  max_drawdown: number | null;
+  trades_per_year: number | null;
+}
+
+export interface Swing5Result {
+  ticker: string;
+  company_name: string;
+  bars: number;
+  signal: Swing5Signal;
+  score: number | null;
+  price: number | null;
+  signal_date?: string;
+  rsi?: number | null;
+  avg_volume?: number | null;
+  checks: Swing5Check[];
+  filters: Swing5Check[];
+  wait_reasons: string[];
+  plan: {
+    entry_est: number | null; tp_price: number | null; sl_price: number | null; shares: number | null;
+    gain_at_tp: number | null; loss_at_sl: number | null; max_hold_sessions: number;
+  } | null;
+  backtest: Swing5Stats | null;
+  backtest_3of4: Swing5Stats | null;
+  backtest_years?: number | null;
+  recent_trade: Swing5Trade | null;
+  trades: Swing5Trade[];
+}
+
+export interface Swing5Counts {
+  stocks_screened: number;
+  buy: number;
+  watch: number;
+  wait: number;
+  pending: number;
+  spy_above_50: boolean | null;
+  history_fetched_this_scan: number;
+  still_pending_history: number;
+  history_rate_limited: boolean;
+  warming_time_budget_hit: boolean;
+  latest_trading_date: string;
+  cache_rows_written: number;
+  cache_write_errors: number;
+  cache_read_errors: number;
+  cache_last_error: string | null;
+  daily_prices_refreshed: boolean;
+  daily_prices_http_status: number | null;
+  elapsed_ms: number;
 }

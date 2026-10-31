@@ -79,9 +79,12 @@ export function useStockScanner(universeSymbols: string[]) {
     return () => { cancelled = true; };
   }, []);
 
-  const saveProfile = useCallback(async (rules: StockRules, name?: string) => {
+  const saveProfile = useCallback(async (rules: StockRules, name?: string, fromSwing5 = false) => {
     if (!profile) return { ok: false, error: 'No stock profile loaded' };
-    const payload = { rules, name: name ?? profile.name, updated_at: new Date().toISOString() };
+    // The 30-Day settings page never changes the 5-Day Swing settings (its
+    // presets/Reset don't carry them) — always keep the saved ones.
+    const merged: StockRules = { ...rules, swing5: fromSwing5 ? rules.swing5 : profile.rules.swing5 };
+    const payload = { rules: merged, name: name ?? profile.name, updated_at: new Date().toISOString() };
     const { data, error: e } = await supabase.from('stock_profiles').update(payload).eq('id', profile.id).select().single();
     if (e) return { ok: false, error: e.message };
     setProfile({ ...(data as StockProfile), rules: withDefaults((data as StockProfile).rules) });
