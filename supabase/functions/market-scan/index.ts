@@ -3341,3 +3341,5 @@ async function runSwing5Scan(body: any, apiKey: string, requestStart: number): P
   console.log(`[SWING5] mode=${scanMode} screened=${tickers.length} BUY=${counts.buy} WATCH=${counts.watch} WAIT=${counts.wait} P=${counts.pending}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), rules, results, counts });
 }
+
+// redeploy swing5 2026-10-31
