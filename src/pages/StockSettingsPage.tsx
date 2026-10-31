@@ -121,7 +121,9 @@ export function StockSettingsPage({ stock }: { stock: StockScannerState }) {
 
   useEffect(() => { setRules(saved); }, [stock.profile]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isDirty = JSON.stringify(rules) !== JSON.stringify(saved);
+  // 5-Day Swing settings are edited on their own tab — ignore them here.
+  const strip = (r: StockRules) => JSON.stringify({ ...r, swing5: undefined });
+  const isDirty = strip(rules) !== strip(saved);
   const set = <K extends keyof StockRules>(key: K, value: StockRules[K]) => setRules((r) => ({ ...r, [key]: value }));
 
   const handleSave = async () => {
