@@ -1927,6 +1927,11 @@ serve(async (req) => {
       return await runStockScan(body, apiKey, requestStart);
     }
 
+    // ── SWING5-SCAN: 1% / 5-Day Swing (4-indicator strategy). ──
+    if (mode === 'swing5-scan') {
+      return await runSwing5Scan(body, apiKey, requestStart);
+    }
+
     // ── STOCK-QUOTES: latest saved close for open stock positions. Reads the
     // history cache only (kept current by every scan) — no Massive calls. ──
     if (mode === 'stock-quotes') {
@@ -2921,3 +2926,418 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
 }
 
 // redeploy 2026-10-05
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1% / 5-DAY SWING ("swing5-scan" mode)
+// Four indicators on daily bars: EMA 9/21, RSI 14, MACD 12/26/9, Bollinger 20/2.
+// BUY = 4/4 + mandatory filters, WATCH = 3/4 + filters, WAIT otherwise.
+// Signals use the latest COMPLETED daily bar; a trade fills at the NEXT open.
+// The backtest replays the same rules on the last ~2 years of daily bars.
+// Paper trading only — nothing here places orders.
+// ═══════════════════════════════════════════════════════════════════════════
+
+type Swing5Rules = {
+  allocation: number;        // $ per trade (fractional shares)
+  tp_pct: number;            // take profit %
+  sl_pct: number;            // stop loss %
+  max_hold_sessions: number; // time exit at the close of this session
+  min_price: number | null;
+  max_price: number | null;
+  min_avg_volume: number | null; // 20-day average shares
+  spy_filter: boolean;           // SPY close above its 50-day SMA
+  rsi_min: number;
+  rsi_max: number;
+  bb_lookback: number;           // bars to look back for the middle-band pullback
+  slippage_pct: number;          // per side, applied to every backtest fill
+};
+
+const DEFAULT_SWING5_RULES: Swing5Rules = {
+  allocation: 1000, tp_pct: 1, sl_pct: 1, max_hold_sessions: 5,
+  min_price: 5, max_price: 100, min_avg_volume: 1_000_000, spy_filter: true,
+  rsi_min: 45, rsi_max: 60, bb_lookback: 5, slippage_pct: 0.05,
+};
+
+function mergeSwing5Rules(input: any): Swing5Rules {
+  const r: any = { ...DEFAULT_SWING5_RULES };
+  if (input && typeof input === 'object') {
+    for (const k of Object.keys(DEFAULT_SWING5_RULES)) {
+      if (!(k in input)) continue;
+      const v = input[k];
+      if (k === 'spy_filter') r[k] = !!v;
+      else if (v === null || v === '') r[k] = ['min_price', 'max_price', 'min_avg_volume'].includes(k) ? null : (DEFAULT_SWING5_RULES as any)[k];
+      else if (Number.isFinite(Number(v))) r[k] = Number(v);
+    }
+  }
+  r.max_hold_sessions = Math.max(1, Math.min(20, Math.round(r.max_hold_sessions)));
+  r.bb_lookback = Math.max(1, Math.min(20, Math.round(r.bb_lookback)));
+  r.tp_pct = Math.max(0.1, r.tp_pct);
+  r.sl_pct = Math.max(0.1, r.sl_pct);
+  r.allocation = Math.max(1, r.allocation);
+  r.slippage_pct = Math.max(0, r.slippage_pct);
+  return r as Swing5Rules;
+}
+
+const SWING5_MIN_BARS = 60;
+
+// EMA series seeded with the SMA of the first `period` values (TradingView style).
+function emaSeries(values: number[], period: number): (number | null)[] {
+  const out: (number | null)[] = new Array(values.length).fill(null);
+  if (values.length < period) return out;
+  const k = 2 / (period + 1);
+  let e = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  out[period - 1] = e;
+  for (let i = period; i < values.length; i++) { e = values[i] * k + e * (1 - k); out[i] = e; }
+  return out;
+}
+
+function emaOfNullable(values: (number | null)[], period: number): (number | null)[] {
+  const start = values.findIndex((v) => v != null);
+  const out: (number | null)[] = new Array(values.length).fill(null);
+  if (start < 0) return out;
+  const sub = emaSeries(values.slice(start) as number[], period);
+  sub.forEach((v, i) => { out[start + i] = v; });
+  return out;
+}
+
+// Wilder RSI at every bar.
+function rsiSeries(values: number[], period = 14): (number | null)[] {
+  const out: (number | null)[] = new Array(values.length).fill(null);
+  if (values.length <= period) return out;
+  let g = 0, l = 0;
+  for (let i = 1; i <= period; i++) { const d = values[i] - values[i - 1]; if (d >= 0) g += d; else l -= d; }
+  g /= period; l /= period;
+  const val = () => (l === 0 ? (g === 0 ? 50 : 100) : 100 - 100 / (1 + g / l));
+  out[period] = val();
+  for (let i = period + 1; i < values.length; i++) {
+    const d = values[i] - values[i - 1];
+    g = (g * (period - 1) + Math.max(d, 0)) / period;
+    l = (l * (period - 1) + Math.max(-d, 0)) / period;
+    out[i] = val();
+  }
+  return out;
+}
+
+function smaSeries(values: number[], period: number): (number | null)[] {
+  const out: (number | null)[] = new Array(values.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i];
+    if (i >= period) sum -= values[i - period];
+    if (i >= period - 1) out[i] = sum / period;
+  }
+  return out;
+}
+
+type Swing5Series = {
+  ema9: (number | null)[]; ema21: (number | null)[]; rsi: (number | null)[];
+  hist: (number | null)[]; mid: (number | null)[]; avgVol: (number | null)[];
+};
+
+function swing5Series(bars: HistoryBar[]): Swing5Series {
+  const closes = bars.map((b) => b.close);
+  const ema12 = emaSeries(closes, 12), ema26 = emaSeries(closes, 26);
+  const macdLine = closes.map((_, i) => (ema12[i] != null && ema26[i] != null ? ema12[i]! - ema26[i]! : null));
+  const signal = emaOfNullable(macdLine, 9);
+  return {
+    ema9: emaSeries(closes, 9), ema21: emaSeries(closes, 21), rsi: rsiSeries(closes, 14),
+    hist: macdLine.map((m, i) => (m != null && signal[i] != null ? m - signal[i]! : null)),
+    mid: smaSeries(closes, 20),
+    avgVol: smaSeries(bars.map((b) => b.volume), 20),
+  };
+}
+
+type Swing5Check = { key: string; label: string; pass: boolean | null; detail: string };
+
+// Evaluate the four indicators on bar t. pass=null means not enough data.
+function swing5Indicators(bars: HistoryBar[], s: Swing5Series, t: number, r: Swing5Rules): Swing5Check[] {
+  const c = bars[t].close;
+  const f = (x: number | null | undefined, d = 2) => (x == null ? '—' : x.toFixed(d));
+  const e9 = s.ema9[t], e21 = s.ema21[t];
+  const rs = s.rsi[t], rsPrev = t > 0 ? s.rsi[t - 1] : null;
+  const h = s.hist[t], hPrev = t > 0 ? s.hist[t - 1] : null;
+  const m = s.mid[t];
+  let touched: boolean | null = null;
+  if (t - r.bb_lookback >= 0 && s.mid[t - r.bb_lookback] != null) {
+    touched = false;
+    for (let j = t - r.bb_lookback; j < t; j++) if (s.mid[j] != null && bars[j].low <= s.mid[j]!) { touched = true; break; }
+  }
+  const prevClose = t > 0 ? bars[t - 1].close : null;
+  return [
+    { key: 'ema', label: 'EMA 9 > EMA 21, price > EMA 21',
+      pass: e9 == null || e21 == null ? null : e9 > e21 && c > e21,
+      detail: `EMA9 ${f(e9)} · EMA21 ${f(e21)} · close ${f(c)}` },
+    { key: 'rsi', label: `RSI 14 between ${r.rsi_min}–${r.rsi_max} and rising`,
+      pass: rs == null || rsPrev == null ? null : rs >= r.rsi_min && rs <= r.rsi_max && rs > rsPrev,
+      detail: `RSI ${f(rs, 1)} (prior ${f(rsPrev, 1)})` },
+    { key: 'macd', label: 'MACD histogram increasing',
+      pass: h == null || hPrev == null ? null : h > hPrev,
+      detail: `Histogram ${f(h, 3)} (prior ${f(hPrev, 3)})` },
+    { key: 'bb', label: `Pullback to BB middle in last ${r.bb_lookback} bars, then close above it and above prior close`,
+      pass: touched == null || m == null || prevClose == null ? null : touched && c > m && c > prevClose,
+      detail: `Middle band ${f(m)} · touched: ${touched == null ? '—' : touched ? 'yes' : 'no'} · prior close ${f(prevClose)}` },
+  ];
+}
+
+type Swing5Trade = {
+  signal_date: string; entry_date: string; entry_price: number;
+  exit_date: string | null; exit_price: number | null;
+  exit_reason: 'TP' | 'SL' | 'TIME' | 'OPEN'; sessions: number; return_pct: number | null; pnl: number | null;
+};
+
+// Simulate one trade from a signal on bar t: fill at next open (+slippage),
+// TP/SL from the fill, gap-aware, stop first when both are touched in one bar.
+function swing5SimTrade(bars: HistoryBar[], t: number, r: Swing5Rules): Swing5Trade | null {
+  if (t + 1 >= bars.length) return null;
+  const slip = r.slippage_pct / 100;
+  const entry = bars[t + 1].open * (1 + slip);
+  const tp = entry * (1 + r.tp_pct / 100), sl = entry * (1 - r.sl_pct / 100);
+  const base = { signal_date: bars[t].date, entry_date: bars[t + 1].date, entry_price: Number(entry.toFixed(4)) };
+  const done = (j: number, px: number, reason: Swing5Trade['exit_reason']): Swing5Trade => {
+    const exit = px * (1 - slip);
+    const ret = exit / entry - 1;
+    return { ...base, exit_date: bars[j].date, exit_price: Number(exit.toFixed(4)), exit_reason: reason, sessions: j - t, return_pct: Number((ret * 100).toFixed(3)), pnl: Number((ret * r.allocation).toFixed(2)) };
+  };
+  for (let j = t + 1; j <= t + r.max_hold_sessions; j++) {
+    if (j >= bars.length) return { ...base, exit_date: null, exit_price: null, exit_reason: 'OPEN', sessions: bars.length - 1 - t, return_pct: null, pnl: null };
+    const b = bars[j];
+    if (j > t + 1) { // overnight gap through a level fills at the open
+      if (b.open <= sl) return done(j, b.open, 'SL');
+      if (b.open >= tp) return done(j, b.open, 'TP');
+    }
+    if (b.low <= sl) return done(j, sl, 'SL');
+    if (b.high >= tp) return done(j, tp, 'TP');
+    if (j === t + r.max_hold_sessions) return done(j, b.close, 'TIME');
+  }
+  return null;
+}
+
+type Swing5Stats = {
+  trades: number; wins: number; win_rate_pct: number | null; avg_return_pct: number | null;
+  profit_factor: number | null; avg_sessions: number | null; tp_count: number; sl_count: number; time_count: number;
+  total_pnl: number | null; net_croi_pct: number | null; max_drawdown: number | null; trades_per_year: number | null;
+};
+
+function swing5Stats(trades: Swing5Trade[], years: number, allocation: number): Swing5Stats {
+  const closed = trades.filter((t) => t.exit_reason !== 'OPEN' && t.return_pct != null);
+  const n = closed.length;
+  const wins = closed.filter((t) => t.return_pct! > 0).length;
+  const gp = closed.filter((t) => t.pnl! > 0).reduce((a, t) => a + t.pnl!, 0);
+  const gl = -closed.filter((t) => t.pnl! < 0).reduce((a, t) => a + t.pnl!, 0);
+  let eq = 0, peak = 0, dd = 0;
+  for (const t of closed) { eq += t.pnl!; peak = Math.max(peak, eq); dd = Math.max(dd, peak - eq); }
+  const total = closed.reduce((a, t) => a + t.pnl!, 0);
+  return {
+    trades: n, wins,
+    win_rate_pct: n ? r2((wins / n) * 100, 1) : null,
+    avg_return_pct: n ? r2(closed.reduce((a, t) => a + t.return_pct!, 0) / n, 3) : null,
+    profit_factor: n ? (gl > 0 ? r2(gp / gl, 2) : gp > 0 ? 99 : null) : null,
+    avg_sessions: n ? r2(closed.reduce((a, t) => a + t.sessions, 0) / n, 1) : null,
+    tp_count: closed.filter((t) => t.exit_reason === 'TP').length,
+    sl_count: closed.filter((t) => t.exit_reason === 'SL').length,
+    time_count: closed.filter((t) => t.exit_reason === 'TIME').length,
+    total_pnl: n ? r2(total, 2) : null,
+    net_croi_pct: n ? r2((total / allocation) * 100, 2) : null,
+    max_drawdown: n ? r2(dd, 2) : null,
+    trades_per_year: n && years > 0 ? r2(n / years, 1) : null,
+  };
+}
+
+function evaluateSwing5(ticker: string, company: string, bars: HistoryBar[], groupedPrice: number | null, spyBars: HistoryBar[], r: Swing5Rules, includeTrades: boolean) {
+  const n = bars.length;
+  const base = { ticker, company_name: company, bars: n };
+  if (n < SWING5_MIN_BARS) {
+    return { ...base, signal: 'PENDING' as const, score: null, price: groupedPrice, checks: [], filters: [],
+      wait_reasons: [`Needs ${SWING5_MIN_BARS} daily bars of history (has ${n})`], plan: null, backtest: null, backtest_3of4: null, recent_trade: null, trades: [] };
+  }
+  const s = swing5Series(bars);
+  const t = n - 1;
+  const last = bars[t];
+  const price = last.close;
+
+  // SPY regime by date (close above 50-day SMA).
+  const spySma = smaSeries(spyBars.map((b) => b.close), 50);
+  const spyOk = new Map<string, boolean>();
+  spyBars.forEach((b, i) => { if (spySma[i] != null) spyOk.set(b.date, b.close > spySma[i]!); });
+
+  const filtersAt = (i: number): { ok: boolean | null; list: Swing5Check[] } => {
+    const c = bars[i].close, av = s.avgVol[i];
+    const list: Swing5Check[] = [];
+    if (r.min_price != null || r.max_price != null) {
+      list.push({ key: 'price', label: `Price $${r.min_price ?? 0}–${r.max_price ?? '∞'}`,
+        pass: (r.min_price == null || c >= r.min_price) && (r.max_price == null || c <= r.max_price), detail: `$${c.toFixed(2)}` });
+    }
+    if (r.min_avg_volume != null) {
+      list.push({ key: 'volume', label: `Avg daily volume ≥ ${(r.min_avg_volume / 1e6).toFixed(2)}M`,
+        pass: av == null ? null : av >= r.min_avg_volume, detail: av == null ? '—' : `${(av / 1e6).toFixed(2)}M` });
+    }
+    if (r.spy_filter) {
+      const v = spyOk.get(bars[i].date);
+      list.push({ key: 'spy', label: 'SPY above its 50-day SMA', pass: v ?? null, detail: v == null ? 'SPY data missing' : v ? 'Yes' : 'No' });
+    }
+    const ok = list.some((x) => x.pass === false) ? false : list.some((x) => x.pass == null) ? null : true;
+    return { ok, list };
+  };
+
+  const checks = swing5Indicators(bars, s, t, r);
+  const score = checks.filter((c) => c.pass === true).length;
+  const missing = checks.some((c) => c.pass == null);
+  const filt = filtersAt(t);
+  const waitReasons: string[] = [];
+  for (const f of filt.list) if (f.pass === false) waitReasons.push(`${f.label} — fails (${f.detail})`);
+  let signal: 'BUY' | 'WATCH' | 'WAIT' | 'PENDING';
+  if (filt.ok === false) signal = 'WAIT';
+  else if (filt.ok == null || (missing && score < 4)) { signal = 'PENDING'; for (const f of filt.list) if (f.pass == null) waitReasons.push(`${f.label} — no data`); }
+  else signal = score === 4 ? 'BUY' : score === 3 ? 'WATCH' : 'WAIT';
+  if (signal === 'WAIT' && filt.ok !== false) waitReasons.push(`Only ${score} of 4 indicators pass`);
+
+  // Backtest: last ~2 years, one position at a time, 4/4 signals (and 3+/4 for comparison).
+  const first = Math.max(SWING5_MIN_BARS - 1, n - 504);
+  const runBt = (minScore: number) => {
+    const trades: Swing5Trade[] = [];
+    let busyUntil = -1;
+    for (let i = first; i < n; i++) {
+      if (i <= busyUntil) continue;
+      const sc = swing5Indicators(bars, s, i, r).filter((c) => c.pass === true).length;
+      if (sc < minScore || filtersAt(i).ok !== true) continue;
+      const tr = swing5SimTrade(bars, i, r);
+      if (!tr) continue;
+      trades.push(tr);
+      busyUntil = i + tr.sessions; // no new entry until the session after the exit
+      if (tr.exit_reason === 'OPEN') break;
+    }
+    return trades;
+  };
+  const years = (n - first) / 252;
+  const trades4 = runBt(4);
+  const trades3 = runBt(3);
+  const lastTrade = trades4.at(-1) ?? null;
+  // Show the latest simulated trade if it is still open or exited within the last 5 sessions.
+  const recentIdx = lastTrade ? bars.findIndex((b) => b.date === (lastTrade.exit_date ?? last.date)) : -1;
+  const recent = lastTrade && (lastTrade.exit_reason === 'OPEN' || recentIdx >= n - 5) ? lastTrade : null;
+
+  const entryEst = groupedPrice ?? price;
+  const plan = {
+    entry_est: r2(entryEst, 2),
+    tp_price: r2(entryEst * (1 + r.tp_pct / 100), 2),
+    sl_price: r2(entryEst * (1 - r.sl_pct / 100), 2),
+    shares: r2(r.allocation / entryEst, 4),
+    gain_at_tp: r2(r.allocation * r.tp_pct / 100, 2),
+    loss_at_sl: r2(r.allocation * r.sl_pct / 100, 2),
+    max_hold_sessions: r.max_hold_sessions,
+  };
+  return {
+    ...base, signal, score, price: r2(price, 2), signal_date: last.date,
+    rsi: r2(s.rsi[t], 1), avg_volume: s.avgVol[t] != null ? Math.round(s.avgVol[t]!) : null,
+    checks, filters: filt.list, wait_reasons: waitReasons, plan,
+    backtest: swing5Stats(trades4, years, r.allocation),
+    backtest_3of4: swing5Stats(trades3, years, r.allocation),
+    backtest_years: r2(years, 1),
+    recent_trade: recent,
+    trades: includeTrades ? trades4.slice(-30) : [],
+  };
+}
+
+function compareSwing5(a: any, b: any): number {
+  const rank: Record<string, number> = { BUY: 0, WATCH: 1, WAIT: 2, PENDING: 3 };
+  if (rank[a.signal] !== rank[b.signal]) return rank[a.signal] - rank[b.signal];
+  const ea = a.backtest?.trades >= 3 ? a.backtest.avg_return_pct ?? -Infinity : -Infinity;
+  const eb = b.backtest?.trades >= 3 ? b.backtest.avg_return_pct ?? -Infinity : -Infinity;
+  if (ea !== eb) return eb - ea;
+  const wa = a.backtest?.win_rate_pct ?? -Infinity, wb = b.backtest?.win_rate_pct ?? -Infinity;
+  if (wa !== wb) return wb - wa;
+  return a.ticker.localeCompare(b.ticker);
+}
+
+async function runSwing5Scan(body: any, apiKey: string, requestStart: number): Promise<Response> {
+  const rules = mergeSwing5Rules(body.rules);
+  const scanMode: 'discovery' | 'universe' = body.scanMode === 'universe' ? 'universe' : 'discovery';
+  const singleTicker = body.ticker ? String(body.ticker).toUpperCase().trim() : '';
+  const today = new Date();
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const ctx = newScanContext(lastCompletedBusinessDay(today, fmt));
+  ctx.historyLoadLimit = 520;
+  ctx.historyFetchDays = 730;
+
+  let symbolList: { ticker: string; company_name: string | null }[];
+  if (singleTicker) symbolList = [{ ticker: singleTicker, company_name: null }];
+  else if (scanMode === 'universe') {
+    const clientSymbols: string[] = Array.isArray(body.symbols) ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean) : [];
+    symbolList = clientSymbols.length ? clientSymbols.map((t) => ({ ticker: t, company_name: null })) : await fetchScanUniverse();
+  } else {
+    symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
+  }
+  const tickers = [...new Set(symbolList.map((s) => s.ticker.toUpperCase()))];
+  const companyOf = new Map(symbolList.map((s) => [s.ticker.toUpperCase(), s.company_name || '']));
+
+  const { priceMap, barMap, tradingDate, httpStatus: groupedStatus } = await fetchGroupedDailyPrices(apiKey, today, fmt);
+  if (tradingDate) ctx.expectedLatestDate = tradingDate;
+  if (barMap.size) await saveGroupedBarsToCache(barMap, [...tickers, 'SPY']);
+  const groupedFailed = priceMap.size === 0;
+  if (groupedFailed) {
+    const cached = await bulkLoadCachedStockPrices([...tickers, 'SPY']);
+    for (const [t, v] of cached) if (v?.price > 0) priceMap.set(t, v.price);
+    if (groupedStatus === 429) ctx.historyRateLimited = true;
+  }
+
+  const spySnap = rules.spy_filter
+    ? await getStockSnapshot('SPY', apiKey, today, fmt, priceMap.get('SPY') ?? null, true, 300, ctx)
+    : { historicalBars: [] as HistoryBar[] };
+
+  const snaps = new Map<string, StockSnapshot>();
+  for (let i = 0; i < tickers.length; i += 10) {
+    const batch = tickers.slice(i, i + 10);
+    const res = await Promise.all(batch.map((t) => getStockSnapshot(t, apiKey, today, fmt, priceMap.get(t) ?? null, false, SWING5_MIN_BARS, ctx)));
+    batch.forEach((t, k) => snaps.set(t, res[k]));
+  }
+
+  // Backfill: a single ticker always gets ~2 years (for the backtest); a list
+  // only backfills tickers too short to signal, stopping at the first 429.
+  const WARM_DEADLINE_MS = 110_000;
+  const wantBars = singleTicker ? 300 : SWING5_MIN_BARS;
+  let historyFetched = 0, stillPendingHistory = 0, deadlineHit = false;
+  for (const t of tickers.filter((x) => (snaps.get(x)?.historicalBars.length ?? 0) < wantBars)) {
+    if (ctx.historyRateLimited) { stillPendingHistory++; continue; }
+    if (Date.now() - requestStart > WARM_DEADLINE_MS) { deadlineHit = true; stillPendingHistory++; continue; }
+    const before = snaps.get(t)?.historicalBars.length ?? 0;
+    ctx.stockCache.delete(t);
+    const snap = await getStockSnapshot(t, apiKey, today, fmt, priceMap.get(t) ?? null, true, wantBars, ctx);
+    snaps.set(t, snap);
+    if (snap.historicalBars.length > before) historyFetched++;
+    if (snap.historicalBars.length < SWING5_MIN_BARS) stillPendingHistory++;
+  }
+
+  const results = tickers
+    .map((t) => {
+      const snap = snaps.get(t)!;
+      const r = evaluateSwing5(t, companyOf.get(t) || '', snap.historicalBars, snap.currentPrice, spySnap.historicalBars, rules, true);
+      // Keep stored scans small: trade lists only for BUY/WATCH rows.
+      if (!singleTicker && r.signal !== 'BUY' && r.signal !== 'WATCH') r.trades = [];
+      return r;
+    })
+    .sort(compareSwing5);
+
+  const spyBars = spySnap.historicalBars;
+  const spySma50 = spyBars.length >= 50 ? sma(spyBars.map((b) => b.close), 50) : null;
+  const counts = {
+    stocks_screened: tickers.length,
+    buy: results.filter((r) => r.signal === 'BUY').length,
+    watch: results.filter((r) => r.signal === 'WATCH').length,
+    wait: results.filter((r) => r.signal === 'WAIT').length,
+    pending: results.filter((r) => r.signal === 'PENDING').length,
+    spy_above_50: rules.spy_filter ? (spySma50 != null ? spyBars.at(-1)!.close > spySma50 : null) : null,
+    history_fetched_this_scan: historyFetched,
+    still_pending_history: stillPendingHistory,
+    history_rate_limited: ctx.historyRateLimited,
+    warming_time_budget_hit: deadlineHit,
+    latest_trading_date: ctx.expectedLatestDate,
+    cache_rows_written: cacheDiag.rowsWritten,
+    cache_read_errors: cacheDiag.readErrors,
+    cache_write_errors: cacheDiag.writeErrors,
+    cache_last_error: cacheDiag.lastError || null,
+    daily_prices_refreshed: !groupedFailed,
+    daily_prices_http_status: groupedStatus,
+    elapsed_ms: Date.now() - requestStart,
+  };
+  console.log(`[SWING5] mode=${scanMode} screened=${tickers.length} BUY=${counts.buy} WATCH=${counts.watch} WAIT=${counts.wait} P=${counts.pending}`);
+  return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), rules, results, counts });
+}
