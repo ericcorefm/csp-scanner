@@ -24,10 +24,20 @@ interface Props {
   defaultStyle?: ChartStyle;
   /** Initial visible range for daily bars (user can switch). */
   defaultRange?: ChartRange;
+  /** Trade labels (BUY / TP / SL / TIME) drawn on daily bars only. */
+  markers?: ChartMarker[];
 }
 
+export type ChartMarker = {
+  date: string; // YYYY-MM-DD
+  position: 'aboveBar' | 'belowBar';
+  color: string;
+  shape: 'arrowUp' | 'arrowDown' | 'circle' | 'square';
+  text: string;
+};
+
 type ChartStyle = 'line' | 'candle';
-type ChartRange = '1Y' | '2Y';
+type ChartRange = '6M' | '1Y' | '2Y';
 
 const RESOLUTIONS = ['1D', '1W', '1M'] as const;
 type Resolution = (typeof RESOLUTIONS)[number];
@@ -62,7 +72,7 @@ function aggregateBars(bars: OhlcBar[], resolution: Resolution): OhlcBar[] {
   })).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export function TradingViewChart({ ticker, primarySupport, secondarySupport, resistance, targetPrice, stopPrice, defaultStyle = 'candle', defaultRange = '2Y' }: Props) {
+export function TradingViewChart({ ticker, primarySupport, secondarySupport, resistance, targetPrice, stopPrice, defaultStyle = 'candle', defaultRange = '2Y', markers }: Props) {
   const [chartStyle, setChartStyle] = useState<ChartStyle>(defaultStyle);
   const [range, setRange] = useState<ChartRange>(defaultRange);
   const lineRef = useRef<ISeriesApi<'Line'> | null>(null);
@@ -229,18 +239,32 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
       addPriceLine(stopPrice, '#ef4444', 'Stop');
     }
 
-    // 1Y shows the last 12 months of daily bars (older data stays scrollable).
+    // Trade labels: daily view only (weekly/monthly bars don't line up with trade dates).
+    const series = chartStyle === 'candle' ? candleRef.current : lineRef.current;
+    candleRef.current.setMarkers([]);
+    lineRef.current?.setMarkers([]);
+    if (series && res === '1D' && markers && markers.length) {
+      const times = new Set(candleData.map((c) => c.time as number));
+      const m = markers
+        .map((mk) => ({ ...mk, time: Math.floor(new Date(mk.date + 'T00:00:00Z').getTime() / 1000) }))
+        .filter((mk) => times.has(mk.time))
+        .sort((a, b) => a.time - b.time)
+        .map((mk) => ({ time: mk.time as Time, position: mk.position, color: mk.color, shape: mk.shape, text: mk.text }));
+      series.setMarkers(m);
+    }
+
+    // 1Y / 6M show the last 12 / 6 months of daily bars (older data stays scrollable).
     const lastTime = candleData[candleData.length - 1].time as number;
     const firstTime = candleData[0].time as number;
-    const yearAgo = lastTime - 365 * 86400;
-    if (res === '1D' && range === '1Y' && yearAgo > firstTime) {
+    const yearAgo = lastTime - (range === '6M' ? 182 : 365) * 86400;
+    if (res === '1D' && range !== '2Y' && yearAgo > firstTime) {
       chartRef.current?.timeScale().setVisibleRange({ from: yearAgo as Time, to: lastTime as Time });
     } else {
       chartRef.current?.timeScale().fitContent();
     }
     console.log(`[PERF] ${ticker} chart rendered ${Date.now() - chartStart}ms (${aggregated.length} ${res} bars)`);
     return true;
-  }, [ticker, primarySupport, secondarySupport, resistance, targetPrice, stopPrice, chartStyle, range]);
+  }, [ticker, primarySupport, secondarySupport, resistance, targetPrice, stopPrice, chartStyle, range, markers]);
 
   // Fetch bars when ticker or resolution changes — cache first, then fetch
   useEffect(() => {
@@ -288,7 +312,7 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
     if (cached && cached.length > 0) {
       renderBars(cached, resolution);
     }
-  }, [primarySupport, secondarySupport, resistance, targetPrice, stopPrice, loading, ticker, resolution, renderBars]);
+  }, [primarySupport, secondarySupport, resistance, targetPrice, stopPrice, markers, loading, ticker, resolution, renderBars]);
 
   const handleRetry = () => {
     setError(null);
@@ -323,7 +347,7 @@ export function TradingViewChart({ ticker, primarySupport, secondarySupport, res
             </button>
           ))}
           <span className="mx-1 h-4 w-px bg-slate-700" />
-          {resolution === '1D' && (['1Y', '2Y'] as ChartRange[]).map((rg) => (
+          {resolution === '1D' && (['6M', '1Y', '2Y'] as ChartRange[]).map((rg) => (
             <button
               key={rg}
               onClick={() => setRange(rg)}

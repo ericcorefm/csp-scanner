@@ -32,6 +32,8 @@ interface LayoutProps {
   onScannerChange: (k: ScannerKind) => void;
   stock: StockScannerState;
   stockOpenCount?: number;
+  /** When the 1% / 5-Day Swing tab is active, the header shows and rescans that strategy. */
+  swing5Header?: { buy: number; wait: number; lastScanAt: string | null; scanning: boolean; runScan: () => Promise<void> } | null;
 }
 
 const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
@@ -44,15 +46,16 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
-export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock, stockOpenCount = 0 }: LayoutProps) {
+export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock, stockOpenCount = 0, swing5Header = null }: LayoutProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const isStocks = scanner === 'stocks';
 
   const bestPerTicker = selectBestContractPerTicker(state.candidates);
-  const qualifiedCount = isStocks
+  const s5 = isStocks ? swing5Header : null;
+  const qualifiedCount = s5 ? s5.buy : isStocks
     ? stock.results.filter((r) => r.status === 'qualified').length
     : new Set(bestPerTicker.filter(isQualified).map((c) => c.ticker)).size;
-  const rejectedCount = isStocks
+  const rejectedCount = s5 ? s5.wait : isStocks
     ? stock.results.filter((r) => r.status === 'rejected').length
     : new Set(bestPerTicker.filter(isRejected).map((c) => c.ticker)).size;
   const STOCK_LABELS: Partial<Record<Page, string>> = {
@@ -60,10 +63,10 @@ export function Layout({ children, currentPage, onNavigate, state, scanner, onSc
     universe: 'Stock Universe', open: 'Open Stock Positions', closed: 'Closed Stock Positions', summary: 'Stock Summary',
   };
   const labelFor = (id: Page, fallback: string) => (isStocks ? STOCK_LABELS[id] ?? fallback : fallback);
-  const lastScanAt = isStocks ? stock.lastScanAt : state.lastScanAt;
-  const scanning = isStocks ? stock.scanning : state.scanning;
+  const lastScanAt = s5 ? s5.lastScanAt : isStocks ? stock.lastScanAt : state.lastScanAt;
+  const scanning = s5 ? s5.scanning : isStocks ? stock.scanning : state.scanning;
   const profileName = isStocks ? stock.profile?.name : state.activeProfile?.name;
-  const onRescan = () => { void (isStocks ? stock.runScan() : state.runScan()); };
+  const onRescan = () => { void (s5 ? s5.runScan() : isStocks ? stock.runScan() : state.runScan()); };
   const unreadAlerts = state.alerts.filter((a) => !a.read).length;
 
   const handleNav = (page: Page) => {
@@ -180,11 +183,11 @@ export function Layout({ children, currentPage, onNavigate, state, scanner, onSc
               <div className="hidden sm:flex items-center gap-4 text-xs">
                 <div className="flex items-center gap-1.5">
                   <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                  <span className="text-slate-400">{qualifiedCount} qualified</span>
+                  <span className="text-slate-400">{qualifiedCount} {s5 ? 'BUY' : 'qualified'}</span>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className="h-2 w-2 rounded-full bg-slate-500" />
-                  <span className="text-slate-400">{rejectedCount} rejected</span>
+                  <span className="text-slate-400">{rejectedCount} {s5 ? 'WAIT' : 'rejected'}</span>
                 </div>
                 {unreadAlerts > 0 && (
                   <div className="flex items-center gap-1.5">
