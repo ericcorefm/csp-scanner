@@ -9,6 +9,9 @@ import { StockPositionsPage } from '@/pages/StockPositionsPage';
 import { StockSummaryPage } from '@/pages/StockSummaryPage';
 import { StockCandidatesPage } from '@/pages/StockCandidatesPage';
 import { StockSettingsPage } from '@/pages/StockSettingsPage';
+import { Swing5Page } from '@/pages/Swing5Page';
+import { useSwing5Scanner } from '@/lib/swing5Store';
+import type { StockStrategy } from '@/lib/stockTypes';
 import { CandidatesPage } from '@/pages/CandidatesPage';
 import { DetailPage } from '@/pages/DetailPage';
 import { OpenPositionsPage } from '@/pages/OpenPositionsPage';
@@ -28,6 +31,15 @@ function App() {
   const portfolio = useStockPortfolio();
   // "My Scan Universe" on the Stocks side uses the STOCK watchlist.
   const stock = useStockScanner(portfolio.enabledSymbols);
+  const swing5 = useSwing5Scanner(stock, portfolio.enabledSymbols);
+  // Stock Candidates tabs: 30-Day Swing | 1% / 5-Day Swing. Remembered between visits.
+  const [strategy, setStrategyState] = useState<StockStrategy>(() => {
+    try { return localStorage.getItem('stock-strategy') === 'swing5' ? 'swing5' : 'swing30'; } catch { return 'swing30'; }
+  });
+  const setStrategy = (s: StockStrategy) => {
+    setStrategyState(s);
+    try { localStorage.setItem('stock-strategy', s); } catch { /* storage unavailable */ }
+  };
   // Options (CSP) vs Stocks. Remembered between visits.
   const [scanner, setScannerState] = useState<ScannerKind>(() => {
     try { return localStorage.getItem('scanner-kind') === 'stocks' ? 'stocks' : 'options'; } catch { return 'options'; }
@@ -75,8 +87,29 @@ function App() {
   }
 
   return (
-    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock} stockOpenCount={portfolio.openPositions.length}>
-      {isStocks && currentPage === 'candidates' && <StockCandidatesPage stock={stock} portfolio={portfolio} />}
+    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock} stockOpenCount={portfolio.openPositions.length}
+      swing5Header={currentPage === 'candidates' && strategy === 'swing5' ? {
+        buy: swing5.counts?.buy ?? 0, wait: swing5.counts?.wait ?? 0,
+        lastScanAt: swing5.lastScanAt, scanning: swing5.scanning, runScan: swing5.runScan,
+      } : null}>
+      {isStocks && currentPage === 'candidates' && (
+        <div className="space-y-4">
+          <div className="flex w-fit items-center gap-1 rounded-lg border border-slate-800 bg-slate-900 p-1">
+            {([['swing30', '30-Day Swing'], ['swing5', '1% / 5-Day Swing']] as [StockStrategy, string][]).map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setStrategy(k)}
+                className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${strategy === k ? 'bg-sky-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {strategy === 'swing5'
+            ? <Swing5Page stock={stock} swing5={swing5} portfolio={portfolio} />
+            : <StockCandidatesPage stock={stock} portfolio={portfolio} />}
+        </div>
+      )}
       {isStocks && currentPage === 'settings' && <StockSettingsPage stock={stock} />}
       {isStocks && currentPage === 'analyze' && (
         <StockAnalyzePage stock={stock} portfolio={portfolio} autoTicker={autoAnalyzeTicker} onConsumeAutoTicker={() => setAutoAnalyzeTicker(null)} />
