@@ -168,6 +168,53 @@ export function useStockPortfolio() {
     return { ok: !e, error: e?.message ?? null };
   }, []);
 
+  // Delete many positions at once (Select all / Delete selected / Delete all).
+  const deletePositions = useCallback(async (ids: string[]) => {
+    let deleted = 0;
+    let error: string | null = null;
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100);
+      const { error: e } = await supabase.from('stock_positions').delete().in('id', chunk);
+      if (e) { error = e.message; break; }
+      deleted += chunk.length;
+      setPositions((prev) => prev.filter((p) => !chunk.includes(p.id)));
+    }
+    return { ok: !error, deleted, error };
+  }, []);
+
+  // Combine partial fills of the same ticker into one position:
+  // total shares, share-weighted entry (and exit) price, earliest entry date,
+  // latest exit date. The first row is kept and updated; the others are deleted.
+  const combinePositions = useCallback(async (ids: string[]) => {
+    const rows = positions.filter((p) => ids.includes(p.id));
+    if (rows.length < 2) return { ok: false, error: 'Select at least 2 rows to combine.' };
+    if (new Set(rows.map((p) => p.ticker)).size > 1) return { ok: false, error: 'Only rows with the same ticker can be combined.' };
+    if (new Set(rows.map((p) => p.status)).size > 1) return { ok: false, error: 'Only rows from the same list can be combined.' };
+    const closed = rows[0].status === 'closed';
+    if (closed && rows.some((p) => p.exit_price == null)) return { ok: false, error: 'Every closed row needs an exit price to combine.' };
+    const shares = rows.reduce((a, p) => a + p.shares, 0);
+    if (!(shares > 0)) return { ok: false, error: 'Total shares must be above 0.' };
+    const sorted = [...rows].sort((a, b) => a.entry_date.localeCompare(b.entry_date));
+    const keep = sorted[0];
+    const patch: Partial<StockPosition> = {
+      shares: Number(shares.toFixed(6)),
+      entry_price: Number((rows.reduce((a, p) => a + p.entry_price * p.shares, 0) / shares).toFixed(4)),
+      entry_date: keep.entry_date,
+      notes: [`Combined ${rows.length} fills`, keep.notes].filter(Boolean).join(' | ').slice(0, 500),
+    };
+    if (closed) {
+      patch.exit_price = Number((rows.reduce((a, p) => a + (p.exit_price as number) * p.shares, 0) / shares).toFixed(4));
+      const exits = rows.map((p) => p.exit_date || '').sort();
+      patch.exit_date = exits[exits.length - 1] || keep.exit_date;
+    }
+    const { error: ue } = await supabase.from('stock_positions').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', keep.id);
+    if (ue) return { ok: false, error: ue.message };
+    const others = rows.filter((p) => p.id !== keep.id).map((p) => p.id);
+    const { error: de } = await supabase.from('stock_positions').delete().in('id', others);
+    setPositions((prev) => prev.filter((p) => !others.includes(p.id)).map((p) => (p.id === keep.id ? { ...p, ...patch } : p)));
+    return { ok: !de, error: de?.message ?? null };
+  }, [positions]);
+
   // ── Quotes for open positions (saved prices; no Massive calls) ──
   const openTickers = positions.filter((p) => p.status === 'open').map((p) => p.ticker);
   const openKey = [...new Set(openTickers)].sort().join(',');
@@ -197,7 +244,7 @@ export function useStockPortfolio() {
     positions,
     openPositions: positions.filter((p) => p.status === 'open'),
     closedPositions: positions.filter((p) => p.status === 'closed'),
-    addPosition, closePosition, reopenPosition, deletePosition, updatePosition, importPositions,
+    addPosition, closePosition, reopenPosition, deletePosition, deletePositions, combinePositions, updatePosition, importPositions,
     quotes, quotesLoading, refreshQuotes,
     error,
   };
