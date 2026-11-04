@@ -296,6 +296,8 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const toggleSel = (id: string) => setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const clearSel = () => setSelected(new Set());
+  // Closed tab: month filter by exit date ('all' = every month).
+  const [month, setMonth] = useState<string>('all');
 
   const openRows = useMemo(() => portfolio.openPositions.map((p) => {
     const q = portfolio.quotes[p.ticker];
@@ -306,7 +308,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     return { p, price, cost, value, pl, plPct: pl != null ? (pl / cost) * 100 : null, held: daysBetween(p.entry_date, today), health: positionHealth(p, price) };
   }), [portfolio.openPositions, portfolio.quotes, today]);
 
-  const closedRows = useMemo(() => portfolio.closedPositions.map((p) => {
+  const allClosedRows = useMemo(() => portfolio.closedPositions.map((p) => {
     const cost = p.entry_price * p.shares;
     const pl = p.exit_price != null ? (p.exit_price - p.entry_price) * p.shares : null;
     const plPct = pl != null ? (pl / cost) * 100 : null;
@@ -314,6 +316,28 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     const ann = plPct != null && held ? Math.min(1000, (Math.pow(1 + plPct / 100, 365 / Math.max(5, held)) - 1) * 100) : null;
     return { p, cost, pl, plPct, held, ann };
   }), [portfolio.closedPositions]);
+
+  // Realized P/L per month (by exit date), newest first, for the dropdown.
+  const months = useMemo(() => {
+    const m = new Map<string, { pl: number; trades: number }>();
+    for (const r of allClosedRows) {
+      const key = r.p.exit_date ? r.p.exit_date.slice(0, 7) : 'none';
+      const v = m.get(key) ?? { pl: 0, trades: 0 };
+      v.pl += r.pl ?? 0; v.trades += 1;
+      m.set(key, v);
+    }
+    return [...m.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+  }, [allClosedRows]);
+  const closedRows = useMemo(
+    () => (month === 'all' ? allClosedRows : allClosedRows.filter((r) => (r.p.exit_date ? r.p.exit_date.slice(0, 7) : 'none') === month)),
+    [allClosedRows, month],
+  );
+  const monthLabel = (key: string) => {
+    if (key === 'none') return 'No exit date';
+    const [y, mo] = key.split('-').map(Number);
+    return new Date(Date.UTC(y, mo - 1, 1)).toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+  };
+  const signedMoney = (v: number) => `${v >= 0 ? '+' : '-'}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   const openValue = useCallback((r: typeof openRows[number], k: OpenKey) => ({
     ticker: r.p.ticker, status: r.health, entry_date: r.p.entry_date, held: r.held, entry: r.p.entry_price,
@@ -439,12 +463,27 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           <h1 className="text-xl font-semibold text-slate-100">Closed Stock Positions</h1>
           <p className="text-sm text-slate-500">Realized results. Click a header to sort; ✎ to edit. Annualized is capped at 1,000%.</p>
         </div>
-        <ExcelButtons portfolio={portfolio} view="closed" />
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-2 text-sm text-slate-400">
+            Realized P/L
+            <select
+              value={month}
+              onChange={(e) => { setMonth(e.target.value); clearSel(); }}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+            >
+              <option value="all">All months ({signedMoney(allClosedRows.reduce((a, r) => a + (r.pl ?? 0), 0))})</option>
+              {months.map(([key, v]) => (
+                <option key={key} value={key}>{monthLabel(key)}: {signedMoney(v.pl)} · {v.trades} trade{v.trades === 1 ? '' : 's'}</option>
+              ))}
+            </select>
+          </label>
+          <ExcelButtons portfolio={portfolio} view="closed" />
+        </div>
       </div>
       <Summary items={[
         { label: 'Closed trades', value: String(closedRows.length) },
         { label: 'Avg investment', value: closedRows.length ? money(closedRows.reduce((a, r) => a + r.cost, 0) / closedRows.length) : '--' },
-        { label: 'Realized P/L', value: money(realized), tone: plColor(realized) },
+        { label: month === 'all' ? 'Realized P/L' : `Realized P/L · ${monthLabel(month)}`, value: money(realized), tone: plColor(realized) },
         { label: 'Win rate', value: closedRows.length ? formatPct((wins / closedRows.length) * 100, 0) : '--' },
         { label: 'Avg return / trade', value: avgPct != null ? formatPct(avgPct, 2) : '--', tone: plColor(avgPct) },
         { label: 'Avg days held', value: avgDays != null ? formatNum(avgDays, 1) : '--' },
@@ -462,7 +501,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         ))}
       </div>
       {closedView === 'tickers' ? (
-        <TickerSummary positions={portfolio.closedPositions} onAnalyze={onAnalyze} />
+        <TickerSummary positions={closedRows.map((r) => r.p)} onAnalyze={onAnalyze} />
       ) : closedRows.length === 0 ? (
         <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet. You can also use Import Excel.</div>
       ) : (
