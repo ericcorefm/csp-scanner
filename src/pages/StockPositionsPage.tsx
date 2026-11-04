@@ -79,7 +79,7 @@ type TickerRow = { ticker: string; trades: number; avgInv: number; avgDays: numb
 
 /**
  * Per-ticker results from closed trades.
- * - A trade = all rows with the same ticker, entry date and exit date (partial fills count once)
+ * - A trade = all rows with the same ticker and exit date (fills bought over several days, sold together, count once)
  * - Avg Investment: average capital per trade (entry price × shares, fills summed)
  * - Avg DIM: average days in market (exit date − entry date; same-day = 0)
  * - Avg CROI / Trade: average return of the individual trades
@@ -95,13 +95,16 @@ function TickerSummary({ positions, onAnalyze }: { positions: StockPosition[]; o
       if (arr) arr.push(p); else by.set(p.ticker, [p]);
     }
     return [...by.entries()].map(([ticker, list]) => {
-      // Partial fills of one order (same entry date and exit date) count as ONE trade.
+      // Fills sold on the same exit date count as ONE trade (same as All Trades);
+      // DIM runs from the earliest entry of that trade.
       const trades = new Map<string, { inv: number; gain: number; days: number }>();
       for (const p of list) {
-        const key = `${p.entry_date}|${p.exit_date ?? ''}`;
-        const t = trades.get(key) ?? { inv: 0, gain: 0, days: p.exit_date ? Math.max(0, daysBetween(p.entry_date, p.exit_date)) : 0 };
+        const key = p.exit_date ?? '';
+        const d = p.exit_date ? Math.max(0, daysBetween(p.entry_date, p.exit_date)) : 0;
+        const t = trades.get(key) ?? { inv: 0, gain: 0, days: d };
         t.inv += p.entry_price * p.shares;
         t.gain += (p.exit_price! - p.entry_price) * p.shares;
+        t.days = Math.max(t.days, d);
         trades.set(key, t);
       }
       const tl = [...trades.values()];
@@ -308,14 +311,43 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     return { p, price, cost, value, pl, plPct: pl != null ? (pl / cost) * 100 : null, held: daysBetween(p.entry_date, today), health: positionHealth(p, price) };
   }), [portfolio.openPositions, portfolio.quotes, today]);
 
-  const allClosedRows = useMemo(() => portfolio.closedPositions.map((p) => {
-    const cost = p.entry_price * p.shares;
-    const pl = p.exit_price != null ? (p.exit_price - p.entry_price) * p.shares : null;
-    const plPct = pl != null ? (pl / cost) * 100 : null;
-    const held = p.exit_date ? Math.max(1, daysBetween(p.entry_date, p.exit_date)) : null;
-    const ann = plPct != null && held ? Math.min(1000, (Math.pow(1 + plPct / 100, 365 / Math.max(5, held)) - 1) * 100) : null;
-    return { p, cost, pl, plPct, held, ann };
-  }), [portfolio.closedPositions]);
+  // All Trades: one row per ticker + exit date. Fills bought on one or several
+  // days and sold together become ONE trade (share-weighted entry and exit
+  // price, earliest entry date). "Show individual fills" turns this off.
+  const [consolidate, setConsolidateState] = useState<boolean>(() => {
+    try { return localStorage.getItem('closed-consolidate') !== 'off'; } catch { return true; }
+  });
+  const setConsolidate = (on: boolean) => {
+    setConsolidateState(on);
+    clearSel();
+    try { localStorage.setItem('closed-consolidate', on ? 'on' : 'off'); } catch { /* storage unavailable */ }
+  };
+  const allClosedRows = useMemo(() => {
+    const groups = new Map<string, StockPosition[]>();
+    for (const p of portfolio.closedPositions) {
+      const key = consolidate ? `${p.ticker}|${p.exit_date ?? ''}|${p.exit_price == null ? p.id : ''}` : p.id;
+      const g = groups.get(key);
+      if (g) g.push(p); else groups.set(key, [p]);
+    }
+    return [...groups.values()].map((fills) => {
+      const sorted = [...fills].sort((a, b) => a.entry_date.localeCompare(b.entry_date));
+      const shares = fills.reduce((a, f) => a + f.shares, 0);
+      const cost = fills.reduce((a, f) => a + f.entry_price * f.shares, 0);
+      const exitValue = fills.every((f) => f.exit_price != null) ? fills.reduce((a, f) => a + (f.exit_price as number) * f.shares, 0) : null;
+      const p: StockPosition = fills.length === 1 ? fills[0] : {
+        ...sorted[0],
+        shares,
+        entry_price: shares > 0 ? cost / shares : sorted[0].entry_price,
+        exit_price: exitValue != null && shares > 0 ? exitValue / shares : null,
+      };
+      const pl = exitValue != null ? exitValue - cost : null;
+      const plPct = pl != null && cost > 0 ? (pl / cost) * 100 : null;
+      const held = p.exit_date ? Math.max(1, daysBetween(p.entry_date, p.exit_date)) : null;
+      const ann = plPct != null && held ? Math.min(1000, (Math.pow(1 + plPct / 100, 365 / Math.max(5, held)) - 1) * 100) : null;
+      const lastEntry = sorted[sorted.length - 1].entry_date;
+      return { p, ids: fills.map((f) => f.id), fills: fills.length, lastEntry, cost, pl, plPct, held, ann };
+    });
+  }, [portfolio.closedPositions, consolidate]);
 
   // Realized P/L per month (by exit date), newest first, for the dropdown.
   const months = useMemo(() => {
@@ -501,22 +533,26 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         ))}
       </div>
       {closedView === 'tickers' ? (
-        <TickerSummary positions={closedRows.map((r) => r.p)} onAnalyze={onAnalyze} />
+        <TickerSummary positions={portfolio.closedPositions.filter((p) => month === 'all' || (p.exit_date ? p.exit_date.slice(0, 7) : 'none') === month)} onAnalyze={onAnalyze} />
       ) : closedRows.length === 0 ? (
         <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet. You can also use Import Excel.</div>
       ) : (
         <div className="space-y-3">
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-sm text-slate-400">
+          <input type="checkbox" checked={!consolidate} onChange={(e) => setConsolidate(!e.target.checked)} className="h-4 w-4 accent-sky-500" />
+          Show individual fills (otherwise fills of the same ticker sold on the same day are shown as one averaged trade)
+        </label>
         <SelectionBar
-          total={closedRows.length} label="closed trades"
-          allIds={closedRows.map((r) => r.p.id)}
-          selectedIds={closedRows.filter((r) => selected.has(r.p.id)).map((r) => r.p.id)}
-          onSelectAll={() => setSelected(new Set(closedRows.map((r) => r.p.id)))} onClear={clearSel} portfolio={portfolio}
+          total={closedRows.flatMap((r) => r.ids).length} label="closed rows"
+          allIds={closedRows.flatMap((r) => r.ids)}
+          selectedIds={closedRows.flatMap((r) => r.ids).filter((id) => selected.has(id))}
+          onSelectAll={() => setSelected(new Set(closedRows.flatMap((r) => r.ids)))} onClear={clearSel} portfolio={portfolio}
         />
         <div className="overflow-x-auto rounded-xl border border-slate-800">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
-                <th className="w-8 px-3 py-2.5"><input type="checkbox" aria-label="Select all" checked={closedRows.length > 0 && closedRows.every((r) => selected.has(r.p.id))} onChange={() => (closedRows.every((r) => selected.has(r.p.id)) ? clearSel() : setSelected(new Set(closedRows.map((r) => r.p.id))))} className="h-4 w-4 cursor-pointer accent-sky-500" /></th>
+                <th className="w-8 px-3 py-2.5"><input type="checkbox" aria-label="Select all" checked={closedRows.length > 0 && closedRows.every((r) => r.ids.every((id) => selected.has(id)))} onChange={() => (closedRows.every((r) => r.ids.every((id) => selected.has(id))) ? clearSel() : setSelected(new Set(closedRows.flatMap((r) => r.ids))))} className="h-4 w-4 cursor-pointer accent-sky-500" /></th>
                 {th('Ticker', 'ticker', 'left')}{th('Result', 'result', 'left')}{th('Entry date', 'entry_date', 'left')}{th('Exit date', 'exit_date', 'left')}
                 {th('Held', 'held')}{th('Entry', 'entry')}{th('Exit', 'exit')}{th('Shares', 'shares')}{th('Investment', 'invested')}
                 {th('P/L', 'pl')}{th('P/L %', 'plPct')}{th('Annualized', 'ann')}
@@ -524,12 +560,24 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
               </tr>
             </thead>
             <tbody>
-              {closedSort.sorted.map(({ p, cost, pl, plPct, held, ann }) => (
-                <tr key={p.id} className={`border-b border-slate-800/60 ${selected.has(p.id) ? 'bg-sky-500/5' : ''}`}>
-                  <RowCheck checked={selected.has(p.id)} onChange={() => toggleSel(p.id)} />
-                  <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
+              {closedSort.sorted.map(({ p, ids, fills, lastEntry, cost, pl, plPct, held, ann }) => {
+                const allSel = ids.every((id) => selected.has(id));
+                const toggleGroup = () => setSelected((prev) => {
+                  const n = new Set(prev);
+                  if (ids.every((id) => n.has(id))) ids.forEach((id) => n.delete(id)); else ids.forEach((id) => n.add(id));
+                  return n;
+                });
+                return (
+                <tr key={ids.join(',')} className={`border-b border-slate-800/60 ${allSel ? 'bg-sky-500/5' : ''}`}>
+                  <RowCheck checked={allSel} onChange={toggleGroup} />
+                  <td className="px-3 py-2 font-semibold text-slate-100">
+                    <TickerLink ticker={p.ticker} onAnalyze={onAnalyze} />
+                    {fills > 1 && <span className="ml-1.5 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-slate-400" title="Rows averaged into this trade">{fills} fills</span>}
+                  </td>
                   <td className="px-3 py-2"><Badge variant={(pl ?? 0) > 0 ? 'success' : 'error'}>{(pl ?? 0) > 0 ? 'Win' : 'Loss'}</Badge></td>
-                  <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
+                  <td className="px-3 py-2 text-slate-400" title={fills > 1 && lastEntry !== p.entry_date ? `Bought ${p.entry_date} to ${lastEntry}` : undefined}>
+                    {p.entry_date}{fills > 1 && lastEntry !== p.entry_date && <span className="text-slate-600"> → {lastEntry.slice(5)}</span>}
+                  </td>
                   <td className="px-3 py-2 text-slate-400">{p.exit_date ?? '--'}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-300">{held ?? '--'}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.entry_price)}</td>
@@ -540,12 +588,28 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                   <td className={`px-3 py-2 text-right tabular-nums ${plColor(plPct)}`}>{plPct != null ? formatPct(plPct, 2) : '--'}</td>
                   <td className={`px-3 py-2 text-right tabular-nums ${plColor(ann)}`}>{ann == null ? '--' : ann >= 1000 ? '>1,000%' : formatPct(ann, 0)}</td>
                   <td className="whitespace-nowrap px-3 py-2 text-right">
-                    {editBtn(p)}
-                    <button onClick={() => void portfolio.reopenPosition(p.id)} className="mr-2 text-slate-500 hover:text-sky-400" title="Reopen"><RotateCcw className="inline h-4 w-4" /></button>
-                    <button onClick={() => { if (confirm(`Delete ${p.ticker} trade?`)) void portfolio.deletePosition(p.id); }} className="text-slate-500 hover:text-red-400" title="Delete"><Trash2 className="inline h-4 w-4" /></button>
+                    {fills > 1 ? (
+                      <>
+                        <button
+                          onClick={() => { if (confirm(`Permanently merge the ${fills} ${p.ticker} fills into one saved trade (average entry ${formatNum(p.entry_price)}, average exit ${p.exit_price != null ? formatNum(p.exit_price) : '--'})?`)) void portfolio.combinePositions(ids); }}
+                          className="mr-2 inline-flex items-center gap-1 rounded-lg border border-sky-500/50 px-2 py-1 text-xs text-sky-300 hover:bg-sky-500/10"
+                          title="Save these fills as one trade (can't be undone)"
+                        >
+                          <Combine className="h-3.5 w-3.5" /> Combine
+                        </button>
+                        <button onClick={() => { if (confirm(`Delete all ${fills} ${p.ticker} fills of this trade?`)) void portfolio.deletePositions(ids); }} className="text-slate-500 hover:text-red-400" title="Delete this trade (all fills)"><Trash2 className="inline h-4 w-4" /></button>
+                      </>
+                    ) : (
+                      <>
+                        {editBtn(p)}
+                        <button onClick={() => void portfolio.reopenPosition(p.id)} className="mr-2 text-slate-500 hover:text-sky-400" title="Reopen"><RotateCcw className="inline h-4 w-4" /></button>
+                        <button onClick={() => { if (confirm(`Delete ${p.ticker} trade?`)) void portfolio.deletePosition(p.id); }} className="text-slate-500 hover:text-red-400" title="Delete"><Trash2 className="inline h-4 w-4" /></button>
+                      </>
+                    )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
