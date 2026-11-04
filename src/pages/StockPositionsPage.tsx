@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Trash2, CheckSquare, RotateCcw, X, Pencil, Download, Upload } from 'lucide-react';
+import { RefreshCw, Trash2, CheckSquare, RotateCcw, X, Pencil, Download, Upload, Combine } from 'lucide-react';
 import { useSort } from '@/lib/useSort';
 import { SortTh } from '@/components/SortTh';
 import { EditStockPositionModal } from '@/components/EditStockPositionModal';
@@ -79,7 +79,8 @@ type TickerRow = { ticker: string; trades: number; avgInv: number; avgDays: numb
 
 /**
  * Per-ticker results from closed trades.
- * - Avg Investment: average capital per trade (entry price × shares)
+ * - A trade = all rows with the same ticker, entry date and exit date (partial fills count once)
+ * - Avg Investment: average capital per trade (entry price × shares, fills summed)
  * - Avg DIM: average days in market (exit date − entry date; same-day = 0)
  * - Avg CROI / Trade: average return of the individual trades
  * - Recycled CROI: total gain ÷ average investment — what recycling roughly the
@@ -94,20 +95,28 @@ function TickerSummary({ positions, onAnalyze }: { positions: StockPosition[]; o
       if (arr) arr.push(p); else by.set(p.ticker, [p]);
     }
     return [...by.entries()].map(([ticker, list]) => {
-      const inv = list.map((p) => p.entry_price * p.shares);
-      const gains = list.map((p) => (p.exit_price! - p.entry_price) * p.shares);
-      const days = list.map((p) => (p.exit_date ? Math.max(0, daysBetween(p.entry_date, p.exit_date)) : 0));
-      const avgInv = inv.reduce((a, b) => a + b, 0) / list.length;
-      const totalGain = gains.reduce((a, b) => a + b, 0);
+      // Partial fills of one order (same entry date and exit date) count as ONE trade.
+      const trades = new Map<string, { inv: number; gain: number; days: number }>();
+      for (const p of list) {
+        const key = `${p.entry_date}|${p.exit_date ?? ''}`;
+        const t = trades.get(key) ?? { inv: 0, gain: 0, days: p.exit_date ? Math.max(0, daysBetween(p.entry_date, p.exit_date)) : 0 };
+        t.inv += p.entry_price * p.shares;
+        t.gain += (p.exit_price! - p.entry_price) * p.shares;
+        trades.set(key, t);
+      }
+      const tl = [...trades.values()];
+      const n = tl.length;
+      const avgInv = tl.reduce((a, t) => a + t.inv, 0) / n;
+      const totalGain = tl.reduce((a, t) => a + t.gain, 0);
       return {
         ticker,
-        trades: list.length,
+        trades: n,
         avgInv,
-        avgDays: days.reduce((a, b) => a + b, 0) / list.length,
+        avgDays: tl.reduce((a, t) => a + t.days, 0) / n,
         totalGain,
-        avgCroi: (gains.reduce((a, g, i) => a + g / inv[i], 0) / list.length) * 100,
+        avgCroi: (tl.reduce((a, t) => a + (t.inv > 0 ? t.gain / t.inv : 0), 0) / n) * 100,
         recycled: avgInv > 0 ? (totalGain / avgInv) * 100 : 0,
-        wins: gains.filter((g) => g > 0).length,
+        wins: tl.filter((t) => t.gain > 0).length,
       };
     });
   }, [positions]);
@@ -211,6 +220,68 @@ function ExcelButtons({ portfolio, view }: { portfolio: StockPortfolioState; vie
   );
 }
 
+/** Select all / Combine / Delete selected / Delete all for one positions list. */
+function SelectionBar({ total, selectedIds, allIds, onSelectAll, onClear, portfolio, label }: {
+  total: number; selectedIds: string[]; allIds: string[];
+  onSelectAll: () => void; onClear: () => void; portfolio: StockPortfolioState; label: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const n = selectedIds.length;
+  const run = async (fn: () => Promise<{ ok: boolean; error: string | null }>, done: string) => {
+    setBusy(true); setMsg(null);
+    const res = await fn();
+    setBusy(false);
+    setMsg(res.ok ? done : res.error || 'Something went wrong');
+    if (res.ok) onClear();
+  };
+  if (total === 0) return null;
+  const btn = 'rounded-lg border px-3 py-1.5 text-xs font-medium disabled:opacity-50';
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <button onClick={n === total ? onClear : onSelectAll} className={`${btn} border-slate-700 text-slate-300 hover:bg-slate-800`}>
+        {n === total ? 'Clear selection' : `Select all (${total})`}
+      </button>
+      {n > 0 && <span className="text-slate-400">{n} selected</span>}
+      {n >= 2 && (
+        <button
+          disabled={busy}
+          title="Merge partial fills of the same ticker into one position (share-weighted prices)"
+          onClick={() => { if (confirm(`Combine ${n} selected ${label} into one position?`)) void run(() => portfolio.combinePositions(selectedIds), `Combined ${n} rows into one.`); }}
+          className={`${btn} border-sky-500/50 text-sky-300 hover:bg-sky-500/10`}
+        >
+          <Combine className="mr-1 inline h-3.5 w-3.5" />Combine selected
+        </button>
+      )}
+      {n > 0 && (
+        <button
+          disabled={busy}
+          onClick={() => { if (confirm(`Delete ${n} selected ${label}? This can't be undone.`)) void run(() => portfolio.deletePositions(selectedIds), `Deleted ${n}.`); }}
+          className={`${btn} border-red-500/50 text-red-300 hover:bg-red-500/10`}
+        >
+          <Trash2 className="mr-1 inline h-3.5 w-3.5" />Delete selected
+        </button>
+      )}
+      <button
+        disabled={busy}
+        onClick={() => { if (confirm(`Delete ALL ${total} ${label}? This can't be undone. (Tip: Export Excel first as a backup.)`)) void run(() => portfolio.deletePositions(allIds), `Deleted all ${total}.`); }}
+        className={`${btn} border-slate-700 text-red-300/80 hover:bg-red-500/10`}
+      >
+        Delete all
+      </button>
+      {msg && <span className="text-slate-400">{msg}</span>}
+    </div>
+  );
+}
+
+function RowCheck({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+  return (
+    <td className="w-8 px-3 py-2">
+      <input type="checkbox" checked={checked} onChange={onChange} className="h-4 w-4 cursor-pointer accent-sky-500" />
+    </td>
+  );
+}
+
 export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: StockPortfolioState; view: 'open' | 'closed'; onAnalyze?: (ticker: string) => void }) {
   const [closing, setClosing] = useState<StockPosition | null>(null);
   const [editing, setEditing] = useState<StockPosition | null>(null);
@@ -222,6 +293,9 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     try { localStorage.setItem('closed-stock-view', v); } catch { /* storage unavailable */ }
   };
   const today = todayISO();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const toggleSel = (id: string) => setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const clearSel = () => setSelected(new Set());
 
   const openRows = useMemo(() => portfolio.openPositions.map((p) => {
     const q = portfolio.quotes[p.ticker];
@@ -288,6 +362,12 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           { label: 'Unrealized %', value: invested > 0 ? formatPct((pl / invested) * 100, 2) : '--', tone: plColor(pl) },
           { label: 'Need attention', value: String(openRows.filter((r) => ['Target hit', 'Stop hit', 'Cycle ended'].includes(r.health)).length), tone: 'text-amber-400' },
         ]} />
+        <SelectionBar
+          total={openRows.length} label="open positions"
+          allIds={openRows.map((r) => r.p.id)}
+          selectedIds={openRows.filter((r) => selected.has(r.p.id)).map((r) => r.p.id)}
+          onSelectAll={() => setSelected(new Set(openRows.map((r) => r.p.id)))} onClear={clearSel} portfolio={portfolio}
+        />
         {openRows.length === 0 ? (
           <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-sky-300">No open stock positions. Add one from Stock Candidates or Analyze, or use Import Excel.</div>
         ) : (
@@ -295,6 +375,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
+                  <th className="w-8 px-3 py-2.5"><input type="checkbox" aria-label="Select all" checked={openRows.length > 0 && openRows.every((r) => selected.has(r.p.id))} onChange={() => (openRows.every((r) => selected.has(r.p.id)) ? clearSel() : setSelected(new Set(openRows.map((r) => r.p.id))))} className="h-4 w-4 cursor-pointer accent-sky-500" /></th>
                   {th('Ticker', 'ticker', 'left')}{th('Status', 'status', 'left')}{th('Entry date', 'entry_date', 'left')}
                   {th('Held', 'held')}{th('Entry', 'entry')}{th('Shares', 'shares')}{th('Cost', 'cost')}
                   {th('Current', 'current')}{th('P/L', 'pl')}{th('P/L %', 'plPct')}{th('Target', 'target')}
@@ -303,7 +384,8 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
               </thead>
               <tbody>
                 {openSort.sorted.map(({ p, price, cost, pl, plPct, held, health }) => (
-                  <tr key={p.id} className="border-b border-slate-800/60">
+                  <tr key={p.id} className={`border-b border-slate-800/60 ${selected.has(p.id) ? 'bg-sky-500/5' : ''}`}>
+                    <RowCheck checked={selected.has(p.id)} onChange={() => toggleSel(p.id)} />
                     <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
                     <td className="px-3 py-2"><Badge variant={HEALTH_VARIANT[health]}>{health}</Badge></td>
                     <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
@@ -384,10 +466,18 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
       ) : closedRows.length === 0 ? (
         <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet. You can also use Import Excel.</div>
       ) : (
+        <div className="space-y-3">
+        <SelectionBar
+          total={closedRows.length} label="closed trades"
+          allIds={closedRows.map((r) => r.p.id)}
+          selectedIds={closedRows.filter((r) => selected.has(r.p.id)).map((r) => r.p.id)}
+          onSelectAll={() => setSelected(new Set(closedRows.map((r) => r.p.id)))} onClear={clearSel} portfolio={portfolio}
+        />
         <div className="overflow-x-auto rounded-xl border border-slate-800">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
+                <th className="w-8 px-3 py-2.5"><input type="checkbox" aria-label="Select all" checked={closedRows.length > 0 && closedRows.every((r) => selected.has(r.p.id))} onChange={() => (closedRows.every((r) => selected.has(r.p.id)) ? clearSel() : setSelected(new Set(closedRows.map((r) => r.p.id))))} className="h-4 w-4 cursor-pointer accent-sky-500" /></th>
                 {th('Ticker', 'ticker', 'left')}{th('Result', 'result', 'left')}{th('Entry date', 'entry_date', 'left')}{th('Exit date', 'exit_date', 'left')}
                 {th('Held', 'held')}{th('Entry', 'entry')}{th('Exit', 'exit')}{th('Shares', 'shares')}{th('Investment', 'invested')}
                 {th('P/L', 'pl')}{th('P/L %', 'plPct')}{th('Annualized', 'ann')}
@@ -396,7 +486,8 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
             </thead>
             <tbody>
               {closedSort.sorted.map(({ p, cost, pl, plPct, held, ann }) => (
-                <tr key={p.id} className="border-b border-slate-800/60">
+                <tr key={p.id} className={`border-b border-slate-800/60 ${selected.has(p.id) ? 'bg-sky-500/5' : ''}`}>
+                  <RowCheck checked={selected.has(p.id)} onChange={() => toggleSel(p.id)} />
                   <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
                   <td className="px-3 py-2"><Badge variant={(pl ?? 0) > 0 ? 'success' : 'error'}>{(pl ?? 0) > 0 ? 'Win' : 'Loss'}</Badge></td>
                   <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
@@ -418,6 +509,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
               ))}
             </tbody>
           </table>
+        </div>
         </div>
       )}
       {editModal}
