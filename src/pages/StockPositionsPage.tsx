@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Trash2, CheckSquare, RotateCcw, X, Pencil, Download, Upload, Combine } from 'lucide-react';
+import { RefreshCw, Trash2, RotateCcw, X, Pencil, Download, Upload, Combine, Calculator } from 'lucide-react';
 import { useSort } from '@/lib/useSort';
 import { SortTh } from '@/components/SortTh';
+import { AverageCostCalculator, type CalcDefaults } from '@/components/AverageCostCalculator';
 import { EditStockPositionModal } from '@/components/EditStockPositionModal';
 import { exportPositionsToExcel, readPositionsFromExcel } from '@/lib/positionsExcel';
 import type { StockPortfolioState } from '@/lib/stockPortfolio';
@@ -288,6 +289,7 @@ function RowCheck({ checked, onChange }: { checked: boolean; onChange: () => voi
 export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: StockPortfolioState; view: 'open' | 'closed'; onAnalyze?: (ticker: string) => void }) {
   const [closing, setClosing] = useState<StockPosition | null>(null);
   const [editing, setEditing] = useState<StockPosition | null>(null);
+  const [calc, setCalc] = useState<CalcDefaults | 'blank' | null>(null);
   const [closedView, setClosedView] = useState<'trades' | 'tickers'>(() => {
     try { return localStorage.getItem('closed-stock-view') === 'tickers' ? 'tickers' : 'trades'; } catch { return 'trades'; }
   });
@@ -401,9 +403,12 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-slate-100">Open Stock Positions</h1>
-            <p className="text-sm text-slate-500">Prices are the latest saved daily closes (updated by every stock scan). Click a header to sort; ✎ to edit.</p>
+            <p className="text-sm text-slate-500">Prices are the latest saved daily closes (updated by every stock scan). Click a header to sort; ✎ to edit; 🧮 to average down/up.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button onClick={() => setCalc('blank')} className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
+              <Calculator className="h-4 w-4" /> Calculator
+            </button>
             <ExcelButtons portfolio={portfolio} view="open" />
             <button onClick={() => void portfolio.refreshQuotes()} className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
               <RefreshCw className={`h-4 w-4 ${portfolio.quotesLoading ? 'animate-spin' : ''}`} /> Refresh prices
@@ -455,8 +460,11 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                     <td className="px-3 py-2 text-right tabular-nums text-sky-300">{p.target_price != null ? formatNum(p.target_price) : '--'}</td>
                     <td className="whitespace-nowrap px-3 py-2 text-right">
                       {editBtn(p)}
-                      <button onClick={() => setClosing(p)} className="mr-2 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800">
-                        <CheckSquare className="h-3.5 w-3.5" /> Close
+                      <button
+                        onClick={() => setCalc({ ticker: p.ticker, avgCost: String(p.entry_price), shares: String(p.shares), price: price != null ? String(price) : '', priceDate: portfolio.quotes[p.ticker]?.date ?? null, additional: '0' })}
+                        className="mr-2 text-slate-500 hover:text-sky-400" title="Average cost calculator"
+                      >
+                        <Calculator className="inline h-4 w-4" />
                       </button>
                       <button onClick={() => { if (confirm(`Delete ${p.ticker} position?`)) void portfolio.deletePosition(p.id); }} className="text-slate-500 hover:text-red-400" title="Delete">
                         <Trash2 className="inline h-4 w-4" />
@@ -468,6 +476,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
             </table>
           </div>
         )}
+        {calc && <AverageCostCalculator defaults={calc === 'blank' ? undefined : calc} onClose={() => setCalc(null)} />}
         {closing && (
           <CloseModal
             p={closing}
