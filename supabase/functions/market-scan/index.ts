@@ -85,10 +85,35 @@ async function fetchGroupedDailyPrices(
   // Stocks Basic is end-of-day and limited to 5 stock API calls/minute.
   // Start with the most recently COMPLETED trading day instead of probing
   // today/weekends first, which used to burn several calls before finding data.
-  const first = new Date(today);
-  first.setDate(first.getDate() - 1);
-  while (first.getDay() === 0 || first.getDay() === 6) {
-    first.setDate(first.getDate() - 1);
+  const first = nyToday(today);
+  first.setUTCDate(first.getUTCDate() - 1);
+  while (first.getUTCDay() === 0 || first.getUTCDay() === 6) {
+    first.setUTCDate(first.getUTCDate() - 1);
+  }
+
+  // After the close (5 PM New York time) on a weekday, today's end-of-day bar
+  // exists — try it first. Any failure falls back to the previous session.
+  if (marketClosedToday(today)) {
+    const dateStr = nyToday(today).toISOString().slice(0, 10);
+    const result = await massiveFetch(`/v2/aggs/grouped/locale/us/market/stocks/${dateStr}`, apiKey, 'GROUPED', `grouped_daily_${dateStr}`);
+    if (result.ok) {
+      for (const r of result.data?.results || []) {
+        const ticker = String(r.T || r.ticker || '').toUpperCase();
+        const close = Number(r.c || r.close || 0);
+        if (ticker && Number.isFinite(close) && close > 0) {
+          priceMap.set(ticker, close);
+          barMap.set(ticker, { date: dateStr, open: Number(r.o || close), high: Number(r.h || close), low: Number(r.l || close), close, volume: Number(r.v || 0) });
+        }
+      }
+      if (priceMap.size > 0) {
+        console.log(`[GroupedDaily] Found ${priceMap.size} prices for today's close ${dateStr}`);
+        return { priceMap, barMap, tradingDate: dateStr, httpStatus: 200 };
+      }
+    } else {
+      lastHttpStatus = result.status;
+      console.log(`[GroupedDaily] today ${dateStr} not available: HTTP ${result.status}`);
+      if (result.status === 429) return { priceMap, barMap, tradingDate: null, httpStatus: 429 };
+    }
   }
 
   // Only walk back through business days. In normal operation the first call
@@ -97,11 +122,11 @@ async function fetchGroupedDailyPrices(
     const tryDate = new Date(first);
     let remaining = businessOffset;
     while (remaining > 0) {
-      tryDate.setDate(tryDate.getDate() - 1);
-      if (tryDate.getDay() !== 0 && tryDate.getDay() !== 6) remaining--;
+      tryDate.setUTCDate(tryDate.getUTCDate() - 1);
+      if (tryDate.getUTCDay() !== 0 && tryDate.getUTCDay() !== 6) remaining--;
     }
 
-    const dateStr = fmt(tryDate);
+    const dateStr = tryDate.toISOString().slice(0, 10);
     const path = `/v2/aggs/grouped/locale/us/market/stocks/${dateStr}`;
     const result = await massiveFetch(path, apiKey, 'GROUPED', `grouped_daily_${dateStr}`);
     lastHttpStatus = result.ok ? 200 : result.status;
@@ -814,11 +839,27 @@ function newScanContext(expectedLatestDate: string): ScanContext {
 
 // Most recent weekday strictly before `today` (holidays are handled by the
 // grouped-daily walk-back; here a holiday just costs one extra fetch in Analyze).
-function lastCompletedBusinessDay(today: Date, fmt: (d: Date) => string): string {
-  const d = new Date(today);
-  d.setDate(d.getDate() - 1);
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
-  return fmt(d);
+// Today's calendar date in New York, as a UTC-midnight Date. The server runs on
+// UTC, which is already "tomorrow" after 7–8 PM New York time.
+function nyToday(now: Date): Date {
+  const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  return new Date(ymd + 'T00:00:00Z');
+}
+
+// True on a weekday after 5 PM New York time (the session's daily bar is final).
+function marketClosedToday(now: Date): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false }).formatToParts(now);
+  const wd = parts.find((p) => p.type === 'weekday')?.value;
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  return wd !== 'Sat' && wd !== 'Sun' && Number.isFinite(hour) && hour >= 17 && hour < 24;
+}
+
+function lastCompletedBusinessDay(today: Date, _fmt?: (d: Date) => string): string {
+  // Previous New York business day (holidays are handled by the grouped fetch walking back).
+  const d = nyToday(today);
+  d.setUTCDate(d.getUTCDate() - 1);
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }
 
 // Keep only the trailing run of bars without a data gap. A gap (2+ consecutive
@@ -972,7 +1013,10 @@ async function getStockSnapshot(
   }
 
   // 2. Load cached bars from Supabase; use only the trailing gap-free run
-  const todayStr = fmt(today);
+  // Completed sessions only, by New York date (today counts once the market has closed).
+  const cutoff = nyToday(today);
+  if (marketClosedToday(today)) cutoff.setUTCDate(cutoff.getUTCDate() + 1);
+  const todayStr = cutoff.toISOString().slice(0, 10);
   let bars = trailingContiguousBars((await loadCachedHistory(upper, ctx.historyLoadLimit)).filter((b) => b.date < todayStr));
 
   const latestCachedDate = bars.length > 0 ? bars.at(-1)!.date : null;
@@ -1961,7 +2005,7 @@ serve(async (req) => {
       // spend ONE grouped-daily call to update every requested ticker at once.
       const qToday = new Date();
       const qFmt = (d: Date) => d.toISOString().slice(0, 10);
-      const expected = lastCompletedBusinessDay(qToday, qFmt);
+      const expected = marketClosedToday(qToday) ? qFmt(nyToday(qToday)) : lastCompletedBusinessDay(qToday, qFmt);
       const lastDates = await Promise.all(list.map(async (t) => (await loadCachedHistory(t, 1))[0]?.date ?? null));
       let refreshNote: string | null = null;
       if (apiKey && list.some((_, i) => !lastDates[i] || lastDates[i]! < expected)) {
@@ -1970,7 +2014,9 @@ serve(async (req) => {
           await saveGroupedBarsToCache(barMap, list);
           refreshNote = `Updated to the ${tradingDate} close`;
         } else {
-          refreshNote = httpStatus === 429 ? 'Massive rate limit (5 calls/min) — showing saved prices; try again in a minute' : 'Could not refresh — showing saved prices';
+          refreshNote = httpStatus === 429
+            ? 'Massive rate limit (5 calls/min, a scan may have just used them) — showing saved prices; click Refresh prices again in a minute'
+            : `Could not refresh (Massive HTTP ${httpStatus ?? 'no response'}) — showing saved prices`;
         }
       }
       const quotes = await Promise.all(list.map(async (t) => {
@@ -3376,5 +3422,3 @@ async function runSwing5Scan(body: any, apiKey: string, requestStart: number): P
   console.log(`[SWING5] mode=${scanMode} screened=${tickers.length} BUY=${counts.buy} WATCH=${counts.watch} WAIT=${counts.wait} P=${counts.pending}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), rules, results, counts });
 }
-
-// redeploy prices 2026-11-10
