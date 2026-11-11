@@ -98,6 +98,46 @@ export function useStockPortfolio() {
     return { ok: true, error: null as string | null };
   }, [loadPositions]);
 
+  /**
+   * Record a sell fill for a ticker: sells `shares` from its open buys, oldest
+   * first (FIFO). A buy sold in full becomes closed; a buy sold in part keeps
+   * its remaining shares open and the sold part is saved as a new closed row.
+   */
+  const sellShares = useCallback(async (ticker: string, shares: number, exitPrice: number, exitDate: string) => {
+    const lots = positions
+      .filter((p) => p.status === 'open' && p.ticker === ticker)
+      .sort((a, b) => a.entry_date.localeCompare(b.entry_date) || a.created_at.localeCompare(b.created_at));
+    const held = lots.reduce((a, p) => a + p.shares, 0);
+    if (!(shares > 0) || !(exitPrice > 0)) return { ok: false, error: 'Shares and price must be above 0' };
+    if (shares > held + 1e-9) return { ok: false, error: `Only ${Number(held.toFixed(6))} ${ticker} shares are open` };
+    let remaining = shares;
+    const now = new Date().toISOString();
+    for (const lot of lots) {
+      if (remaining <= 1e-9) break;
+      if (lot.shares <= remaining + 1e-9) {
+        const { error: e } = await supabase.from('stock_positions')
+          .update({ status: 'closed', exit_price: exitPrice, exit_date: exitDate, updated_at: now }).eq('id', lot.id);
+        if (e) { await loadPositions(); return { ok: false, error: dbMessage('stock_positions sell', e) }; }
+        remaining -= lot.shares;
+      } else {
+        const sold = Number(remaining.toFixed(6));
+        const { error: e1 } = await supabase.from('stock_positions')
+          .update({ shares: Number((lot.shares - sold).toFixed(6)), updated_at: now }).eq('id', lot.id);
+        if (e1) { await loadPositions(); return { ok: false, error: dbMessage('stock_positions sell', e1) }; }
+        const { error: e2 } = await supabase.from('stock_positions').insert({
+          ticker: lot.ticker, company_name: lot.company_name, status: 'closed',
+          entry_date: lot.entry_date, entry_price: lot.entry_price, shares: sold,
+          target_price: lot.target_price, stop_price: lot.stop_price, max_cycle_days: lot.max_cycle_days,
+          exit_date: exitDate, exit_price: exitPrice, notes: lot.notes,
+        });
+        if (e2) { await loadPositions(); return { ok: false, error: dbMessage('stock_positions sell', e2) }; }
+        remaining = 0;
+      }
+    }
+    await loadPositions();
+    return { ok: true, error: null as string | null };
+  }, [positions, loadPositions]);
+
   /** Edit any saved fields of a position. */
   const updatePosition = useCallback(async (id: string, patch: Partial<StockPosition>) => {
     const { id: _ignore, created_at: _c, ...rest } = patch as StockPosition; // eslint-disable-line @typescript-eslint/no-unused-vars
@@ -255,7 +295,7 @@ export function useStockPortfolio() {
     positions,
     openPositions: positions.filter((p) => p.status === 'open'),
     closedPositions: positions.filter((p) => p.status === 'closed'),
-    addPosition, closePosition, reopenPosition, deletePosition, deletePositions, combinePositions, updatePosition, importPositions,
+    addPosition, closePosition, sellShares, reopenPosition, deletePosition, deletePositions, combinePositions, updatePosition, importPositions,
     quotes, quotesLoading, refreshQuotes,
     error,
   };
