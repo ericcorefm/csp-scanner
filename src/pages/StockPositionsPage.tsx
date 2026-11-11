@@ -224,6 +224,69 @@ function ExcelButtons({ portfolio, view }: { portfolio: StockPortfolioState; vie
   );
 }
 
+type FillMode = { mode: 'buy' | 'sell'; ticker: string; base: StockPosition; openShares: number; price: number | null };
+
+/** Record one buy fill (adds a lot) or one sell fill (FIFO from the open lots). */
+function FillModal({ fill, portfolio, onClose }: { fill: FillMode; portfolio: StockPortfolioState; onClose: () => void }) {
+  const isBuy = fill.mode === 'buy';
+  const [date, setDate] = useState(todayISO());
+  const [price, setPrice] = useState(fill.price != null ? String(fill.price) : '');
+  const [shares, setShares] = useState(isBuy ? '' : String(Number(fill.openShares.toFixed(6))));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const px = Number(price), sh = Number(shares);
+  const valid = Number.isFinite(px) && px > 0 && Number.isFinite(sh) && sh > 0 && !!date;
+  const save = async () => {
+    if (!valid) { setError('Enter a date, a price above 0 and shares above 0'); return; }
+    setSaving(true);
+    const res = isBuy
+      ? await portfolio.addPosition({
+          ticker: fill.ticker, company_name: fill.base.company_name, entry_date: date, entry_price: px, shares: sh,
+          target_price: fill.base.target_price, stop_price: fill.base.stop_price, max_cycle_days: fill.base.max_cycle_days,
+          notes: 'Buy fill',
+        })
+      : await portfolio.sellShares(fill.ticker, sh, px, date);
+    setSaving(false);
+    if (res.ok) onClose(); else setError(res.error || 'Could not save');
+  };
+  const input = 'w-40 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-right tabular-nums text-slate-100';
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
+          <span className="font-semibold text-slate-100">{isBuy ? 'Add buy fill' : 'Record sell fill'} · {fill.ticker}</span>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="space-y-3 px-5 py-4 text-sm">
+          <label className="flex items-center justify-between gap-3"><span className="text-slate-400">{isBuy ? 'Buy date' : 'Sell date'}</span>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={input} /></label>
+          <label className="flex items-center justify-between gap-3"><span className="text-slate-400">{isBuy ? 'Buy price ($)' : 'Sell price ($)'}</span>
+            <input type="number" step="0.0001" value={price} onChange={(e) => setPrice(e.target.value)} className={input} /></label>
+          <label className="flex items-center justify-between gap-3"><span className="text-slate-400">Shares</span>
+            <input type="number" step="0.0001" value={shares} onChange={(e) => setShares(e.target.value)} className={input} /></label>
+          {!isBuy && (
+            <button onClick={() => setShares(String(Number(fill.openShares.toFixed(6))))} className="text-xs text-sky-400 hover:underline">
+              Sell all {formatNum(fill.openShares, 4)} open shares
+            </button>
+          )}
+          {valid && (
+            <div className="rounded-lg bg-slate-800/60 px-3 py-2 text-xs text-slate-400">
+              {isBuy ? `Cost ${money(px * sh)}` : `Proceeds ${money(px * sh)} · sold from the oldest buys first (FIFO); any remainder stays open`}
+            </div>
+          )}
+          {error && <div className="text-red-400">{error}</div>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-slate-800 px-5 py-3">
+          <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300">Cancel</button>
+          <button onClick={save} disabled={saving} className={`rounded-lg px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60 ${isBuy ? 'bg-sky-500 hover:bg-sky-600' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+            {saving ? 'Saving…' : isBuy ? 'Add buy' : 'Record sell'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Select all / Combine / Delete selected / Delete all for one positions list. */
 function SelectionBar({ total, selectedIds, allIds, onSelectAll, onClear, portfolio, label }: {
   total: number; selectedIds: string[]; allIds: string[];
@@ -290,6 +353,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
   const [closing, setClosing] = useState<StockPosition | null>(null);
   const [editing, setEditing] = useState<StockPosition | null>(null);
   const [calc, setCalc] = useState<CalcDefaults | 'blank' | null>(null);
+  const [fillForm, setFillForm] = useState<FillMode | null>(null);
   const [closedView, setClosedView] = useState<'trades' | 'tickers'>(() => {
     try { return localStorage.getItem('closed-stock-view') === 'tickers' ? 'tickers' : 'trades'; } catch { return 'trades'; }
   });
@@ -580,6 +644,15 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                           </td>
                         </tr>
                       ))}
+                      {isOpen && (
+                        <tr className="border-b border-slate-800/40 bg-slate-900/40">
+                          <td />
+                          <td colSpan={12} className="py-1.5 pl-10 pr-3">
+                            <button onClick={() => setFillForm({ mode: 'buy', ticker: p.ticker, base: fills[0].p, openShares: p.shares, price })} className="mr-2 rounded-lg border border-sky-500/50 px-2.5 py-1 text-xs text-sky-300 hover:bg-sky-500/10">+ Add buy fill</button>
+                            <button onClick={() => setFillForm({ mode: 'sell', ticker: p.ticker, base: fills[0].p, openShares: p.shares, price })} className="rounded-lg border border-emerald-500/50 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10">− Record sell fill</button>
+                          </td>
+                        </tr>
+                      )}
                     </Fragment>
                   );
                 })}
@@ -588,6 +661,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           </div>
         )}
         {calc && <AverageCostCalculator defaults={calc === 'blank' ? undefined : calc} onClose={() => setCalc(null)} />}
+        {fillForm && <FillModal fill={fillForm} portfolio={portfolio} onClose={() => setFillForm(null)} />}
         {closing && (
           <CloseModal
             p={closing}
