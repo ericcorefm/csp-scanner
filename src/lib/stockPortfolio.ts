@@ -218,6 +218,7 @@ export function useStockPortfolio() {
   // ── Quotes for open positions (saved prices; no Massive calls) ──
   const openTickers = positions.filter((p) => p.status === 'open').map((p) => p.ticker);
   const openKey = [...new Set(openTickers)].sort().join(',');
+  const [quotesNote, setQuotesNote] = useState<string | null>(null);
   const refreshQuotes = useCallback(async () => {
     const tickers = openKey ? openKey.split(',') : [];
     if (!tickers.length) { setQuotes({}); return; }
@@ -228,6 +229,7 @@ export function useStockPortfolio() {
       const map: Record<string, StockQuote> = {};
       for (const q of (data?.quotes || []) as StockQuote[]) map[q.ticker] = q;
       setQuotes(map);
+      setQuotesNote((data?.refresh_note as string | null) ?? null);
     } catch (err) {
       setError(`Could not load prices: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -238,6 +240,7 @@ export function useStockPortfolio() {
   useEffect(() => { void refreshQuotes(); }, [refreshQuotes]);
 
   return {
+    quotesNote,
     universe,
     enabledSymbols: universe.filter((u) => u.enabled).map((u) => u.symbol),
     addToUniverse, setUniverseEnabled, removeFromUniverse, removeAllFromUniverse,
