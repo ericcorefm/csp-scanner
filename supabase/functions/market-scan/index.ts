@@ -381,9 +381,28 @@ async function saveCachedHistory(ticker: string, bars: HistoryBar[]): Promise<vo
 // Append the grouped-daily bar (one API call covers every ticker) to the
 // history cache for all scanned symbols. This keeps technical history current
 // every trading day without spending one rate-limited request per ticker.
-async function saveGroupedBarsToCache(barMap: Map<string, HistoryBar>, tickers: string[]): Promise<number> {
+// Tickers of open stock positions. Every grouped-daily save also covers these,
+// so position prices stay current even when a ticker isn't in any scan list.
+async function loadOpenPositionTickers(): Promise<string[]> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !serviceKey) return [];
+  try {
+    const resp = await fetch(`${supabaseUrl}/rest/v1/stock_positions?select=ticker&status=eq.open`, {
+      headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+    });
+    if (!resp.ok) return [];
+    const rows = await resp.json() as { ticker: string }[];
+    return [...new Set(rows.map((r) => String(r.ticker).toUpperCase().trim()).filter(Boolean))];
+  } catch {
+    return [];
+  }
+}
+
+async function saveGroupedBarsToCache(barMap: Map<string, HistoryBar>, scanTickers: string[]): Promise<number> {
   if (barMap.size === 0) return 0;
   const now = new Date().toISOString();
+  const tickers = [...new Set([...scanTickers, ...(await loadOpenPositionTickers())])];
   const rows = tickers
     .map((t) => ({ t, b: barMap.get(t) }))
     .filter((x) => x.b)
@@ -1932,12 +1951,28 @@ serve(async (req) => {
       return await runSwing5Scan(body, apiKey, requestStart);
     }
 
-    // ── STOCK-QUOTES: latest saved close for open stock positions. Reads the
-    // history cache only (kept current by every scan) — no Massive calls. ──
+    // ── STOCK-QUOTES: latest close for open stock positions, from the history
+    // cache. If any is stale, one grouped-daily call refreshes them all. ──
     if (mode === 'stock-quotes') {
       const list: string[] = Array.isArray(body.tickers)
         ? [...new Set<string>(body.tickers.map((t: string) => String(t).toUpperCase().trim()).filter(Boolean))].slice(0, 200)
         : [];
+      // Refresh: if any saved price is older than the latest completed session,
+      // spend ONE grouped-daily call to update every requested ticker at once.
+      const qToday = new Date();
+      const qFmt = (d: Date) => d.toISOString().slice(0, 10);
+      const expected = lastCompletedBusinessDay(qToday, qFmt);
+      const lastDates = await Promise.all(list.map(async (t) => (await loadCachedHistory(t, 1))[0]?.date ?? null));
+      let refreshNote: string | null = null;
+      if (apiKey && list.some((_, i) => !lastDates[i] || lastDates[i]! < expected)) {
+        const { barMap, tradingDate, httpStatus } = await fetchGroupedDailyPrices(apiKey, qToday, qFmt);
+        if (barMap.size) {
+          await saveGroupedBarsToCache(barMap, list);
+          refreshNote = `Updated to the ${tradingDate} close`;
+        } else {
+          refreshNote = httpStatus === 429 ? 'Massive rate limit (5 calls/min) — showing saved prices; try again in a minute' : 'Could not refresh — showing saved prices';
+        }
+      }
       const quotes = await Promise.all(list.map(async (t) => {
         const bars = await loadCachedHistory(t, 2);
         const last = bars.at(-1);
@@ -1951,7 +1986,7 @@ serve(async (req) => {
           low: last?.low ?? null,
         };
       }));
-      return json({ success: true, quotes });
+      return json({ success: true, quotes, refresh_note: refreshNote });
     }
 
     if (!profile) return json({ success: false, error: 'Missing strategy profile' });
@@ -3341,5 +3376,3 @@ async function runSwing5Scan(body: any, apiKey: string, requestStart: number): P
   console.log(`[SWING5] mode=${scanMode} screened=${tickers.length} BUY=${counts.buy} WATCH=${counts.watch} WAIT=${counts.wait} P=${counts.pending}`);
   return json({ success: true, scan_mode: scanMode, scanned_at: new Date().toISOString(), rules, results, counts });
 }
-
-// redeploy swing5 2026-10-31
