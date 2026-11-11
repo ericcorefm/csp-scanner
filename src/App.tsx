@@ -21,7 +21,7 @@ import { DailySummaryPage } from '@/pages/DailySummaryPage';
 import { ScanUniversePage } from '@/pages/ScanUniversePage';
 import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
 import { useAuth } from '@/lib/useAuth';
-import { AuthPage } from '@/pages/AuthPage';
+import { AuthPage, ResetPasswordPage } from '@/pages/AuthPage';
 
 function AuthenticatedApp({ userEmail, onSignOut }: { userEmail: string; onSignOut: () => Promise<void> }) {
   const [currentPage, setCurrentPage] = useState<Page>('candidates');
@@ -148,7 +148,7 @@ function AuthenticatedApp({ userEmail, onSignOut }: { userEmail: string; onSignO
 }
 
 function App() {
-  const { user, loading, signIn, signUp, signOut } = useAuth();
+  const { user, loading, view, setView, signIn, signUp, signOut, resetPasswordForEmail, updatePassword } = useAuth();
 
   if (loading) {
     return (
@@ -158,8 +158,20 @@ function App() {
     );
   }
 
+  if (view === 'reset-password') {
+    return (
+      <ResetPasswordPage
+        onUpdatePassword={updatePassword}
+        onBackToSignIn={async () => {
+          await signOut();
+          setView('auth');
+        }}
+      />
+    );
+  }
+
   if (!user) {
-    return <AuthPage onSignIn={signIn} onSignUp={signUp} />;
+    return <AuthPage onSignIn={signIn} onSignUp={signUp} onResetPassword={resetPasswordForEmail} />;
   }
 
   return <AuthenticatedApp userEmail={user.email ?? ''} onSignOut={signOut} />;
