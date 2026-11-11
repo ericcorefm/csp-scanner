@@ -303,6 +303,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
   const clearSel = () => setSelected(new Set());
   // Closed tab: month filter by exit date ('all' = every month).
   const [month, setMonth] = useState<string>('all');
+  const [day, setDay] = useState<string>('all');
 
   const openRows = useMemo(() => portfolio.openPositions.map((p) => {
     const q = portfolio.quotes[p.ticker];
@@ -362,9 +363,24 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     }
     return [...m.entries()].sort((a, b) => b[0].localeCompare(a[0]));
   }, [allClosedRows]);
-  const closedRows = useMemo(
+  const monthRows = useMemo(
     () => (month === 'all' ? allClosedRows : allClosedRows.filter((r) => (r.p.exit_date ? r.p.exit_date.slice(0, 7) : 'none') === month)),
     [allClosedRows, month],
+  );
+  // Realized P/L per exit day within the selected month, newest first.
+  const days = useMemo(() => {
+    const m = new Map<string, { pl: number; trades: number; invested: number }>();
+    for (const r of monthRows) {
+      const key = r.p.exit_date ?? 'none';
+      const v = m.get(key) ?? { pl: 0, trades: 0, invested: 0 };
+      v.pl += r.pl ?? 0; v.trades += 1; v.invested += r.cost;
+      m.set(key, v);
+    }
+    return [...m.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+  }, [monthRows]);
+  const closedRows = useMemo(
+    () => (day === 'all' ? monthRows : monthRows.filter((r) => (r.p.exit_date ?? 'none') === day)),
+    [monthRows, day],
   );
   const monthLabel = (key: string) => {
     if (key === 'none') return 'No exit date';
@@ -403,7 +419,13 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-slate-100">Open Stock Positions</h1>
-            <p className="text-sm text-slate-500">Prices are the latest saved daily closes (updated by every stock scan). Click a header to sort; ✎ to edit; 🧮 to average down/up.</p>
+            <p className="text-sm text-slate-500">
+              {(() => {
+                const dates = [...new Set(Object.values(portfolio.quotes).map((q) => q.date).filter(Boolean))].sort();
+                return dates.length ? `Prices: daily close of ${dates[dates.length - 1]}${dates.length > 1 ? ` (oldest ${dates[0]})` : ''}. ` : '';
+              })()}
+              {portfolio.quotesNote && <span className="text-sky-400">{portfolio.quotesNote}. </span>}
+              End-of-day prices (Stocks Basic): today's close shows up the next day. Click a header to sort; ✎ to edit; 🧮 to average down/up.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button onClick={() => setCalc('blank')} className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
@@ -509,7 +531,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
             Realized P/L
             <select
               value={month}
-              onChange={(e) => { setMonth(e.target.value); clearSel(); }}
+              onChange={(e) => { setMonth(e.target.value); setDay('all'); clearSel(); }}
               className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
             >
               <option value="all">All months ({signedMoney(allClosedRows.reduce((a, r) => a + (r.pl ?? 0), 0))})</option>
@@ -518,13 +540,26 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
               ))}
             </select>
           </label>
+          <select
+            value={day}
+            onChange={(e) => { setDay(e.target.value); clearSel(); }}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+            title="Realized P/L per exit day"
+          >
+            <option value="all">All days</option>
+            {days.map(([key, v]) => (
+              <option key={key} value={key}>
+                {key === 'none' ? 'No exit date' : new Date(key + 'T00:00:00Z').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}: {signedMoney(v.pl)} · {v.trades} trade{v.trades === 1 ? '' : 's'}
+              </option>
+            ))}
+          </select>
           <ExcelButtons portfolio={portfolio} view="closed" />
         </div>
       </div>
       <Summary items={[
         { label: 'Closed trades', value: String(closedRows.length) },
         { label: 'Avg investment', value: closedRows.length ? money(closedRows.reduce((a, r) => a + r.cost, 0) / closedRows.length) : '--' },
-        { label: month === 'all' ? 'Realized P/L' : `Realized P/L · ${monthLabel(month)}`, value: money(realized), tone: plColor(realized) },
+        { label: day !== 'all' ? `Realized P/L · ${day}` : month === 'all' ? 'Realized P/L' : `Realized P/L · ${monthLabel(month)}`, value: money(realized), tone: plColor(realized) },
         { label: 'Win rate', value: closedRows.length ? formatPct((wins / closedRows.length) * 100, 0) : '--' },
         { label: 'Avg return / trade', value: avgPct != null ? formatPct(avgPct, 2) : '--', tone: plColor(avgPct) },
         { label: 'Avg days held', value: avgDays != null ? formatNum(avgDays, 1) : '--' },
@@ -542,7 +577,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         ))}
       </div>
       {closedView === 'tickers' ? (
-        <TickerSummary positions={portfolio.closedPositions.filter((p) => month === 'all' || (p.exit_date ? p.exit_date.slice(0, 7) : 'none') === month)} onAnalyze={onAnalyze} />
+        <TickerSummary positions={portfolio.closedPositions.filter((p) => (month === 'all' || (p.exit_date ? p.exit_date.slice(0, 7) : 'none') === month) && (day === 'all' || (p.exit_date ?? 'none') === day))} onAnalyze={onAnalyze} />
       ) : closedRows.length === 0 ? (
         <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet. You can also use Import Excel.</div>
       ) : (
