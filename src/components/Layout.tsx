@@ -158,19 +158,28 @@ export function Layout({ children, currentPage, onNavigate, state, scanner, onSc
 
           <div className="absolute bottom-0 left-0 right-0 border-t border-slate-800 p-4 space-y-3">
             {userEmail && onSignOut && (
-              <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 px-3 py-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-sky-500/10 shrink-0">
-                    <span className="text-xs font-semibold text-sky-400">{userEmail.charAt(0).toUpperCase()}</span>
+              <div className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex h-7 w-7 items-center justify-center rounded-full bg-sky-500/10 shrink-0">
+                      <span className="text-xs font-semibold text-sky-400">{userEmail.charAt(0).toUpperCase()}</span>
+                    </div>
+                    <span className="text-xs text-slate-400 truncate">{userEmail}</span>
                   </div>
-                  <span className="text-xs text-slate-400 truncate">{userEmail}</span>
+                  <button
+                    onClick={onSignOut}
+                    className="text-slate-500 hover:text-red-400 transition-colors shrink-0"
+                    title="Sign out"
+                  >
+                    <LogOut className="h-4 w-4" />
+                  </button>
                 </div>
                 <button
-                  onClick={onSignOut}
-                  className="text-slate-500 hover:text-red-400 transition-colors shrink-0"
-                  title="Sign out"
+                  onClick={() => handleNav('account')}
+                  className={`mt-2 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs font-medium transition-colors ${currentPage === 'account' ? 'bg-sky-500/10 text-sky-400' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
                 >
-                  <LogOut className="h-4 w-4" />
+                  <UserCircle className="h-3.5 w-3.5" />
+                  Account settings
                 </button>
               </div>
             )}
