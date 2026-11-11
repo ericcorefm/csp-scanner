@@ -408,15 +408,8 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
 
   // All Trades: one row per ticker + exit date. Fills bought on one or several
   // days and sold together become ONE trade (share-weighted entry and exit
-  // price, earliest entry date). "Show individual fills" turns this off.
-  const [consolidate, setConsolidateState] = useState<boolean>(() => {
-    try { return localStorage.getItem('closed-consolidate') !== 'off'; } catch { return true; }
-  });
-  const setConsolidate = (on: boolean) => {
-    setConsolidateState(on);
-    clearSel();
-    try { localStorage.setItem('closed-consolidate', on ? 'on' : 'off'); } catch { /* storage unavailable */ }
-  };
+  // price, earliest entry date). Expand a row (▸) to see each fill.
+  const consolidate = true; // fills sold the same day are always one trade (expand ▸ to see them)
   const allClosedRows = useMemo(() => {
     const groups = new Map<string, StockPosition[]>();
     for (const p of portfolio.closedPositions) {
@@ -539,10 +532,6 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           { label: 'Unrealized %', value: invested > 0 ? formatPct((pl / invested) * 100, 2) : '--', tone: plColor(pl) },
           { label: 'Need attention', value: String(openRows.filter((r) => ['Target hit', 'Stop hit', 'Cycle ended'].includes(r.health)).length), tone: 'text-amber-400' },
         ]} />
-        <div className="flex flex-wrap items-center gap-2">
-          <button onClick={() => setExpanded(new Set(openRows.map((r) => `open:${r.p.ticker}`)))} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Expand all buys</button>
-          <button onClick={() => setExpanded(new Set())} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Collapse all</button>
-        </div>
         <SelectionBar
           total={openRows.flatMap((r) => r.ids).length} label="open rows (fills)"
           allIds={openRows.flatMap((r) => r.ids)}
@@ -728,16 +717,26 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         { label: 'Avg days held', value: avgDays != null ? formatNum(avgDays, 1) : '--' },
         { label: 'Wins / Losses', value: `${wins} / ${closedRows.length - wins}` },
       ]} />
-      <div className="inline-flex rounded-lg border border-slate-800 bg-slate-900 p-1 text-sm">
-        {([['trades', 'All Trades'], ['tickers', 'By Ticker']] as const).map(([v, label]) => (
-          <button
-            key={v}
-            onClick={() => switchClosedView(v)}
-            className={`rounded-md px-3 py-1.5 font-medium transition-colors ${closedView === v ? 'bg-sky-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="inline-flex rounded-lg border border-slate-800 bg-slate-900 p-1 text-sm">
+          {([['trades', 'All Trades'], ['tickers', 'By Ticker']] as const).map(([v, label]) => (
+            <button
+              key={v}
+              onClick={() => switchClosedView(v)}
+              className={`rounded-md px-3 py-1.5 font-medium transition-colors ${closedView === v ? 'bg-sky-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {closedView === 'trades' && closedRows.length > 0 && (
+          <SelectionBar
+            total={closedRows.flatMap((r) => r.ids).length} label="closed rows"
+            allIds={closedRows.flatMap((r) => r.ids)}
+            selectedIds={closedRows.flatMap((r) => r.ids).filter((id) => selected.has(id))}
+            onSelectAll={() => setSelected(new Set(closedRows.flatMap((r) => r.ids)))} onClear={clearSel} portfolio={portfolio}
+          />
+        )}
       </div>
       {closedView === 'tickers' ? (
         <TickerSummary positions={portfolio.closedPositions.filter((p) => (month === 'all' || (p.exit_date ? p.exit_date.slice(0, 7) : 'none') === month) && (day === 'all' || (p.exit_date ?? 'none') === day))} onAnalyze={onAnalyze} />
@@ -745,20 +744,6 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         <div className="rounded-lg border border-slate-800 px-4 py-3 text-sm text-slate-500">No closed stock positions yet. You can also use Import Excel.</div>
       ) : (
         <div className="space-y-3">
-        <label className="flex w-fit cursor-pointer items-center gap-2 text-sm text-slate-400">
-          <input type="checkbox" checked={!consolidate} onChange={(e) => setConsolidate(!e.target.checked)} className="h-4 w-4 accent-sky-500" />
-          Show individual fills (otherwise fills of the same ticker sold on the same day are shown as one averaged trade)
-        </label>
-        <div className="flex flex-wrap items-center gap-2">
-          <button onClick={() => setExpanded(new Set(closedRows.map((r) => `closed:${r.ids.join(',')}`)))} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Expand all sells</button>
-          <button onClick={() => setExpanded(new Set())} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Collapse all</button>
-        </div>
-        <SelectionBar
-          total={closedRows.flatMap((r) => r.ids).length} label="closed rows"
-          allIds={closedRows.flatMap((r) => r.ids)}
-          selectedIds={closedRows.flatMap((r) => r.ids).filter((id) => selected.has(id))}
-          onSelectAll={() => setSelected(new Set(closedRows.flatMap((r) => r.ids)))} onClear={clearSel} portfolio={portfolio}
-        />
         <div className="overflow-x-auto rounded-xl border border-slate-800">
           <table className="w-full text-sm">
             <thead>
