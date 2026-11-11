@@ -407,6 +407,8 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
     <button onClick={() => setEditing(p)} className="mr-2 text-slate-500 hover:text-sky-400" title="Edit"><Pencil className="inline h-4 w-4" /></button>
   );
 
+  const latestQuoteDate = Object.values(portfolio.quotes).map((q) => q.date).filter(Boolean).sort().pop() ?? null;
+
   if (view === 'open') {
     const invested = openRows.reduce((a, r) => a + r.cost, 0);
     const value = openRows.reduce((a, r) => a + (r.value ?? r.cost), 0);
@@ -476,7 +478,15 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                     <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.entry_price)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.shares, 4)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-300">{money(cost)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-100">{price != null ? formatNum(price) : '--'}</td>
+                    {(() => {
+                      const qd = portfolio.quotes[p.ticker]?.date ?? null;
+                      const stale = qd != null && latestQuoteDate != null && qd < latestQuoteDate;
+                      return (
+                        <td className={`px-3 py-2 text-right tabular-nums ${stale ? 'text-amber-400' : 'text-slate-100'}`} title={qd ? `Close of ${qd}${stale ? ' — older than the other prices' : ''}` : 'No saved price yet'}>
+                          {price != null ? formatNum(price) : '--'}{stale && <span className="ml-1 text-[10px]">({qd!.slice(5)})</span>}
+                        </td>
+                      );
+                    })()}
                     <td className={`px-3 py-2 text-right tabular-nums font-medium ${plColor(pl)}`}>{money(pl)}</td>
                     <td className={`px-3 py-2 text-right tabular-nums ${plColor(plPct)}`}>{plPct != null ? formatPct(plPct, 2) : '--'}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-sky-300">{p.target_price != null ? formatNum(p.target_price) : '--'}</td>
