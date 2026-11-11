@@ -20,8 +20,10 @@ import { SettingsPage } from '@/pages/SettingsPage';
 import { DailySummaryPage } from '@/pages/DailySummaryPage';
 import { ScanUniversePage } from '@/pages/ScanUniversePage';
 import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
+import { useAuth } from '@/lib/useAuth';
+import { AuthPage } from '@/pages/AuthPage';
 
-function App() {
+function AuthenticatedApp({ userEmail, onSignOut }: { userEmail: string; onSignOut: () => Promise<void> }) {
   const [currentPage, setCurrentPage] = useState<Page>('candidates');
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
@@ -87,7 +89,7 @@ function App() {
   }
 
   return (
-    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock} stockOpenCount={portfolio.openPositions.length}
+    <Layout currentPage={currentPage} onNavigate={handleNavigate} state={state} scanner={scanner} onScannerChange={setScanner} stock={stock} stockOpenCount={portfolio.openPositions.length} userEmail={userEmail} onSignOut={() => void onSignOut()}
       swing5Header={currentPage === 'candidates' && strategy === 'swing5' ? {
         buy: swing5.counts?.buy ?? 0, wait: swing5.counts?.wait ?? 0,
         lastScanAt: swing5.lastScanAt, scanning: swing5.scanning, runScan: swing5.runScan,
@@ -143,6 +145,24 @@ function App() {
       {!isStocks && currentPage === 'universe' && <ScanUniversePage state={state} onNavigate={handleNavigate} />}
     </Layout>
   );
+}
+
+function App() {
+  const { user, loading, signIn, signUp, signOut } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="h-8 w-8 border-2 border-sky-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage onSignIn={signIn} onSignUp={signUp} />;
+  }
+
+  return <AuthenticatedApp userEmail={user.email ?? ''} onSignOut={signOut} />;
 }
 
 export default App;

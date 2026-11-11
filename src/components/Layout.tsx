@@ -13,6 +13,7 @@ import {
   X,
   Search,
   Globe,
+  LogOut,
 } from 'lucide-react';
 import type { AppState } from '@/lib/store';
 import type { StockScannerState } from '@/lib/stockStore';
@@ -34,6 +35,8 @@ interface LayoutProps {
   stockOpenCount?: number;
   /** When the 1% / 5-Day Swing tab is active, the header shows and rescans that strategy. */
   swing5Header?: { buy: number; wait: number; lastScanAt: string | null; scanning: boolean; runScan: () => Promise<void> } | null;
+  userEmail?: string;
+  onSignOut?: () => void;
 }
 
 const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
@@ -46,7 +49,7 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
-export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock, stockOpenCount = 0, swing5Header = null }: LayoutProps) {
+export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock, stockOpenCount = 0, swing5Header = null, userEmail, onSignOut }: LayoutProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const isStocks = scanner === 'stocks';
 
@@ -150,7 +153,24 @@ export function Layout({ children, currentPage, onNavigate, state, scanner, onSc
             })}
           </nav>
 
-          <div className="absolute bottom-0 left-0 right-0 border-t border-slate-800 p-4">
+          <div className="absolute bottom-0 left-0 right-0 border-t border-slate-800 p-4 space-y-3">
+            {userEmail && onSignOut && (
+              <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 px-3 py-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-sky-500/10 shrink-0">
+                    <span className="text-xs font-semibold text-sky-400">{userEmail.charAt(0).toUpperCase()}</span>
+                  </div>
+                  <span className="text-xs text-slate-400 truncate">{userEmail}</span>
+                </div>
+                <button
+                  onClick={onSignOut}
+                  className="text-slate-500 hover:text-red-400 transition-colors shrink-0"
+                  title="Sign out"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
+              </div>
+            )}
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <AlertTriangle className="h-3.5 w-3.5" />
               <span>Decision-support tool. Not autonomous trading.</span>
