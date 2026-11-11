@@ -88,7 +88,8 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
       await state.addToScanUniverse(sym);
       setNewTicker('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add ticker');
+      console.error('[addToScanUniverse]', err);
+      setError('Could not add that ticker. Please try again.');
     } finally {
       setActionLoading(false);
     }
@@ -100,7 +101,8 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
     try {
       await state.toggleScanUniverseEnabled(symbol, enabled);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to toggle ticker');
+      console.error('[toggleScanUniverse]', err);
+      setError('Could not update that ticker. Please try again.');
     } finally {
       setActionLoading(false);
     }
@@ -129,7 +131,8 @@ export function ScanUniversePage({ state, onNavigate }: { state: AppState; onNav
     try {
       await state.restoreDefaultUniverse();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to restore defaults');
+      console.error('[restoreDefaultUniverse]', err);
+      setError('Could not restore the default list. Please try again.');
     } finally {
       setActionLoading(false);
     }

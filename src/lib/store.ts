@@ -16,24 +16,11 @@ import type {
 import type { AnalyzeTickerResponse, ScanCounts, ScanMode } from '@/lib/liveMarketData';
 import type { ScanUniverseEntry } from '@/types';
 
+// Internal database/transport detail (messages, hints, SQLSTATE codes) stays in
+// the console. The interface only ever shows a generic sentence.
 function formatDataError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (err && typeof err === 'object') {
-    const e = err as {
-      message?: string;
-      details?: string;
-      hint?: string;
-      code?: string;
-    };
-    const parts = [
-      e.message,
-      e.details ? `details: ${e.details}` : null,
-      e.hint ? `hint: ${e.hint}` : null,
-      e.code ? `code: ${e.code}` : null,
-    ].filter(Boolean);
-    if (parts.length) return parts.join(' | ');
-  }
-  return String(err ?? 'Unknown database error');
+  console.error('[data error]', err);
+  return 'Something went wrong while saving your data. Please try again.';
 }
 
 const DEFAULT_PROFILE: Omit<StrategyProfile, 'id' | 'created_at' | 'updated_at'> = {
@@ -531,7 +518,8 @@ export function useAppState() {
       setLoading(true);
       await loadProfiles();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load data');
+      console.error('[loadData]', err);
+      setError('Could not load your data. Please refresh and try again.');
     } finally {
       setLoading(false);
     }

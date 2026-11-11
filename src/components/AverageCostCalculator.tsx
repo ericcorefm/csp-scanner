@@ -52,7 +52,8 @@ export function AverageCostCalculator({ defaults, onClose }: { defaults?: CalcDe
         setPriceNote(`No saved price for ${t} yet. Enter it manually, or run Analyze Stock on ${t} first.`);
       }
     } catch (err) {
-      setPriceNote(`Price lookup failed (${err instanceof Error ? err.message : String(err)}). Enter it manually.`);
+      console.error('[price lookup]', err);
+      setPriceNote('Price lookup failed. Enter it manually.');
     } finally {
       setLooking(false);
     }

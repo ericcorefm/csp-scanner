@@ -4,6 +4,13 @@ import type { StockUniverseEntry, StockPosition, StockQuote, NewStockPosition } 
 
 const TICKER_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;
 
+// Database errors carry schema, constraint and policy detail. Keep that in the
+// console and hand the interface a short, generic sentence instead.
+function dbMessage(context: string, err: unknown): string {
+  console.error(`[${context}]`, err);
+  return 'Something went wrong while saving your data. Please try again.';
+}
+
 /**
  * Stocks watchlist (stock_universe) and stock trades (stock_positions).
  * Completely separate from the CSP scan_universe / positions tables.
@@ -17,13 +24,13 @@ export function useStockPortfolio() {
 
   const loadUniverse = useCallback(async () => {
     const { data, error: e } = await supabase.from('stock_universe').select('*').order('symbol');
-    if (e) { setError(`Stock universe: ${e.message}`); return; }
+    if (e) { setError(dbMessage('stock_universe load', e)); return; }
     setUniverse((data || []) as StockUniverseEntry[]);
   }, []);
 
   const loadPositions = useCallback(async () => {
     const { data, error: e } = await supabase.from('stock_positions').select('*').order('entry_date', { ascending: false });
-    if (e) { setError(`Stock positions: ${e.message}`); return; }
+    if (e) { setError(dbMessage('stock_positions load', e)); return; }
     setPositions(((data || []) as StockPosition[]).map((p) => ({
       ...p,
       entry_price: Number(p.entry_price), shares: Number(p.shares),
@@ -46,7 +53,7 @@ export function useStockPortfolio() {
       const { error: e } = await supabase.from('stock_universe').insert(
         fresh.map((symbol) => ({ symbol, company_name: fresh.length === 1 ? companyName ?? null : null })),
       );
-      if (e) return { added: 0, skipped: valid.length - fresh.length, invalid, error: e.message };
+      if (e) return { added: 0, skipped: valid.length - fresh.length, invalid, error: dbMessage('stock_universe insert', e) };
       await loadUniverse();
     }
     return { added: fresh.length, skipped: valid.length - fresh.length, invalid, error: null as string | null };
@@ -56,7 +63,7 @@ export function useStockPortfolio() {
     if (!ids.length) return;
     setUniverse((prev) => prev.map((u) => (ids.includes(u.id) ? { ...u, enabled } : u)));
     const { error: e } = await supabase.from('stock_universe').update({ enabled }).in('id', ids);
-    if (e) { setError(e.message); await loadUniverse(); }
+    if (e) { setError(dbMessage('stock_universe update', e)); await loadUniverse(); }
   }, [loadUniverse]);
 
   const removeAllFromUniverse = useCallback(async () => {
@@ -64,20 +71,20 @@ export function useStockPortfolio() {
     if (!ids.length) return;
     setUniverse([]);
     const { error: e } = await supabase.from('stock_universe').delete().in('id', ids);
-    if (e) { setError(e.message); await loadUniverse(); }
+    if (e) { setError(dbMessage('stock_universe delete all', e)); await loadUniverse(); }
   }, [universe, loadUniverse]);
 
   const removeFromUniverse = useCallback(async (ids: string[]) => {
     if (!ids.length) return;
     setUniverse((prev) => prev.filter((u) => !ids.includes(u.id)));
     const { error: e } = await supabase.from('stock_universe').delete().in('id', ids);
-    if (e) { setError(e.message); await loadUniverse(); }
+    if (e) { setError(dbMessage('stock_universe delete', e)); await loadUniverse(); }
   }, [loadUniverse]);
 
   // ── Positions ──
   const addPosition = useCallback(async (p: NewStockPosition) => {
     const { error: e } = await supabase.from('stock_positions').insert({ ...p, ticker: p.ticker.toUpperCase(), status: 'open' });
-    if (e) return { ok: false, error: e.message };
+    if (e) return { ok: false, error: dbMessage('stock_positions insert', e) };
     await loadPositions();
     return { ok: true, error: null as string | null };
   }, [loadPositions]);
@@ -86,7 +93,7 @@ export function useStockPortfolio() {
     const { error: e } = await supabase.from('stock_positions')
       .update({ status: 'closed', exit_price: exitPrice, exit_date: exitDate, updated_at: new Date().toISOString() })
       .eq('id', id);
-    if (e) return { ok: false, error: e.message };
+    if (e) return { ok: false, error: dbMessage('stock_positions close', e) };
     await loadPositions();
     return { ok: true, error: null as string | null };
   }, [loadPositions]);
@@ -97,7 +104,7 @@ export function useStockPortfolio() {
     const clean: Record<string, unknown> = { ...rest, updated_at: new Date().toISOString() };
     if (typeof clean.ticker === 'string') clean.ticker = (clean.ticker as string).toUpperCase().trim();
     const { error: e } = await supabase.from('stock_positions').update(clean).eq('id', id);
-    if (e) return { ok: false, error: e.message };
+    if (e) return { ok: false, error: dbMessage('stock_positions update', e) };
     await loadPositions();
     return { ok: true, error: null as string | null };
   }, [loadPositions]);
@@ -144,11 +151,11 @@ export function useStockPortfolio() {
     const errors: string[] = [];
     for (const u of updates) {
       const { error: e } = await supabase.from('stock_positions').update({ ...u.row, updated_at: new Date().toISOString() }).eq('id', u.id);
-      if (e) errors.push(`${u.row.ticker}: ${e.message}`); else updated++;
+      if (e) errors.push(`${u.row.ticker}: could not be saved`); else updated++;
     }
     if (inserts.length) {
       const { error: e } = await supabase.from('stock_positions').insert(inserts);
-      if (e) errors.push(e.message); else added = inserts.length;
+      if (e) errors.push(dbMessage('stock_positions import insert', e)); else added = inserts.length;
     }
     await loadPositions();
     return { added, updated, errors };
@@ -159,13 +166,13 @@ export function useStockPortfolio() {
       .update({ status: 'open', exit_price: null, exit_date: null, updated_at: new Date().toISOString() })
       .eq('id', id);
     if (!e) await loadPositions();
-    return { ok: !e, error: e?.message ?? null };
+    return { ok: !e, error: e ? dbMessage('stock_positions reopen', e) : null };
   }, [loadPositions]);
 
   const deletePosition = useCallback(async (id: string) => {
     const { error: e } = await supabase.from('stock_positions').delete().eq('id', id);
     if (!e) setPositions((prev) => prev.filter((p) => p.id !== id));
-    return { ok: !e, error: e?.message ?? null };
+    return { ok: !e, error: e ? dbMessage('stock_positions delete', e) : null };
   }, []);
 
   // Delete many positions at once (Select all / Delete selected / Delete all).
@@ -175,7 +182,7 @@ export function useStockPortfolio() {
     for (let i = 0; i < ids.length; i += 100) {
       const chunk = ids.slice(i, i + 100);
       const { error: e } = await supabase.from('stock_positions').delete().in('id', chunk);
-      if (e) { error = e.message; break; }
+      if (e) { error = dbMessage('stock_positions bulk delete', e); break; }
       deleted += chunk.length;
       setPositions((prev) => prev.filter((p) => !chunk.includes(p.id)));
     }
@@ -208,11 +215,11 @@ export function useStockPortfolio() {
       patch.exit_date = exits[exits.length - 1] || keep.exit_date;
     }
     const { error: ue } = await supabase.from('stock_positions').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', keep.id);
-    if (ue) return { ok: false, error: ue.message };
+    if (ue) return { ok: false, error: dbMessage('stock_positions combine', ue) };
     const others = rows.filter((p) => p.id !== keep.id).map((p) => p.id);
     const { error: de } = await supabase.from('stock_positions').delete().in('id', others);
     setPositions((prev) => prev.filter((p) => !others.includes(p.id)).map((p) => (p.id === keep.id ? { ...p, ...patch } : p)));
-    return { ok: !de, error: de?.message ?? null };
+    return { ok: !de, error: de ? dbMessage('stock_positions combine delete', de) : null };
   }, [positions]);
 
   // ── Quotes for open positions (saved prices; no Massive calls) ──
@@ -231,7 +238,8 @@ export function useStockPortfolio() {
       setQuotes(map);
       setQuotesNote((data?.refresh_note as string | null) ?? null);
     } catch (err) {
-      setError(`Could not load prices: ${err instanceof Error ? err.message : String(err)}`);
+      console.error('[refreshQuotes]', err);
+      setError('Could not load prices right now. Please try again.');
     } finally {
       setQuotesLoading(false);
     }

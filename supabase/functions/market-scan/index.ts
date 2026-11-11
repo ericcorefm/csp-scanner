@@ -166,6 +166,25 @@ async function fetchGroupedDailyPrices(
 
 type ChainStatus = 'success' | 'no_options' | 'api_error' | 'unauthorized' | 'rate_limited' | 'network_error';
 
+// Client-supplied ticker lists are untrusted: keep only well-formed symbols,
+// de-duplicate, and cap the batch so one request cannot fan out into
+// thousands of rate-limited provider calls.
+const MAX_CLIENT_SYMBOLS = 250;
+const TICKER_SHAPE = /^[A-Z][A-Z.\-]{0,9}$/;
+
+function sanitizeSymbols(input: unknown, limit = MAX_CLIENT_SYMBOLS): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== 'string' && typeof raw !== 'number') continue;
+    const sym = String(raw).toUpperCase().trim();
+    if (!TICKER_SHAPE.test(sym)) continue;
+    seen.add(sym);
+    if (seen.size >= limit) break;
+  }
+  return [...seen];
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -2157,9 +2176,7 @@ serve(async (req) => {
     let symbolList: { ticker: string; company_name: string | null }[];
     if (scanMode === 'universe') {
       // Use client-supplied symbols if provided; otherwise load from database.
-      const clientSymbols: string[] = Array.isArray(body.symbols)
-        ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean)
-        : [];
+      const clientSymbols: string[] = sanitizeSymbols(body.symbols);
       if (clientSymbols.length > 0) {
         symbolList = clientSymbols.map((t) => ({ ticker: t, company_name: null }));
         console.log(`[UNIVERSE SCAN REQUEST] mode=universe, symbols=${JSON.stringify(clientSymbols)}`);
@@ -2924,7 +2941,7 @@ async function runStockScan(body: any, apiKey: string, requestStart: number): Pr
   let symbolList: { ticker: string; company_name: string | null }[];
   if (singleTicker) symbolList = [{ ticker: singleTicker, company_name: null }];
   else if (scanMode === 'universe') {
-    const clientSymbols: string[] = Array.isArray(body.symbols) ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean) : [];
+    const clientSymbols: string[] = sanitizeSymbols(body.symbols);
     symbolList = clientSymbols.length ? clientSymbols.map((t) => ({ ticker: t, company_name: null })) : await fetchScanUniverse();
   } else {
     symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);
@@ -3342,7 +3359,7 @@ async function runSwing5Scan(body: any, apiKey: string, requestStart: number): P
   let symbolList: { ticker: string; company_name: string | null }[];
   if (singleTicker) symbolList = [{ ticker: singleTicker, company_name: null }];
   else if (scanMode === 'universe') {
-    const clientSymbols: string[] = Array.isArray(body.symbols) ? body.symbols.map((s: string) => String(s).toUpperCase().trim()).filter(Boolean) : [];
+    const clientSymbols: string[] = sanitizeSymbols(body.symbols);
     symbolList = clientSymbols.length ? clientSymbols.map((t) => ({ ticker: t, company_name: null })) : await fetchScanUniverse();
   } else {
     symbolList = await fetchMarketUniverse(MAX_DISCOVERY_SYMBOLS);

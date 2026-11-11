@@ -148,8 +148,8 @@ export function SettingsPage({ state }: { state: AppState }) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to save profile';
-      setSaveError(msg);
+      console.error('[saveProfile]', err);
+      setSaveError('Could not save your settings. Please try again.');
     }
   };
 
@@ -161,8 +161,8 @@ export function SettingsPage({ state }: { state: AppState }) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to reset profile';
-      setSaveError(msg);
+      console.error('[resetProfile]', err);
+      setSaveError('Could not reset your settings. Please try again.');
     }
   };
 

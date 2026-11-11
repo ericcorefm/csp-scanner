@@ -71,7 +71,10 @@ export function useStockScanner(universeSymbols: string[]) {
           }
         }
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load stock scanner data. Has the stock scanner migration been applied?');
+        if (!cancelled) {
+          console.error('[stock scanner load]', err);
+          setError('Could not load stock scanner data. Please refresh and try again.');
+        }
       } finally {
         if (!cancelled) setLoaded(true);
       }
@@ -86,7 +89,10 @@ export function useStockScanner(universeSymbols: string[]) {
     const merged: StockRules = { ...rules, swing5: fromSwing5 ? rules.swing5 : profile.rules.swing5 };
     const payload = { rules: merged, name: name ?? profile.name, updated_at: new Date().toISOString() };
     const { data, error: e } = await supabase.from('stock_profiles').update(payload).eq('id', profile.id).select().single();
-    if (e) return { ok: false, error: e.message };
+    if (e) {
+      console.error('[stock_profiles update]', e);
+      return { ok: false, error: 'Could not save your settings. Please try again.' };
+    }
     setProfile({ ...(data as StockProfile), rules: withDefaults((data as StockProfile).rules) });
     return { ok: true, error: null };
   }, [profile]);
@@ -171,7 +177,8 @@ export function useStockScanner(universeSymbols: string[]) {
       const cutoff = new Date(Date.now() - KEEP_SCANS_DAYS * 86400000).toISOString();
       await supabase.from('stock_scans').delete().eq('scan_mode', mode).lt('scanned_at', cutoff);
     } catch (err) {
-      setError(`Stock scan failed — showing previous results. (${err instanceof Error ? err.message : String(err)})`);
+      console.error('[stock scan]', err);
+      setError('Stock scan failed — showing previous results.');
       if (autoLoadRef.current) {
         autoErrorsRef.current += 1;
         if (autoErrorsRef.current >= AUTO_LOAD_MAX_ERRORS) {
@@ -238,7 +245,8 @@ export function useStockScanner(universeSymbols: string[]) {
       if (!data?.success) throw new Error(data?.error || 'Analyze failed');
       return { result: (data.results?.[0] as StockResult) ?? null, error: null, counts: data.counts as StockScanCounts };
     } catch (err) {
-      return { result: null, error: err instanceof Error ? err.message : String(err), counts: null };
+      console.error('[stock analyze]', err);
+      return { result: null, error: 'Could not analyze this ticker right now.', counts: null };
     } finally {
       setAnalyzing(false);
     }

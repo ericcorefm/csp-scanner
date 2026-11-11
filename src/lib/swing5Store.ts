@@ -88,7 +88,8 @@ export function useSwing5Scanner(stock: StockScannerState, universeSymbols: stri
       const cutoff = new Date(Date.now() - KEEP_SCANS_DAYS * 86400000).toISOString();
       await supabase.from('stock_scans').delete().eq('scan_mode', dbMode(m)).lt('scanned_at', cutoff);
     } catch (err) {
-      setError(`5-Day Swing scan failed — showing previous results. (${err instanceof Error ? err.message : String(err)})`);
+      console.error('[swing5 scan]', err);
+      setError('5-Day Swing scan failed — showing previous results.');
     } finally {
       setScanning(false);
     }
@@ -106,7 +107,8 @@ export function useSwing5Scanner(stock: StockScannerState, universeSymbols: stri
       if (!data?.success) throw new Error(data?.error || 'Check failed');
       return { result: (data.results?.[0] as Swing5Result) ?? null, error: null };
     } catch (err) {
-      return { result: null, error: err instanceof Error ? err.message : String(err) };
+      console.error('[swing5 analyze]', err);
+      return { result: null, error: 'Could not analyze this ticker right now.' };
     } finally {
       setAnalyzing(false);
     }

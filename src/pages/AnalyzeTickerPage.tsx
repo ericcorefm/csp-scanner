@@ -968,9 +968,7 @@ function AddPositionModal({
       }, 1500);
     } catch (err) {
       console.error('[AddPosition] Failed:', err);
-      const supabaseErr = err as { code?: string; message?: string; details?: string; hint?: string };
-      const msg = supabaseErr?.message || (err instanceof Error ? err.message : 'Failed to add position');
-      setSaveError(`Failed to add position: ${msg}`);
+      setSaveError('Failed to add position. Please try again.');
     } finally {
       setSaving(false);
     }
