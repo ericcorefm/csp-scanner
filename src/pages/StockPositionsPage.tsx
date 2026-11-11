@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Trash2, RotateCcw, X, Pencil, Download, Upload, Combine, Calculator } from 'lucide-react';
+import { Fragment, useCallback, useMemo, useRef, useState } from 'react';
+import { RefreshCw, Trash2, RotateCcw, X, Pencil, Download, Upload, Combine, Calculator, ChevronRight, ChevronDown } from 'lucide-react';
 import { useSort } from '@/lib/useSort';
 import { SortTh } from '@/components/SortTh';
 import { AverageCostCalculator, type CalcDefaults } from '@/components/AverageCostCalculator';
@@ -305,14 +305,42 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
   const [month, setMonth] = useState<string>('all');
   const [day, setDay] = useState<string>('all');
 
-  const openRows = useMemo(() => portfolio.openPositions.map((p) => {
-    const q = portfolio.quotes[p.ticker];
-    const price = q?.price ?? null;
-    const cost = p.entry_price * p.shares;
-    const value = price != null ? price * p.shares : null;
-    const pl = value != null ? value - cost : null;
-    return { p, price, cost, value, pl, plPct: pl != null ? (pl / cost) * 100 : null, held: daysBetween(p.entry_date, today), health: positionHealth(p, price) };
-  }), [portfolio.openPositions, portfolio.quotes, today]);
+  // Expanded tickers / trades (click ▸ to show the individual fills).
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpand = (key: string) => setExpanded((prev) => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n; });
+
+  // Open: one row per ticker. Every buy (fill) of that ticker is averaged in:
+  // total shares, share-weighted entry and target, earliest entry date.
+  const openRows = useMemo(() => {
+    const fillRow = (p: StockPosition) => {
+      const price = portfolio.quotes[p.ticker]?.price ?? null;
+      const cost = p.entry_price * p.shares;
+      const value = price != null ? price * p.shares : null;
+      const pl = value != null ? value - cost : null;
+      return { p, price, cost, value, pl, plPct: pl != null && cost > 0 ? (pl / cost) * 100 : null, held: daysBetween(p.entry_date, today), health: positionHealth(p, price) };
+    };
+    const byTicker = new Map<string, StockPosition[]>();
+    for (const p of portfolio.openPositions) {
+      const g = byTicker.get(p.ticker);
+      if (g) g.push(p); else byTicker.set(p.ticker, [p]);
+    }
+    return [...byTicker.values()].map((list) => {
+      const sorted = [...list].sort((a, b) => a.entry_date.localeCompare(b.entry_date));
+      const fills = sorted.map(fillRow);
+      if (list.length === 1) return { ...fills[0], ids: [list[0].id], fills };
+      const shares = list.reduce((a, f) => a + f.shares, 0);
+      const cost = list.reduce((a, f) => a + f.entry_price * f.shares, 0);
+      const withTarget = list.filter((f) => f.target_price != null);
+      const tShares = withTarget.reduce((a, f) => a + f.shares, 0);
+      const p: StockPosition = {
+        ...sorted[0],
+        shares,
+        entry_price: shares > 0 ? cost / shares : sorted[0].entry_price,
+        target_price: withTarget.length === list.length && tShares > 0 ? withTarget.reduce((a, f) => a + (f.target_price as number) * f.shares, 0) / tShares : sorted[0].target_price,
+      };
+      return { ...fillRow(p), ids: list.map((f) => f.id), fills };
+    });
+  }, [portfolio.openPositions, portfolio.quotes, today]);
 
   // All Trades: one row per ticker + exit date. Fills bought on one or several
   // days and sold together become ONE trade (share-weighted entry and exit
@@ -348,7 +376,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
       const held = p.exit_date ? Math.max(1, daysBetween(p.entry_date, p.exit_date)) : null;
       const ann = plPct != null && held ? Math.min(1000, (Math.pow(1 + plPct / 100, 365 / Math.max(5, held)) - 1) * 100) : null;
       const lastEntry = sorted[sorted.length - 1].entry_date;
-      return { p, ids: fills.map((f) => f.id), fills: fills.length, lastEntry, cost, pl, plPct, held, ann };
+      return { p, ids: fills.map((f) => f.id), fills: fills.length, fillList: sorted, lastEntry, cost, pl, plPct, held, ann };
     });
   }, [portfolio.closedPositions, consolidate]);
 
@@ -448,10 +476,10 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           { label: 'Need attention', value: String(openRows.filter((r) => ['Target hit', 'Stop hit', 'Cycle ended'].includes(r.health)).length), tone: 'text-amber-400' },
         ]} />
         <SelectionBar
-          total={openRows.length} label="open positions"
-          allIds={openRows.map((r) => r.p.id)}
-          selectedIds={openRows.filter((r) => selected.has(r.p.id)).map((r) => r.p.id)}
-          onSelectAll={() => setSelected(new Set(openRows.map((r) => r.p.id)))} onClear={clearSel} portfolio={portfolio}
+          total={openRows.flatMap((r) => r.ids).length} label="open rows (fills)"
+          allIds={openRows.flatMap((r) => r.ids)}
+          selectedIds={openRows.flatMap((r) => r.ids).filter((id) => selected.has(id))}
+          onSelectAll={() => setSelected(new Set(openRows.flatMap((r) => r.ids)))} onClear={clearSel} portfolio={portfolio}
         />
         {openRows.length === 0 ? (
           <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-sky-300">No open stock positions. Add one from Stock Candidates or Analyze, or use Import Excel.</div>
@@ -460,7 +488,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-900/80 text-xs text-slate-400">
-                  <th className="w-8 px-3 py-2.5"><input type="checkbox" aria-label="Select all" checked={openRows.length > 0 && openRows.every((r) => selected.has(r.p.id))} onChange={() => (openRows.every((r) => selected.has(r.p.id)) ? clearSel() : setSelected(new Set(openRows.map((r) => r.p.id))))} className="h-4 w-4 cursor-pointer accent-sky-500" /></th>
+                  <th className="w-8 px-3 py-2.5"><input type="checkbox" aria-label="Select all" checked={openRows.length > 0 && openRows.every((r) => r.ids.every((id) => selected.has(id)))} onChange={() => (openRows.every((r) => r.ids.every((id) => selected.has(id))) ? clearSel() : setSelected(new Set(openRows.flatMap((r) => r.ids))))} className="h-4 w-4 cursor-pointer accent-sky-500" /></th>
                   {th('Ticker', 'ticker', 'left')}{th('Status', 'status', 'left')}{th('Entry date', 'entry_date', 'left')}
                   {th('Held', 'held')}{th('Entry', 'entry')}{th('Shares', 'shares')}{th('Cost', 'cost')}
                   {th('Current', 'current')}{th('P/L', 'pl')}{th('P/L %', 'plPct')}{th('Target', 'target')}
@@ -468,42 +496,91 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                 </tr>
               </thead>
               <tbody>
-                {openSort.sorted.map(({ p, price, cost, pl, plPct, held, health }) => (
-                  <tr key={p.id} className={`border-b border-slate-800/60 ${selected.has(p.id) ? 'bg-sky-500/5' : ''}`}>
-                    <RowCheck checked={selected.has(p.id)} onChange={() => toggleSel(p.id)} />
-                    <td className="px-3 py-2 font-semibold text-slate-100"><TickerLink ticker={p.ticker} onAnalyze={onAnalyze} /></td>
-                    <td className="px-3 py-2"><Badge variant={HEALTH_VARIANT[health]}>{health}</Badge></td>
-                    <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${held > p.max_cycle_days ? 'text-amber-400' : 'text-slate-300'}`} title={`Max cycle: ${p.max_cycle_days} days`}>{held}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.entry_price)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.shares, 4)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-300">{money(cost)}</td>
-                    {(() => {
-                      const qd = portfolio.quotes[p.ticker]?.date ?? null;
-                      const stale = qd != null && latestQuoteDate != null && qd < latestQuoteDate;
-                      return (
+                {openSort.sorted.map(({ p, ids, fills, price, cost, pl, plPct, held, health }) => {
+                  const multi = fills.length > 1;
+                  const key = `open:${p.ticker}`;
+                  const isOpen = expanded.has(key);
+                  const allSel = ids.every((id) => selected.has(id));
+                  const toggleGroup = () => setSelected((prev) => {
+                    const n = new Set(prev);
+                    if (ids.every((id) => n.has(id))) ids.forEach((id) => n.delete(id)); else ids.forEach((id) => n.add(id));
+                    return n;
+                  });
+                  const qd = portfolio.quotes[p.ticker]?.date ?? null;
+                  const stale = qd != null && latestQuoteDate != null && qd < latestQuoteDate;
+                  const calcBtn = (q: StockPosition) => (
+                    <button
+                      onClick={() => setCalc({ ticker: q.ticker, avgCost: String(Number(q.entry_price.toFixed(4))), shares: String(Number(q.shares.toFixed(6))), price: price != null ? String(price) : '', priceDate: qd, additional: '0' })}
+                      className="mr-2 text-slate-500 hover:text-sky-400" title="Average cost calculator"
+                    >
+                      <Calculator className="inline h-4 w-4" />
+                    </button>
+                  );
+                  return (
+                    <Fragment key={key}>
+                      <tr className={`border-b border-slate-800/60 ${allSel ? 'bg-sky-500/5' : ''}`}>
+                        <RowCheck checked={allSel} onChange={toggleGroup} />
+                        <td className="px-3 py-2 font-semibold text-slate-100">
+                          {multi ? (
+                            <button onClick={() => toggleExpand(key)} className="mr-1 text-slate-500 hover:text-slate-200" title={isOpen ? 'Hide buys' : 'Show buys'}>
+                              {isOpen ? <ChevronDown className="inline h-4 w-4" /> : <ChevronRight className="inline h-4 w-4" />}
+                            </button>
+                          ) : <span className="mr-1 inline-block w-4" />}
+                          <TickerLink ticker={p.ticker} onAnalyze={onAnalyze} />
+                          {multi && <button onClick={() => toggleExpand(key)} className="ml-1.5 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-slate-400 hover:text-slate-200">{fills.length} buys</button>}
+                        </td>
+                        <td className="px-3 py-2"><Badge variant={HEALTH_VARIANT[health]}>{health}</Badge></td>
+                        <td className="px-3 py-2 text-slate-400">{p.entry_date}</td>
+                        <td className={`px-3 py-2 text-right tabular-nums ${held > p.max_cycle_days ? 'text-amber-400' : 'text-slate-300'}`} title={`Max cycle: ${p.max_cycle_days} days`}>{held}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-300" title={multi ? 'Share-weighted average entry' : undefined}>{formatNum(p.entry_price)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-300">{formatNum(p.shares, 4)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-300">{money(cost)}</td>
                         <td className={`px-3 py-2 text-right tabular-nums ${stale ? 'text-amber-400' : 'text-slate-100'}`} title={qd ? `Close of ${qd}${stale ? ' — older than the other prices' : ''}` : 'No saved price yet'}>
                           {price != null ? formatNum(price) : '--'}{stale && <span className="ml-1 text-[10px]">({qd!.slice(5)})</span>}
                         </td>
-                      );
-                    })()}
-                    <td className={`px-3 py-2 text-right tabular-nums font-medium ${plColor(pl)}`}>{money(pl)}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${plColor(plPct)}`}>{plPct != null ? formatPct(plPct, 2) : '--'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-sky-300">{p.target_price != null ? formatNum(p.target_price) : '--'}</td>
-                    <td className="whitespace-nowrap px-3 py-2 text-right">
-                      {editBtn(p)}
-                      <button
-                        onClick={() => setCalc({ ticker: p.ticker, avgCost: String(p.entry_price), shares: String(p.shares), price: price != null ? String(price) : '', priceDate: portfolio.quotes[p.ticker]?.date ?? null, additional: '0' })}
-                        className="mr-2 text-slate-500 hover:text-sky-400" title="Average cost calculator"
-                      >
-                        <Calculator className="inline h-4 w-4" />
-                      </button>
-                      <button onClick={() => { if (confirm(`Delete ${p.ticker} position?`)) void portfolio.deletePosition(p.id); }} className="text-slate-500 hover:text-red-400" title="Delete">
-                        <Trash2 className="inline h-4 w-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                        <td className={`px-3 py-2 text-right tabular-nums font-medium ${plColor(pl)}`}>{money(pl)}</td>
+                        <td className={`px-3 py-2 text-right tabular-nums ${plColor(plPct)}`}>{plPct != null ? formatPct(plPct, 2) : '--'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-sky-300">{p.target_price != null ? formatNum(p.target_price) : '--'}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right">
+                          {multi ? (
+                            <button
+                              onClick={() => { if (confirm(`Permanently merge the ${fills.length} ${p.ticker} buys into one position (average entry ${formatNum(p.entry_price)}, ${formatNum(p.shares, 4)} shares)?`)) void portfolio.combinePositions(ids); }}
+                              className="mr-2 text-slate-500 hover:text-sky-400" title="Combine these buys into one saved position"
+                            >
+                              <Combine className="inline h-4 w-4" />
+                            </button>
+                          ) : editBtn(p)}
+                          {calcBtn(p)}
+                          <button onClick={() => { if (confirm(multi ? `Delete all ${fills.length} ${p.ticker} buys?` : `Delete ${p.ticker} position?`)) void portfolio.deletePositions(ids); }} className="text-slate-500 hover:text-red-400" title="Delete">
+                            <Trash2 className="inline h-4 w-4" />
+                          </button>
+                        </td>
+                      </tr>
+                      {multi && isOpen && fills.map((f) => (
+                        <tr key={f.p.id} className={`border-b border-slate-800/40 bg-slate-900/40 text-xs ${selected.has(f.p.id) ? 'bg-sky-500/5' : ''}`}>
+                          <RowCheck checked={selected.has(f.p.id)} onChange={() => toggleSel(f.p.id)} />
+                          <td className="py-1.5 pl-10 pr-3 text-slate-500">buy</td>
+                          <td className="px-3 py-1.5"><Badge variant={HEALTH_VARIANT[f.health]}>{f.health}</Badge></td>
+                          <td className="px-3 py-1.5 text-slate-400">{f.p.entry_date}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-400">{f.held}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-300">{formatNum(f.p.entry_price)}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-300">{formatNum(f.p.shares, 4)}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-300">{money(f.cost)}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-400">{f.price != null ? formatNum(f.price) : '--'}</td>
+                          <td className={`px-3 py-1.5 text-right tabular-nums ${plColor(f.pl)}`}>{money(f.pl)}</td>
+                          <td className={`px-3 py-1.5 text-right tabular-nums ${plColor(f.plPct)}`}>{f.plPct != null ? formatPct(f.plPct, 2) : '--'}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-sky-300/80">{f.p.target_price != null ? formatNum(f.p.target_price) : '--'}</td>
+                          <td className="whitespace-nowrap px-3 py-1.5 text-right">
+                            {editBtn(f.p)}
+                            <button onClick={() => { if (confirm(`Delete this ${f.p.ticker} buy (${formatNum(f.p.shares, 4)} sh @ ${formatNum(f.p.entry_price)})?`)) void portfolio.deletePosition(f.p.id); }} className="text-slate-500 hover:text-red-400" title="Delete this buy">
+                              <Trash2 className="inline h-3.5 w-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -614,7 +691,9 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
               </tr>
             </thead>
             <tbody>
-              {closedSort.sorted.map(({ p, ids, fills, lastEntry, cost, pl, plPct, held, ann }) => {
+              {closedSort.sorted.map(({ p, ids, fills, fillList, lastEntry, cost, pl, plPct, held, ann }) => {
+                const ckey = `closed:${ids.join(',')}`;
+                const cOpen = expanded.has(ckey);
                 const allSel = ids.every((id) => selected.has(id));
                 const toggleGroup = () => setSelected((prev) => {
                   const n = new Set(prev);
@@ -622,11 +701,17 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                   return n;
                 });
                 return (
-                <tr key={ids.join(',')} className={`border-b border-slate-800/60 ${allSel ? 'bg-sky-500/5' : ''}`}>
+                <Fragment key={ckey}>
+                <tr className={`border-b border-slate-800/60 ${allSel ? 'bg-sky-500/5' : ''}`}>
                   <RowCheck checked={allSel} onChange={toggleGroup} />
                   <td className="px-3 py-2 font-semibold text-slate-100">
+                    {fills > 1 ? (
+                      <button onClick={() => toggleExpand(ckey)} className="mr-1 text-slate-500 hover:text-slate-200" title={cOpen ? 'Hide sells' : 'Show sells'}>
+                        {cOpen ? <ChevronDown className="inline h-4 w-4" /> : <ChevronRight className="inline h-4 w-4" />}
+                      </button>
+                    ) : <span className="mr-1 inline-block w-4" />}
                     <TickerLink ticker={p.ticker} onAnalyze={onAnalyze} />
-                    {fills > 1 && <span className="ml-1.5 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-slate-400" title="Rows averaged into this trade">{fills} fills</span>}
+                    {fills > 1 && <button onClick={() => toggleExpand(ckey)} className="ml-1.5 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-slate-400 hover:text-slate-200" title="Rows averaged into this trade">{fills} fills</button>}
                   </td>
                   <td className="px-3 py-2"><Badge variant={(pl ?? 0) > 0 ? 'success' : 'error'}>{(pl ?? 0) > 0 ? 'Win' : 'Loss'}</Badge></td>
                   <td className="px-3 py-2 text-slate-400" title={fills > 1 && lastEntry !== p.entry_date ? `Bought ${p.entry_date} to ${lastEntry}` : undefined}>
@@ -662,6 +747,34 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                     )}
                   </td>
                 </tr>
+                {fills > 1 && cOpen && fillList.map((f) => {
+                  const fc = f.entry_price * f.shares;
+                  const fpl = f.exit_price != null ? (f.exit_price - f.entry_price) * f.shares : null;
+                  const fpct = fpl != null && fc > 0 ? (fpl / fc) * 100 : null;
+                  return (
+                    <tr key={f.id} className={`border-b border-slate-800/40 bg-slate-900/40 text-xs ${selected.has(f.id) ? 'bg-sky-500/5' : ''}`}>
+                      <RowCheck checked={selected.has(f.id)} onChange={() => toggleSel(f.id)} />
+                      <td className="py-1.5 pl-10 pr-3 text-slate-500">sell</td>
+                      <td className="px-3 py-1.5" />
+                      <td className="px-3 py-1.5 text-slate-400">{f.entry_date}</td>
+                      <td className="px-3 py-1.5 text-slate-400">{f.exit_date ?? '--'}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-slate-400">{f.exit_date ? Math.max(1, daysBetween(f.entry_date, f.exit_date)) : '--'}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-slate-300">{formatNum(f.entry_price)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-slate-300">{f.exit_price != null ? formatNum(f.exit_price) : '--'}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-slate-300">{formatNum(f.shares, 4)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-slate-300">{money(fc)}</td>
+                      <td className={`px-3 py-1.5 text-right tabular-nums ${plColor(fpl)}`}>{money(fpl)}</td>
+                      <td className={`px-3 py-1.5 text-right tabular-nums ${plColor(fpct)}`}>{fpct != null ? formatPct(fpct, 2) : '--'}</td>
+                      <td className="px-3 py-1.5" />
+                      <td className="whitespace-nowrap px-3 py-1.5 text-right">
+                        {editBtn(f)}
+                        <button onClick={() => void portfolio.reopenPosition(f.id)} className="mr-2 text-slate-500 hover:text-sky-400" title="Reopen this fill"><RotateCcw className="inline h-3.5 w-3.5" /></button>
+                        <button onClick={() => { if (confirm(`Delete this ${f.ticker} fill?`)) void portfolio.deletePosition(f.id); }} className="text-slate-500 hover:text-red-400" title="Delete this fill"><Trash2 className="inline h-3.5 w-3.5" /></button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                </Fragment>
                 );
               })}
             </tbody>
