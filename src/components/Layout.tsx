@@ -14,6 +14,7 @@ import {
   Search,
   Globe,
   LogOut,
+  UserCircle,
 } from 'lucide-react';
 import type { AppState } from '@/lib/store';
 import type { StockScannerState } from '@/lib/stockStore';
@@ -21,7 +22,7 @@ import { Badge } from '@/components/ui';
 import { selectBestContractPerTicker } from '@/lib/bestContract';
 import { isQualified, isRejected } from '@/lib/status';
 
-export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe';
+export type Page = 'candidates' | 'analyze' | 'detail' | 'open' | 'closed' | 'settings' | 'summary' | 'universe' | 'account';
 export type ScannerKind = 'options' | 'stocks';
 
 interface LayoutProps {
@@ -47,6 +48,7 @@ const navItems: { id: Page; label: string; icon: LucideIcon }[] = [
   { id: 'closed', label: 'Closed Positions', icon: CheckCircle2 },
   { id: 'summary', label: 'Daily Summary', icon: CalendarDays },
   { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'account', label: 'Account', icon: UserCircle },
 ];
 
 export function Layout({ children, currentPage, onNavigate, state, scanner, onScannerChange, stock, stockOpenCount = 0, swing5Header = null, userEmail, onSignOut }: LayoutProps) {
@@ -64,6 +66,7 @@ export function Layout({ children, currentPage, onNavigate, state, scanner, onSc
   const STOCK_LABELS: Partial<Record<Page, string>> = {
     candidates: 'Stock Candidates', settings: 'Stock Settings', analyze: 'Analyze Stock',
     universe: 'Stock Universe', open: 'Open Stock Positions', closed: 'Closed Stock Positions', summary: 'Stock Summary',
+    account: 'Account',
   };
   const labelFor = (id: Page, fallback: string) => (isStocks ? STOCK_LABELS[id] ?? fallback : fallback);
   const lastScanAt = s5 ? s5.lastScanAt : isStocks ? stock.lastScanAt : state.lastScanAt;

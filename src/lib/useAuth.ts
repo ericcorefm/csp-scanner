@@ -54,5 +54,20 @@ export function useAuth() {
     if (error) throw error;
   }, []);
 
-  return { user, loading, view, setView, signIn, signUp, signOut, resetPasswordForEmail, updatePassword };
+  const updateEmail = useCallback(async (email: string) => {
+    const { error } = await supabase.auth.updateUser({ email });
+    if (error) throw error;
+  }, []);
+
+  const updateDisplayName = useCallback(async (name: string) => {
+    const { data: { user: u } } = await supabase.auth.getUser();
+    if (!u) throw new Error('Not authenticated');
+    const { error } = await supabase
+      .from('user_profiles')
+      .update({ display_name: name })
+      .eq('user_id', u.id);
+    if (error) throw error;
+  }, []);
+
+  return { user, loading, view, setView, signIn, signUp, signOut, resetPasswordForEmail, updatePassword, updateEmail, updateDisplayName };
 }

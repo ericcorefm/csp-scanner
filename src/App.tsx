@@ -22,8 +22,9 @@ import { ScanUniversePage } from '@/pages/ScanUniversePage';
 import { AnalyzeTickerPage } from '@/pages/AnalyzeTickerPage';
 import { useAuth } from '@/lib/useAuth';
 import { AuthPage, ResetPasswordPage } from '@/pages/AuthPage';
+import { AccountSettingsPage } from '@/pages/AccountSettingsPage';
 
-function AuthenticatedApp({ userEmail, onSignOut }: { userEmail: string; onSignOut: () => Promise<void> }) {
+function AuthenticatedApp({ userEmail, onSignOut, onUpdateEmail, onUpdateDisplayName, onUpdatePassword }: { userEmail: string; onSignOut: () => Promise<void>; onUpdateEmail: (email: string) => Promise<void>; onUpdateDisplayName: (name: string) => Promise<void>; onUpdatePassword: (password: string) => Promise<void> }) {
   const [currentPage, setCurrentPage] = useState<Page>('candidates');
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
@@ -143,12 +144,13 @@ function AuthenticatedApp({ userEmail, onSignOut }: { userEmail: string; onSignO
       {!isStocks && currentPage === 'settings' && <SettingsPage state={state} />}
       {!isStocks && currentPage === 'summary' && <DailySummaryPage state={state} />}
       {!isStocks && currentPage === 'universe' && <ScanUniversePage state={state} onNavigate={handleNavigate} />}
+      {currentPage === 'account' && <AccountSettingsPage userEmail={userEmail} onUpdateEmail={onUpdateEmail} onUpdateDisplayName={onUpdateDisplayName} onUpdatePassword={onUpdatePassword} />}
     </Layout>
   );
 }
 
 function App() {
-  const { user, loading, view, setView, signIn, signUp, signOut, resetPasswordForEmail, updatePassword } = useAuth();
+  const { user, loading, view, setView, signIn, signUp, signOut, resetPasswordForEmail, updatePassword, updateEmail, updateDisplayName } = useAuth();
 
   if (loading) {
     return (
@@ -174,7 +176,7 @@ function App() {
     return <AuthPage onSignIn={signIn} onSignUp={signUp} onResetPassword={resetPasswordForEmail} />;
   }
 
-  return <AuthenticatedApp userEmail={user.email ?? ''} onSignOut={signOut} />;
+  return <AuthenticatedApp userEmail={user.email ?? ''} onSignOut={signOut} onUpdateEmail={updateEmail} onUpdateDisplayName={updateDisplayName} onUpdatePassword={updatePassword} />;
 }
 
 export default App;
