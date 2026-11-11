@@ -475,6 +475,10 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           { label: 'Unrealized %', value: invested > 0 ? formatPct((pl / invested) * 100, 2) : '--', tone: plColor(pl) },
           { label: 'Need attention', value: String(openRows.filter((r) => ['Target hit', 'Stop hit', 'Cycle ended'].includes(r.health)).length), tone: 'text-amber-400' },
         ]} />
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={() => setExpanded(new Set(openRows.map((r) => `open:${r.p.ticker}`)))} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Expand all buys</button>
+          <button onClick={() => setExpanded(new Set())} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Collapse all</button>
+        </div>
         <SelectionBar
           total={openRows.flatMap((r) => r.ids).length} label="open rows (fills)"
           allIds={openRows.flatMap((r) => r.ids)}
@@ -521,11 +525,9 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                       <tr className={`border-b border-slate-800/60 ${allSel ? 'bg-sky-500/5' : ''}`}>
                         <RowCheck checked={allSel} onChange={toggleGroup} />
                         <td className="px-3 py-2 font-semibold text-slate-100">
-                          {multi ? (
-                            <button onClick={() => toggleExpand(key)} className="mr-1 text-slate-500 hover:text-slate-200" title={isOpen ? 'Hide buys' : 'Show buys'}>
-                              {isOpen ? <ChevronDown className="inline h-4 w-4" /> : <ChevronRight className="inline h-4 w-4" />}
-                            </button>
-                          ) : <span className="mr-1 inline-block w-4" />}
+                          <button onClick={() => toggleExpand(key)} className="mr-1 text-slate-500 hover:text-slate-200" title={isOpen ? 'Hide buys' : 'Show buys'}>
+                            {isOpen ? <ChevronDown className="inline h-4 w-4" /> : <ChevronRight className="inline h-4 w-4" />}
+                          </button>
                           <TickerLink ticker={p.ticker} onAnalyze={onAnalyze} />
                           {multi && <button onClick={() => toggleExpand(key)} className="ml-1.5 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-slate-400 hover:text-slate-200">{fills.length} buys</button>}
                         </td>
@@ -556,7 +558,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                           </button>
                         </td>
                       </tr>
-                      {multi && isOpen && fills.map((f) => (
+                      {isOpen && fills.map((f) => (
                         <tr key={f.p.id} className={`border-b border-slate-800/40 bg-slate-900/40 text-xs ${selected.has(f.p.id) ? 'bg-sky-500/5' : ''}`}>
                           <RowCheck checked={selected.has(f.p.id)} onChange={() => toggleSel(f.p.id)} />
                           <td className="py-1.5 pl-10 pr-3 text-slate-500">buy</td>
@@ -673,6 +675,10 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
           <input type="checkbox" checked={!consolidate} onChange={(e) => setConsolidate(!e.target.checked)} className="h-4 w-4 accent-sky-500" />
           Show individual fills (otherwise fills of the same ticker sold on the same day are shown as one averaged trade)
         </label>
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={() => setExpanded(new Set(closedRows.map((r) => `closed:${r.ids.join(',')}`)))} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Expand all sells</button>
+          <button onClick={() => setExpanded(new Set())} className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">Collapse all</button>
+        </div>
         <SelectionBar
           total={closedRows.flatMap((r) => r.ids).length} label="closed rows"
           allIds={closedRows.flatMap((r) => r.ids)}
@@ -705,11 +711,9 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                 <tr className={`border-b border-slate-800/60 ${allSel ? 'bg-sky-500/5' : ''}`}>
                   <RowCheck checked={allSel} onChange={toggleGroup} />
                   <td className="px-3 py-2 font-semibold text-slate-100">
-                    {fills > 1 ? (
-                      <button onClick={() => toggleExpand(ckey)} className="mr-1 text-slate-500 hover:text-slate-200" title={cOpen ? 'Hide sells' : 'Show sells'}>
-                        {cOpen ? <ChevronDown className="inline h-4 w-4" /> : <ChevronRight className="inline h-4 w-4" />}
-                      </button>
-                    ) : <span className="mr-1 inline-block w-4" />}
+                    <button onClick={() => toggleExpand(ckey)} className="mr-1 text-slate-500 hover:text-slate-200" title={cOpen ? 'Hide sells' : 'Show sells'}>
+                      {cOpen ? <ChevronDown className="inline h-4 w-4" /> : <ChevronRight className="inline h-4 w-4" />}
+                    </button>
                     <TickerLink ticker={p.ticker} onAnalyze={onAnalyze} />
                     {fills > 1 && <button onClick={() => toggleExpand(ckey)} className="ml-1.5 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-slate-400 hover:text-slate-200" title="Rows averaged into this trade">{fills} fills</button>}
                   </td>
@@ -747,7 +751,7 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
                     )}
                   </td>
                 </tr>
-                {fills > 1 && cOpen && fillList.map((f) => {
+                {cOpen && fillList.map((f) => {
                   const fc = f.entry_price * f.shares;
                   const fpl = f.exit_price != null ? (f.exit_price - f.entry_price) * f.shares : null;
                   const fpct = fpl != null && fc > 0 ? (fpl / fc) * 100 : null;
