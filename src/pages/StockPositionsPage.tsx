@@ -21,7 +21,7 @@ const plColor = (v: number | null | undefined) => (v == null ? 'text-slate-400' 
 
 function Summary({ items }: { items: { label: string; value: string; tone?: string }[] }) {
   return (
-    <div className={`grid grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-slate-900/50 px-5 py-3 md:grid-cols-4 ${items.length > 7 ? 'lg:grid-cols-8' : items.length > 6 ? 'lg:grid-cols-7' : 'lg:grid-cols-6'}`}>
+    <div className={`grid grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-slate-900/50 px-5 py-3 md:grid-cols-4 ${items.length > 8 ? 'lg:grid-cols-9' : items.length > 7 ? 'lg:grid-cols-8' : items.length > 6 ? 'lg:grid-cols-7' : 'lg:grid-cols-6'}`}>
       {items.map((i) => (
         <div key={i.label} className="text-center">
           <div className="text-xs text-slate-500">{i.label}</div>
@@ -713,6 +713,11 @@ export function StockPositionsPage({ portfolio, view, onAnalyze }: { portfolio: 
         { label: 'Total investment', value: money(closedRows.reduce((a, r) => a + r.cost, 0)) },
         { label: 'Avg investment', value: closedRows.length ? money(closedRows.reduce((a, r) => a + r.cost, 0) / closedRows.length) : '--' },
         { label: day !== 'all' ? `Realized P/L · ${day}` : month === 'all' ? 'Realized P/L' : `Realized P/L · ${monthLabel(month)}`, value: money(realized), tone: plColor(realized) },
+        (() => {
+          // Realized P/L ÷ number of distinct days with at least one closed trade.
+          const tradeDays = new Set(closedRows.map((r) => r.p.exit_date).filter(Boolean)).size;
+          return { label: `Avg income / day${tradeDays ? ` (${tradeDays} day${tradeDays === 1 ? '' : 's'})` : ''}`, value: tradeDays ? money(realized / tradeDays) : '--', tone: plColor(realized) };
+        })(),
         { label: 'Win rate', value: closedRows.length ? formatPct((wins / closedRows.length) * 100, 0) : '--' },
         { label: 'Avg return / trade', value: avgPct != null ? formatPct(avgPct, 2) : '--', tone: plColor(avgPct) },
         { label: 'Avg days held', value: avgDays != null ? formatNum(avgDays, 1) : '--' },
